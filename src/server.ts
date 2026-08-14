@@ -21,6 +21,7 @@ async function shutdown(signal: string): Promise<void> {
     logger.error('Shutdown timed out', { timeoutMs: env.SHUTDOWN_TIMEOUT_MS });
     process.exit(1);
   }, env.SHUTDOWN_TIMEOUT_MS);
+  timeout.unref();
 
   server.close(async (err) => {
     if (err) {
@@ -42,6 +43,15 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   void shutdown('SIGINT');
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled promise rejection', { reason });
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught exception', { error: err.message });
+  void shutdown('uncaughtException');
 });
 
 export default app;
