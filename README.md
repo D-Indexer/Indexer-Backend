@@ -235,6 +235,13 @@ CREATE TABLE IF NOT EXISTS indexer_state (
 ## Repository Structure
 
 ```text
+config/                         # Safe committed configuration examples
+database/                       # Schema docs, seeds, future raw migrations
+deploy/                         # Docker, Compose, and deployment scaffolding
+docs/                           # Architecture, API, operations, security, runbooks
+examples/                       # Safe usage examples
+monitoring/                     # Observability and alerting notes
+scripts/                        # Developer and maintenance scripts
 src/
 ├── server.ts                    # Express entry point
 ├── types/index.ts               # Shared TypeScript types
@@ -264,6 +271,7 @@ src/
     ├── folder.service.test.ts
     ├── indexer.test.ts
     └── upload.controller.test.ts
+tooling/                        # Tooling notes and future shared config
 ```
 
 ## Quick Start
