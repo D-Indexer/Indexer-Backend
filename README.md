@@ -354,14 +354,50 @@ The backend does not submit these transactions directly in the current codebase;
 
 ## Multi-Repo Architecture
 
-This repo is one part of the Folder system.
+This repo is one part of the Folder system. The backend is the integration layer between user-facing clients and on-chain Folder state.
+
+### Repository Inventory
+
+| Repository | Role | Primary responsibility |
+| ---------- | ---- | ---------------------- |
+| [`D-Indexer/Indexer-Backend`](https://github.com/D-Indexer/Indexer-Backend) | Backend / indexer | Express API, Soroban event indexing, PostgreSQL read cache, IPFS upload service |
+| `Folder-Frontend` | Frontend application | Portfolio editor, wallet authentication, template browser, profile rendering |
+| `Folder-Contract` | Soroban smart contracts | Folder ownership, template registry, credential linking, event source |
+
+`D-Indexer/Indexer-Backend` is verified from this repository's git remote. The frontend and contract names above are the architecture names documented by this repository; if their GitHub slugs differ or the repos are private, update these links when the canonical locations are available.
 
 ```text
 folder-org/
 ├── Folder-Frontend      # React/Vite portfolio UI, wallet auth, template browser
-├── D-Indexer-Backend    # TypeScript/Node.js API, indexer, IPFS integration
+├── Indexer-Backend      # TypeScript/Node.js API, indexer, IPFS integration
 └── Folder-Contract      # Rust/Soroban on-chain Folder logic
 ```
+
+### Repository Responsibilities
+
+#### D-Indexer/Indexer-Backend
+
+- exposes REST endpoints for folders, templates, credentials, uploads, and health
+- polls Soroban RPC for Folder contract events
+- stores indexed Folder state in PostgreSQL
+- pins uploaded portfolio files to IPFS
+- validates external input before persistence or upload
+
+#### Folder-Frontend
+
+- lets users create and edit Folder profiles
+- authenticates users with wallet/passkey flows
+- calls the backend REST API for indexed reads
+- uploads profile assets through the backend
+- submits user-approved contract transactions
+
+#### Folder-Contract
+
+- stores the canonical Folder ownership model
+- emits events consumed by the backend indexer
+- defines event names and topic ordering
+- owns template registration and deprecation semantics
+- provides the on-chain credential-linking source of truth
 
 ### Data Flow
 
@@ -388,22 +424,23 @@ sequenceDiagram
 
 ### Shared Contracts (must stay in sync across repos)
 
-| Contract | Backend dependency |
-| -------- | ------------------ |
-| Folder event names | `src/indexer/stellar.ts` switch cases |
-| Event topic ordering | Topic decoding and argument extraction in the indexer |
-| Folder response shape | `src/types/index.ts` and frontend API client |
-| Template identifiers | `templates.id`, `template_id`, and frontend template browser |
-| IPFS CID semantics | Upload response and contract metadata fields |
+| Contract surface | Owner | Consumers |
+| ---------------- | ----- | --------- |
+| Soroban event names and topic ordering | Folder-Contract | D-Indexer/Indexer-Backend |
+| REST response shapes | D-Indexer/Indexer-Backend | Folder-Frontend |
+| Upload CID semantics | D-Indexer/Indexer-Backend | Folder-Frontend, Folder-Contract |
+| Template IDs and metadata CIDs | Folder-Contract | D-Indexer/Indexer-Backend, Folder-Frontend |
+| Environment variables for API and contract IDs | Each deployed service | Deployment configuration |
 
 See [docs/events.md](docs/events.md) for the event indexing contract.
 
 ### Cross-Repo Change Protocol
 
-1. **Contract event change** — update `src/indexer/stellar.ts` in this repo at the same time.
-2. **API response change** — update the Folder frontend API client and any consuming UI.
-3. **Shared type change** — propagate the type update across backend, frontend, and contract documentation.
-4. **Environment variable change** — update `.env.example` and deployment configuration together.
+1. **Contract event change** — update `src/indexer/stellar.ts`, indexer tests, and event documentation.
+2. **API response change** — update frontend clients and `docs/api.md`.
+3. **Upload behavior change** — update backend validation, frontend upload handling, and security notes.
+4. **Template schema change** — update contract events, backend storage, and frontend rendering.
+5. **Environment variable change** — update `.env.example`, `docs/configuration.md`, and deployment settings.
 
 ## Testing
 
