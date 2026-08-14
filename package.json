@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Core API and indexing engine for Folder — handles off-chain data, IPFS uploads, metadata caching, and Stellar ledger hooks",
   "main": "dist/server.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc",
@@ -17,7 +20,6 @@
     "cors": "2.8.5",
     "dotenv": "16.4.5",
     "express": "4.19.2",
-    "kubo-rpc-client": "4.1.0",
     "multer": "1.4.5-lts.1",
     "pg": "8.12.0",
     "zod": "3.23.8"
