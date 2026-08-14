@@ -1,4 +1,4 @@
-# D-Indexer-Backend ⚙️
+# Indexer-Backend ⚙️
 
 [![CI](https://github.com/D-Indexer/D-Indexer-Backend/actions/workflows/ci.yml/badge.svg)](https://github.com/D-Indexer/D-Indexer-Backend/actions/workflows/ci.yml)
 [![Built on Stellar](https://img.shields.io/badge/Built%20on-Stellar-blue?logo=stellar)](https://stellar.org)
