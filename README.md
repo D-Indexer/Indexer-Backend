@@ -10,7 +10,7 @@ Core API and indexing engine for Folder — handling off-chain Folder data, IPFS
 
 ## Overview
 
-D-Indexer-Backend is the off-chain backbone of the Folder platform. It streams Soroban contract events from the Stellar ledger, indexes Folder records into PostgreSQL, pins portfolio files to IPFS, and exposes a REST API consumed by the Folder frontend.
+Indexer-Backend is the off-chain backbone of the Folder platform. It streams Soroban contract events from the Stellar ledger, indexes Folder records into PostgreSQL, pins portfolio files to IPFS, and exposes a REST API consumed by the Folder frontend.
 
 The Stellar ledger is the source of truth. PostgreSQL is a rebuildable read cache that keeps Folder lookups, template metadata, credential queries, and health checks fast for the application layer.
 
