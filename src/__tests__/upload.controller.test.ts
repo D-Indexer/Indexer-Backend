@@ -1,24 +1,25 @@
 import { Request, Response } from 'express';
-import * as ipfsService from '../../services/ipfs';
-import { upload } from '../../controllers/upload.controller';
+import { upload } from '../controllers/upload.controller';
+import { invokeHandler, mockResponse } from './testUtils';
+import { pinFile } from '../services/ipfs';
 
-jest.mock('../../services/ipfs');
-const mockPin = ipfsService.pinFile as jest.Mock;
+jest.mock('../services/ipfs', () => ({
+  pinFile: jest.fn(),
+}));
 
-const mockRes = () => {
-  const res = {} as Response;
-  res.status = jest.fn().mockReturnValue(res);
-  res.json = jest.fn().mockReturnValue(res);
-  return res;
-};
+const mockPin = pinFile as jest.Mock;
 
 describe('upload controller', () => {
+  afterEach(() => jest.clearAllMocks());
+
   it('returns 400 when no file attached', async () => {
     const req = {} as Request;
-    const res = mockRes();
-    // asyncHandler unwraps — call the inner fn directly via the route
-    // TODO: wire supertest for full integration test
-    expect(req).toBeDefined(); // placeholder
+    const res = mockResponse();
+
+    const { next } = await invokeHandler(upload, req, res);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400 }));
+    expect(mockPin).not.toHaveBeenCalled();
   });
 
   it('returns cid on successful upload', async () => {
@@ -26,8 +27,24 @@ describe('upload controller', () => {
     const req = {
       file: { buffer: Buffer.from('data'), originalname: 'test.png', mimetype: 'image/png', size: 100 },
     } as unknown as Request;
-    const res = mockRes();
-    // TODO: call handler and assert res.json({ cid: 'QmTestCID' })
-    expect(mockPin).toBeDefined(); // placeholder
+    const res = mockResponse();
+
+    const { next } = await invokeHandler(upload, req, res);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(mockPin).toHaveBeenCalledWith(Buffer.from('data'), 'test.png');
+    expect(res.json).toHaveBeenCalledWith({ cid: 'QmTestCID' });
+  });
+
+  it('rejects unsupported file types', async () => {
+    const req = {
+      file: { buffer: Buffer.from('data'), originalname: 'test.exe', mimetype: 'application/x-msdownload', size: 100 },
+    } as unknown as Request;
+    const res = mockResponse();
+
+    const { next } = await invokeHandler(upload, req, res);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400 }));
+    expect(mockPin).not.toHaveBeenCalled();
   });
 });

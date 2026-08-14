@@ -1,6 +1,8 @@
 import { create } from 'kubo-rpc-client';
+import { getEnv } from '../config/env';
 
-const client = create({ url: process.env.IPFS_API_URL! });
+const env = getEnv();
+const client = create({ url: env.IPFS_API_URL });
 
 export async function pinFile(buffer: Buffer, filename: string): Promise<string> {
   const result = await client.add({ path: filename, content: buffer });
@@ -9,5 +11,5 @@ export async function pinFile(buffer: Buffer, filename: string): Promise<string>
 }
 
 export async function resolveUrl(cid: string): Promise<string> {
-  return `${process.env.IPFS_GATEWAY}/${cid}`;
+  return new URL(cid, `${env.IPFS_GATEWAY.replace(/\/$/, '')}/`).toString();
 }

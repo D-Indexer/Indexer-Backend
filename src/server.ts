@@ -1,30 +1,47 @@
 import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import folderRoutes from './routes/folder.routes';
-import templateRoutes from './routes/template.routes';
-import uploadRoutes from './routes/upload.routes';
-import healthRoutes from './routes/health.routes';
-import { errorHandler } from './middleware/errorHandler';
+import { createApp } from './app';
+import { getEnv } from './config/env';
+import pool from './db/client';
 import { startIndexer } from './indexer/stellar';
+import { logger } from './utils/logger';
 
-const app = express();
-const PORT = process.env.PORT ?? 3000;
+const env = getEnv();
+const app = createApp(env);
+const indexer = startIndexer();
 
-app.use(cors());
-app.use(express.json());
+const server = app.listen(env.PORT, () => {
+  logger.info('Server started', { port: env.PORT, nodeEnv: env.NODE_ENV });
+});
 
-app.use('/folders', folderRoutes);
-app.use('/templates', templateRoutes);
-app.use('/upload', uploadRoutes);
-app.use('/health', healthRoutes);
+async function shutdown(signal: string): Promise<void> {
+  logger.info('Shutdown requested', { signal });
+  indexer.stop();
 
-// Global error handler — must be last
-app.use(errorHandler);
+  const timeout = setTimeout(() => {
+    logger.error('Shutdown timed out', { timeoutMs: env.SHUTDOWN_TIMEOUT_MS });
+    process.exit(1);
+  }, env.SHUTDOWN_TIMEOUT_MS);
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  startIndexer();
+  server.close(async (err) => {
+    if (err) {
+      logger.error('HTTP server close failed', { error: err.message });
+      clearTimeout(timeout);
+      process.exit(1);
+    }
+
+    await pool.end();
+    clearTimeout(timeout);
+    logger.info('Shutdown complete');
+    process.exit(0);
+  });
+}
+
+process.on('SIGTERM', () => {
+  void shutdown('SIGTERM');
+});
+
+process.on('SIGINT', () => {
+  void shutdown('SIGINT');
 });
 
 export default app;

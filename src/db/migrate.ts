@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import pool from './client';
+import { logger } from '../utils/logger';
 
-const sql = `
+export const migrationSql = `
 CREATE TABLE IF NOT EXISTS folders (
   owner       TEXT PRIMARY KEY,
   name        TEXT UNIQUE NOT NULL,
@@ -19,6 +20,9 @@ CREATE TABLE IF NOT EXISTS credentials (
   UNIQUE (owner, platform)
 );
 
+CREATE INDEX IF NOT EXISTS idx_credentials_owner_linked_at
+  ON credentials (owner, linked_at DESC);
+
 CREATE TABLE IF NOT EXISTS templates (
   id           SERIAL PRIMARY KEY,
   metadata_cid TEXT NOT NULL,
@@ -32,8 +36,20 @@ CREATE TABLE IF NOT EXISTS indexer_state (
 );
 `;
 
-(async () => {
-  await pool.query(sql);
-  console.log('Migrations applied');
-  await pool.end();
-})();
+export async function migrate(): Promise<void> {
+  await pool.query(migrationSql);
+}
+
+if (require.main === module) {
+  migrate()
+    .then(() => {
+      logger.info('Migrations applied');
+    })
+    .catch((err) => {
+      logger.error('Migration failed', { error: err instanceof Error ? err.message : err });
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await pool.end();
+    });
+}

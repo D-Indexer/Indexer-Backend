@@ -8,6 +8,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "jest --runInBand",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
     "db:migrate": "node -r ts-node/register src/db/migrate.ts"
   },
   "dependencies": {

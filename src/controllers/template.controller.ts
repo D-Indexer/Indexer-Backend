@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import * as templateService from '../services/template';
 import { asyncHandler } from '../middleware/asyncHandler';
+import { badRequest, notFound } from '../http/errors';
+import { templateIdSchema } from '../validation/schemas';
 
 export const list = asyncHandler(async (_req: Request, res: Response) => {
   const templates = await templateService.listTemplates();
@@ -8,7 +10,10 @@ export const list = asyncHandler(async (_req: Request, res: Response) => {
 });
 
 export const getOne = asyncHandler(async (req: Request, res: Response) => {
-  const template = await templateService.getTemplate(Number(req.params.id));
-  if (!template) return res.status(404).json({ error: 'Template not found' });
+  const parsed = templateIdSchema.safeParse(req.params.id);
+  if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
+
+  const template = await templateService.getTemplate(Number(parsed.data));
+  if (!template) throw notFound('Template not found');
   res.json(template);
 });
