@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS folders (
 
 CREATE TABLE IF NOT EXISTS credentials (
   id          SERIAL PRIMARY KEY,
-  owner       TEXT NOT NULL REFERENCES folders(owner),
+  owner       TEXT NOT NULL REFERENCES folders(owner) ON UPDATE CASCADE ON DELETE CASCADE,
   platform    TEXT NOT NULL,
   proof_hash  TEXT NOT NULL,
   linked_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
