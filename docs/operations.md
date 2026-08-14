@@ -61,3 +61,7 @@ PostgreSQL is a read cache. To rebuild:
 | indexer logs repeated failures | RPC or contract config issue | `STELLAR_RPC_URL`, `FOLDER_CONTRACT_ID` |
 | uploads fail | IPFS RPC unavailable | `IPFS_API_URL`, Kubo daemon |
 | CORS failures | missing frontend origin | `CORS_ORIGIN` |
+
+## Runtime Import Check
+
+CI verifies that the compiled production app can be imported with Node after `npm run build`. This catches CommonJS/ESM runtime mismatches before deployment.

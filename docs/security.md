@@ -29,6 +29,8 @@ Keep these out of source control:
 
 Uploads are validated by MIME type and size before pinning. The service currently trusts the MIME type provided by the multipart parser. If upload trust requirements increase, add content sniffing before pinning.
 
+Multer file size failures are normalized to `400` responses so clients receive a validation error instead of a generic server error.
+
 ## CORS
 
 By default, development allows any origin. Production deployments should set `CORS_ORIGIN` to a comma-separated allowlist.
