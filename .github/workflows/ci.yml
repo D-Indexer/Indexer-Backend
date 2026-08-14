@@ -31,3 +31,14 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Verify production entrypoint imports
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://user:password@localhost:5432/folder_test
+          STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+          STELLAR_NETWORK_PASSPHRASE: Test SDF Network ; September 2015
+          FOLDER_CONTRACT_ID: CCONTRACT
+          IPFS_API_URL: http://localhost:5001
+          IPFS_GATEWAY: https://ipfs.io/ipfs
+        run: node -e "require('./dist/app')"
