@@ -5,3 +5,5 @@ dist
 *.log
 docs
 coverage
+*.md
+!README.md
