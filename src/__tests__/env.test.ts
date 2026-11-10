@@ -1,4 +1,4 @@
-import { loadEnv } from '../config/env';
+import { loadEnv, TESTNET_CONTRACT_ID } from '../config/env';
 
 const validEnv = {
   NODE_ENV: 'test',
@@ -6,7 +6,7 @@ const validEnv = {
   DATABASE_URL: 'postgresql://user:password@localhost:5432/folder_test',
   STELLAR_RPC_URL: 'https://soroban-testnet.stellar.org',
   STELLAR_NETWORK_PASSPHRASE: 'Test SDF Network ; September 2015',
-  FOLDER_CONTRACT_ID: 'CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV',
+  FOLDER_CONTRACT_ID: TESTNET_CONTRACT_ID,
   IPFS_API_URL: 'http://localhost:5001',
   IPFS_GATEWAY: 'https://ipfs.io/ipfs',
 };
@@ -24,6 +24,19 @@ describe('environment configuration', () => {
 
   it('rejects invalid urls', () => {
     expect(() => loadEnv({ ...validEnv, STELLAR_RPC_URL: 'not-a-url' })).toThrow(/STELLAR_RPC_URL/);
+  });
+
+  it.each(['FOLDER_CONTRACT_ID', 'STELLAR_RPC_URL'])('fails fast with a hint when %s is missing', (key) => {
+    const env: Record<string, string> = { ...validEnv };
+    delete env[key];
+    expect(() => loadEnv(env)).toThrow(new RegExp(`${key} is required \\(testnet: `));
+  });
+
+  it('rejects a FOLDER_CONTRACT_ID that is not a contract address', () => {
+    expect(() => loadEnv({ ...validEnv, FOLDER_CONTRACT_ID: 'CCONTRACT' })).toThrow(/contract address/);
+    expect(() =>
+      loadEnv({ ...validEnv, FOLDER_CONTRACT_ID: 'GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ' })
+    ).toThrow(/contract address/);
   });
 
   it('parses indexer tuning', () => {
