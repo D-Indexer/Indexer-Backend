@@ -34,4 +34,10 @@ describe('environment configuration', () => {
     expect(() => loadEnv({ ...validEnv, INDEXER_ON_RETENTION_GAP: 'ignore' })).toThrow();
   });
 
+  it('requires CORS_ORIGIN in production', () => {
+    expect(() => loadEnv({ ...validEnv, NODE_ENV: 'production' })).toThrow(/CORS_ORIGIN is required/);
+    expect(loadEnv({ ...validEnv, NODE_ENV: 'production', CORS_ORIGIN: 'https://folder.app' }).CORS_ORIGIN).toBe(
+      'https://folder.app'
+    );
+  });
 });

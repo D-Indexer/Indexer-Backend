@@ -32,6 +32,15 @@ const envSchema = z
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
     PUBLIC_BASE_URL: optionalUrl,
+  })
+  .superRefine((env, ctx) => {
+    if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['CORS_ORIGIN'],
+        message: 'CORS_ORIGIN is required in production (comma-separated origins, or * to allow all)',
+      });
+    }
   });
 
 export type AppEnv = z.infer<typeof envSchema>;
