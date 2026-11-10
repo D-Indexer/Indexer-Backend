@@ -9,9 +9,12 @@ declare global {
   }
 }
 
+/** Incoming ids are reflected into headers and logs, so only accept short, plain tokens. */
+const VALID_REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+
 export const requestId: RequestHandler = (req, res, next) => {
-  const incoming = req.header('x-request-id');
-  req.id = incoming && incoming.trim().length > 0 ? incoming : randomUUID();
+  const incoming = req.header('x-request-id')?.trim();
+  req.id = incoming && VALID_REQUEST_ID.test(incoming) ? incoming : randomUUID();
   res.setHeader('x-request-id', req.id);
   next();
 };

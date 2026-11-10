@@ -1,28 +1,26 @@
+/** A claimed Folder identity (contract event `folder_cl`). */
 export interface Folder {
   owner: string;
   name: string;
-  cid: string;
-  templateId: number;
+  /** Owner's selected template (`tmpl_set` / `port_mint`), null until one is chosen. */
+  templateId: number | null;
+  claimedAt: Date;
   updatedAt: Date;
 }
 
-export interface Credential {
-  owner: string;
-  platform: string;
-  proofHash: string;
-  linkedAt: Date;
-}
-
+/** A registered template (contract event `tmpl_reg`). */
 export interface Template {
   id: number;
-  metadataCid: string;
-  deprecated: boolean;
-  createdAt: Date;
+  metadataUri: string;
+  creator: string | null;
+  registeredAt: Date;
 }
 
-export interface SorobanEvent {
-  type: string;
-  contractId: string;
-  ledger: number;
-  data: Record<string, unknown>;
+/** A minted portfolio NFT (contract events `port_mint` / `port_upd` / `tmpl_set`). */
+export interface Portfolio {
+  owner: string;
+  templateId: number;
+  ipfsCid: string;
+  mintedAt: Date;
+  updatedAt: Date;
 }

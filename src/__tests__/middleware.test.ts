@@ -18,6 +18,15 @@ describe('middleware', () => {
     expect(next).toHaveBeenCalled();
   });
 
+  it.each(['x'.repeat(129), 'bad id with spaces', 'inject\r\nheader'])(
+    'replaces unsafe incoming request id %#',
+    (incoming) => {
+      const req = { header: jest.fn().mockReturnValue(incoming) } as any;
+      requestId(req, mockResponse(), jest.fn());
+      expect(req.id).toMatch(/^[0-9a-f-]{36}$/);
+    }
+  );
+
   it('sets security headers', () => {
     const res = mockResponse();
     const next = jest.fn();
@@ -46,7 +55,12 @@ describe('middleware', () => {
     const res = mockResponse();
     const logSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    errorHandler(new HttpError(400, 'Bad input'), { id: 'req-123', method: 'GET', originalUrl: '/' } as any, res, jest.fn());
+    errorHandler(
+      new HttpError(400, 'Bad input'),
+      { id: 'req-123', method: 'GET', originalUrl: '/' } as any,
+      res,
+      jest.fn()
+    );
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({ error: 'Bad input', requestId: 'req-123' });

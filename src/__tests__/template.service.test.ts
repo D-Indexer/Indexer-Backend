@@ -7,21 +7,22 @@ const mockQuery = pool.query as jest.Mock;
 describe('template service', () => {
   afterEach(() => jest.clearAllMocks());
 
-  it('lists active templates in id order', async () => {
-    const createdAt = new Date();
+  it('lists templates in id order', async () => {
+    const registeredAt = new Date();
     mockQuery.mockResolvedValue({
-      rows: [{ id: 1, metadata_cid: 'QmTemplate', deprecated: false, created_at: createdAt }],
+      rows: [{ id: '1', metadata_uri: 'ipfs://bafy', creator: 'GADMIN', registered_at: registeredAt }],
     });
 
     const result = await templateService.listTemplates();
 
-    expect(mockQuery).toHaveBeenCalledWith('SELECT * FROM templates WHERE deprecated = FALSE ORDER BY id');
-    expect(result).toEqual([{ id: 1, metadataCid: 'QmTemplate', deprecated: false, createdAt }]);
+    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('FROM templates ORDER BY id'));
+    expect(result).toEqual([{ id: 1, metadataUri: 'ipfs://bafy', creator: 'GADMIN', registeredAt }]);
   });
 
   it('returns null when template is missing', async () => {
     mockQuery.mockResolvedValue({ rows: [] });
 
     await expect(templateService.getTemplate(9)).resolves.toBeNull();
+    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('WHERE id = $1'), [9]);
   });
 });
