@@ -190,16 +190,26 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
   }
 }
 
+type NextRequest = {
+  params: GetEventsParams;
+  /** True when the start point came from config on an empty database, not from indexed state. */
+  fromConfig: boolean;
+};
+
 async function nextRequest(
   deps: IndexerDependencies,
   state: Partial<Record<string, string>>
-): Promise<GetEventsParams> {
+): Promise<NextRequest> {
   const { contractId, pageLimit: limit } = deps.config;
-  if (state[STATE.cursor]) return { contractId, limit, cursor: state[STATE.cursor]! };
+  if (state[STATE.cursor]) {
+    return { params: { contractId, limit, cursor: state[STATE.cursor]! }, fromConfig: false };
+  }
 
   const fromState = Number(state[STATE.startLedger]);
-  if (fromState > 0) return { contractId, limit, startLedger: fromState };
-  if (deps.config.startLedger) return { contractId, limit, startLedger: deps.config.startLedger };
+  if (fromState > 0) return { params: { contractId, limit, startLedger: fromState }, fromConfig: false };
+  if (deps.config.startLedger) {
+    return { params: { contractId, limit, startLedger: deps.config.startLedger }, fromConfig: true };
+  }
 
   const { oldestLedger } = await deps.rpc.getHealth();
   logger.warn(
@@ -207,7 +217,7 @@ async function nextRequest(
       'Events before it are not indexed.',
     { startLedger: oldestLedger }
   );
-  return { contractId, limit, startLedger: oldestLedger };
+  return { params: { contractId, limit, startLedger: oldestLedger }, fromConfig: true };
 }
 
 function requestedLedger(params: GetEventsParams): number {
@@ -220,7 +230,7 @@ function requestedLedger(params: GetEventsParams): number {
  */
 export async function pollOnce(deps: IndexerDependencies): Promise<{ events: number; result: PageResult }> {
   const state = await readState(deps.db);
-  const params = await nextRequest(deps, state);
+  const { params, fromConfig } = await nextRequest(deps, state);
 
   let page: GetEventsResult;
   try {
@@ -231,17 +241,21 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
     if (requested >= err.oldestLedger) throw err; // ahead of the RPC, not a gap
     const gap = new RetentionGapError(requested, err.oldestLedger);
 
-    if (deps.config.onRetentionGap === 'halt') {
+    // On an empty database nothing indexed is being lost, so INDEXER_START_LEDGER
+    // being older than the window just means "as far back as possible".
+    if (deps.config.onRetentionGap === 'halt' && !fromConfig) {
       await writeState(deps.db, { [STATE.status]: 'retention_gap', [STATE.lastError]: gap.message });
       throw gap;
     }
 
-    // skip: resume from the oldest retained ledger and record what was missed.
+    // Resume from the oldest retained ledger and record what was missed.
     const resumeAt = err.oldestLedger + 1;
-    logger.warn('Retention gap: skipping to the oldest retained ledger (INDEXER_ON_RETENTION_GAP=skip)', {
-      missedFrom: requested,
-      resumeAt,
-    });
+    logger.warn(
+      fromConfig
+        ? 'INDEXER_START_LEDGER is older than the RPC retains; starting at the oldest retained ledger'
+        : 'Retention gap: skipping to the oldest retained ledger (INDEXER_ON_RETENTION_GAP=skip)',
+      { missedFrom: requested, resumeAt }
+    );
     await writeState(deps.db, {
       [STATE.lastGap]: JSON.stringify({
         missedFrom: requested,

@@ -186,6 +186,26 @@ describe('pollOnce', () => {
     expect(JSON.parse(gap!.params![1] as string)).toMatchObject({ missedFrom: 50, resumedAt: 101 });
   });
 
+  it('clamps an old INDEXER_START_LEDGER on an empty database instead of halting', async () => {
+    const { db, calls } = fakeDb();
+    const rpc = fakeRpc({
+      getEvents: jest
+        .fn()
+        .mockRejectedValueOnce(new LedgerRangeError('range', 100, 200))
+        .mockResolvedValueOnce(page([])),
+    });
+
+    await pollOnce({ db, rpc, config: { ...config, startLedger: 5 } });
+
+    expect(rpc.getEvents).toHaveBeenLastCalledWith({
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      startLedger: 101,
+    });
+    const gap = calls.find((c) => c.params?.[0] === 'last_gap');
+    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({ missedFrom: 5, resumedAt: 101 });
+  });
+
   it('does not treat a start ledger ahead of the RPC as a retention gap', async () => {
     const { db } = fakeDb({ state: { start_ledger: '300' } });
     const rangeError = new LedgerRangeError('range', 100, 200);
