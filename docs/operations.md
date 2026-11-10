@@ -55,12 +55,12 @@ PostgreSQL is a read cache. To rebuild:
 
 ## Common Failure Modes
 
-| Symptom | Likely cause | Check |
-| ------- | ------------ | ----- |
-| `/health` returns `503` | database unavailable | `DATABASE_URL`, PostgreSQL status |
+| Symptom                        | Likely cause                 | Check                                   |
+| ------------------------------ | ---------------------------- | --------------------------------------- |
+| `/health` returns `503`        | database unavailable         | `DATABASE_URL`, PostgreSQL status       |
 | indexer logs repeated failures | RPC or contract config issue | `STELLAR_RPC_URL`, `FOLDER_CONTRACT_ID` |
-| uploads fail | IPFS RPC unavailable | `IPFS_API_URL`, Kubo daemon |
-| CORS failures | missing frontend origin | `CORS_ORIGIN` |
+| uploads fail                   | IPFS RPC unavailable         | `IPFS_API_URL`, Kubo daemon             |
+| CORS failures                  | missing frontend origin      | `CORS_ORIGIN`                           |
 
 ## Runtime Import Check
 

@@ -57,9 +57,7 @@ export function ledgerFromCursor(cursor: string): number {
 }
 
 export async function readState(db: Pick<Pool, 'query'>): Promise<Partial<Record<string, string>>> {
-  const { rows } = await db.query<{ key: string; value: string }>(
-    'SELECT key, value FROM indexer_state'
-  );
+  const { rows } = await db.query<{ key: string; value: string }>('SELECT key, value FROM indexer_state');
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
 }
 
@@ -147,10 +145,10 @@ async function storeEvent(
     if (!isDeterministicDbError(err)) throw err;
     await client.query('ROLLBACK TO SAVEPOINT apply_event');
     const message = err instanceof Error ? err.message : String(err);
-    await client.query(
-      "UPDATE contract_events SET status = 'rejected', error = $2 WHERE id = $1",
-      [event.id, message]
-    );
+    await client.query("UPDATE contract_events SET status = 'rejected', error = $2 WHERE id = $1", [
+      event.id,
+      message,
+    ]);
     logger.warn('Rejected contract event the database refused', { id: event.id, topic, error: message });
     return 'rejected';
   }
@@ -161,11 +159,7 @@ async function storeEvent(
  * Events already stored (same RPC event id) are skipped, so replaying a page
  * after a crash or a manual cursor rewind is safe.
  */
-export async function processPage(
-  db: Db,
-  contractId: string,
-  page: GetEventsResult
-): Promise<PageResult> {
+export async function processPage(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
   const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0 };
   const client = await db.connect();
 
@@ -177,9 +171,7 @@ export async function processPage(
       if (outcome === 'duplicate') result.duplicates++;
       else result[outcome]++;
     }
-    const lastLedger = page.events.length
-      ? page.events[page.events.length - 1].ledger
-      : page.latestLedger;
+    const lastLedger = page.events.length ? page.events[page.events.length - 1].ledger : page.latestLedger;
     await writeState(client, {
       [STATE.cursor]: page.cursor,
       [STATE.startLedger]: null,
@@ -251,9 +243,17 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
       resumeAt,
     });
     await writeState(deps.db, {
-      [STATE.lastGap]: JSON.stringify({ missedFrom: requested, resumedAt: resumeAt, at: new Date().toISOString() }),
+      [STATE.lastGap]: JSON.stringify({
+        missedFrom: requested,
+        resumedAt: resumeAt,
+        at: new Date().toISOString(),
+      }),
     });
-    page = await deps.rpc.getEvents({ contractId: params.contractId, limit: params.limit, startLedger: resumeAt });
+    page = await deps.rpc.getEvents({
+      contractId: params.contractId,
+      limit: params.limit,
+      startLedger: resumeAt,
+    });
   }
 
   const result = await processPage(deps.db, deps.config.contractId, page);
@@ -268,7 +268,10 @@ export type RunningIndexer = {
   stop: () => Promise<void>;
 };
 
-export function backoffDelay(config: Pick<IndexerConfig, 'pollIntervalMs' | 'maxBackoffMs'>, failures: number): number {
+export function backoffDelay(
+  config: Pick<IndexerConfig, 'pollIntervalMs' | 'maxBackoffMs'>,
+  failures: number
+): number {
   if (failures === 0) return config.pollIntervalMs;
   return Math.min(config.pollIntervalMs * 2 ** failures, config.maxBackoffMs);
 }
@@ -294,7 +297,9 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
         logger.error('Indexer halted: retention gap', { error: message });
       } else {
         logger.error('Indexer poll failed', { error: message, failures });
-        await writeState(deps.db, { [STATE.status]: 'error', [STATE.lastError]: message }).catch(() => undefined);
+        await writeState(deps.db, { [STATE.status]: 'error', [STATE.lastError]: message }).catch(
+          () => undefined
+        );
       }
     }
   };

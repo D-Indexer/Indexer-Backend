@@ -71,9 +71,9 @@ Pins a file to IPFS and returns the CID.
 
 The request must be multipart form data with one field:
 
-| Field | Required | Description |
-| ----- | -------- | ----------- |
-| `file` | yes | File to pin to IPFS |
+| Field  | Required | Description         |
+| ------ | -------- | ------------------- |
+| `file` | yes      | File to pin to IPFS |
 
 Allowed MIME types:
 

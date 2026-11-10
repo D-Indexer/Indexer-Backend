@@ -4,14 +4,14 @@ The indexer reads Soroban contract events emitted by the Folder contract.
 
 ## Supported Events
 
-| Event | Expected topic args | Database effect |
-| ----- | ------------------- | --------------- |
-| `folder_claimed` | `owner`, `name`, `cid`, `templateId` | upsert `folders` |
-| `folder_updated` | `owner`, `name`, `cid`, `templateId` | upsert `folders` |
-| `credential_linked` | `owner`, `platform`, `proofHash` | upsert `credentials` |
-| `folder_transferred` | `owner`, `recipient` | update `folders.owner` |
-| `template_registered` | `templateId`, `metadataCid` | upsert `templates` |
-| `template_deprecated` | `templateId` | set `templates.deprecated = TRUE` |
+| Event                 | Expected topic args                  | Database effect                   |
+| --------------------- | ------------------------------------ | --------------------------------- |
+| `folder_claimed`      | `owner`, `name`, `cid`, `templateId` | upsert `folders`                  |
+| `folder_updated`      | `owner`, `name`, `cid`, `templateId` | upsert `folders`                  |
+| `credential_linked`   | `owner`, `platform`, `proofHash`     | upsert `credentials`              |
+| `folder_transferred`  | `owner`, `recipient`                 | update `folders.owner`            |
+| `template_registered` | `templateId`, `metadataCid`          | upsert `templates`                |
+| `template_deprecated` | `templateId`                         | set `templates.deprecated = TRUE` |
 
 ## Cursor Semantics
 

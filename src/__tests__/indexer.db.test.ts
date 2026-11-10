@@ -26,9 +26,7 @@ describeDb('indexer against Postgres', () => {
   });
 
   beforeEach(async () => {
-    await pool.query(
-      'TRUNCATE contract_events, folders, templates, portfolios, admins, indexer_state'
-    );
+    await pool.query('TRUNCATE contract_events, folders, templates, portfolios, admins, indexer_state');
   });
 
   afterAll(async () => {
@@ -89,9 +87,9 @@ describeDb('indexer against Postgres', () => {
       query: pool.query.bind(pool),
     } as unknown as Pool;
 
-    await expect(processPage(failing, TESTNET_CONTRACT, page(testnetEvents.slice(1), 'after'))).rejects.toThrow(
-      'connection terminated'
-    );
+    await expect(
+      processPage(failing, TESTNET_CONTRACT, page(testnetEvents.slice(1), 'after'))
+    ).rejects.toThrow('connection terminated');
 
     expect(await count('contract_events')).toBe(1);
     expect(await count('folders')).toBe(0);
@@ -121,7 +119,11 @@ describeDb('indexer against Postgres', () => {
   });
 
   it('stores the full u32 template id range', async () => {
-    await processPage(pool, TESTNET_CONTRACT, page([makeEvent('tmpl_reg', [u32(4294967295), str('ipfs://max')])]));
+    await processPage(
+      pool,
+      TESTNET_CONTRACT,
+      page([makeEvent('tmpl_reg', [u32(4294967295), str('ipfs://max')])])
+    );
     const { rows } = await pool.query('SELECT id FROM templates');
     expect(rows[0].id).toBe('4294967295');
   });

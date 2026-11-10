@@ -55,7 +55,12 @@ describe('middleware', () => {
     const res = mockResponse();
     const logSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    errorHandler(new HttpError(400, 'Bad input'), { id: 'req-123', method: 'GET', originalUrl: '/' } as any, res, jest.fn());
+    errorHandler(
+      new HttpError(400, 'Bad input'),
+      { id: 'req-123', method: 'GET', originalUrl: '/' } as any,
+      res,
+      jest.fn()
+    );
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({ error: 'Bad input', requestId: 'req-123' });

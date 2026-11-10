@@ -49,8 +49,8 @@ describe('environment configuration', () => {
 
   it('requires CORS_ORIGIN in production', () => {
     expect(() => loadEnv({ ...validEnv, NODE_ENV: 'production' })).toThrow(/CORS_ORIGIN is required/);
-    expect(loadEnv({ ...validEnv, NODE_ENV: 'production', CORS_ORIGIN: 'https://folder.app' }).CORS_ORIGIN).toBe(
-      'https://folder.app'
-    );
+    expect(
+      loadEnv({ ...validEnv, NODE_ENV: 'production', CORS_ORIGIN: 'https://folder.app' }).CORS_ORIGIN
+    ).toBe('https://folder.app');
   });
 });

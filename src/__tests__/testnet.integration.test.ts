@@ -26,7 +26,11 @@ const DEPLOYMENT = {
   firstLedger: 5647760,
   templatesRegisteredBy: 5647774,
   templates: [1, 2, 3],
-  smoke: { owner: 'GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM', folder: 'smoke-1794262900.folder', ledger: 5647861 },
+  smoke: {
+    owner: 'GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM',
+    folder: 'smoke-1794262900.folder',
+    ledger: 5647861,
+  },
 };
 
 const contractId = process.env.FOLDER_CONTRACT_ID || TESTNET_CONTRACT_ID;
@@ -55,7 +59,9 @@ describeLive('testnet integration', () => {
       ? { owner: process.env.SMOKE_OWNER!, folder: process.env.SMOKE_FOLDER! }
       : DEPLOYMENT.smoke;
 
-    const requestedStart = fresh ? Number(process.env.SMOKE_START_LEDGER) || oldestLedger : DEPLOYMENT.firstLedger;
+    const requestedStart = fresh
+      ? Number(process.env.SMOKE_START_LEDGER) || oldestLedger
+      : DEPLOYMENT.firstLedger;
     if (!fresh && requestedStart < oldestLedger) {
       throw new Error(
         `The recorded smoke run (ledger ${DEPLOYMENT.smoke.ledger}) is no longer retained by the RPC ` +
@@ -81,7 +87,9 @@ describeLive('testnet integration', () => {
     }
 
     // Every event the live contract emitted decoded cleanly.
-    const rejected = await pool.query("SELECT id, topic, error FROM contract_events WHERE status <> 'applied'");
+    const rejected = await pool.query(
+      "SELECT id, topic, error FROM contract_events WHERE status <> 'applied'"
+    );
     expect(rejected.rows).toEqual([]);
 
     // folder_cl -> folders

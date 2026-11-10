@@ -1,9 +1,7 @@
 import { z } from 'zod';
 
 /** Account (G...) or contract (C...) strkey: a contract Address can own a folder too. */
-export const stellarAddressSchema = z
-  .string()
-  .regex(/^[GC][A-Z2-7]{55}$/, 'Invalid Stellar address');
+export const stellarAddressSchema = z.string().regex(/^[GC][A-Z2-7]{55}$/, 'Invalid Stellar address');
 
 export const folderNameSchema = z
   .string()

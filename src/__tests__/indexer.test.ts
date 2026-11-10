@@ -20,7 +20,10 @@ function fakeDb(options: { state?: Record<string, string>; existingIds?: string[
     calls.push({ sql, params });
     if (options.failOn?.test(sql)) throw new Error('connection terminated');
     if (sql.startsWith('SELECT key, value FROM indexer_state')) {
-      return { rows: Object.entries(options.state ?? {}).map(([key, value]) => ({ key, value })), rowCount: 0 };
+      return {
+        rows: Object.entries(options.state ?? {}).map(([key, value]) => ({ key, value })),
+        rowCount: 0,
+      };
     }
     if (sql.includes('INSERT INTO contract_events')) {
       const id = (params as string[])[0];
@@ -129,13 +132,21 @@ describe('pollOnce', () => {
 
     await pollOnce({ db, rpc, config });
 
-    expect(rpc.getEvents).toHaveBeenCalledWith({ contractId: TESTNET_CONTRACT, limit: 100, startLedger: 100 });
+    expect(rpc.getEvents).toHaveBeenCalledWith({
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      startLedger: 100,
+    });
   });
 
   it('prefers the saved cursor, then a reset start ledger, then INDEXER_START_LEDGER', async () => {
     const rpc = fakeRpc();
     await pollOnce({ db: fakeDb({ state: { cursor: 'abc', start_ledger: '7' } }).db, rpc, config });
-    await pollOnce({ db: fakeDb({ state: { start_ledger: '7' } }).db, rpc, config: { ...config, startLedger: 9 } });
+    await pollOnce({
+      db: fakeDb({ state: { start_ledger: '7' } }).db,
+      rpc,
+      config: { ...config, startLedger: 9 },
+    });
     await pollOnce({ db: fakeDb().db, rpc, config: { ...config, startLedger: 9 } });
 
     expect(rpc.getEvents.mock.calls.map(([p]) => p.cursor ?? p.startLedger)).toEqual(['abc', 7, 9]);
@@ -144,7 +155,9 @@ describe('pollOnce', () => {
 
   it('halts with a clear error when the cursor is older than the retention window', async () => {
     const { db, calls } = fakeDb({ state: { cursor: '0021474836480000000-0000000000' } });
-    const rpc = fakeRpc({ getEvents: jest.fn().mockRejectedValue(new LedgerRangeError('range', 5533280, 5654239)) });
+    const rpc = fakeRpc({
+      getEvents: jest.fn().mockRejectedValue(new LedgerRangeError('range', 5533280, 5654239)),
+    });
 
     const err = await pollOnce({ db, rpc, config }).catch((e) => e);
 
@@ -164,7 +177,11 @@ describe('pollOnce', () => {
 
     await pollOnce({ db, rpc, config: { ...config, onRetentionGap: 'skip' } });
 
-    expect(rpc.getEvents).toHaveBeenLastCalledWith({ contractId: TESTNET_CONTRACT, limit: 100, startLedger: 101 });
+    expect(rpc.getEvents).toHaveBeenLastCalledWith({
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      startLedger: 101,
+    });
     const gap = calls.find((c) => c.params?.[0] === 'last_gap');
     expect(JSON.parse(gap!.params![1] as string)).toMatchObject({ missedFrom: 50, resumedAt: 101 });
   });
@@ -185,7 +202,9 @@ describe('indexer loop', () => {
 
   it('backs off exponentially up to the cap', () => {
     const c = { pollIntervalMs: 1000, maxBackoffMs: 10000 };
-    expect([0, 1, 2, 3, 4, 10].map((n) => backoffDelay(c, n))).toEqual([1000, 2000, 4000, 8000, 10000, 10000]);
+    expect([0, 1, 2, 3, 4, 10].map((n) => backoffDelay(c, n))).toEqual([
+      1000, 2000, 4000, 8000, 10000, 10000,
+    ]);
   });
 
   it('pages until caught up and waits for the in-flight poll on stop', async () => {

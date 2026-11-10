@@ -26,7 +26,10 @@ describe('ipfs service', () => {
 
   it('maps a timeout to 504 and an unreachable node to 502', async () => {
     const timeout = Object.assign(new Error('timed out'), { name: 'TimeoutError' });
-    jest.spyOn(global, 'fetch').mockRejectedValueOnce(timeout).mockRejectedValueOnce(new TypeError('fetch failed'));
+    jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValueOnce(timeout)
+      .mockRejectedValueOnce(new TypeError('fetch failed'));
 
     await expect(pinFile(Buffer.from('d'), 'a.png')).rejects.toMatchObject({ statusCode: 504, expose: true });
     await expect(pinFile(Buffer.from('d'), 'a.png')).rejects.toMatchObject({ statusCode: 502, expose: true });

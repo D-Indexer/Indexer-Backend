@@ -101,20 +101,20 @@ graph TB
 - **src/routes/**: Express route registration for `/folders`, `/templates`, `/upload`, and `/health`
 - **src/validation/schemas.ts**: Zod validation schemas for addresses, template IDs, and uploads
 - **src/middleware/**: Async handler and global error handler
-- **src/__tests__/**: Jest tests for services, indexer behavior, and upload handling
+- **src/**tests**/**: Jest tests for services, indexer behavior, and upload handling
 
 ## Folder Indexing on Stellar
 
 The backend treats Soroban events as the canonical input stream. It polls the configured RPC endpoint and filters events to the configured Folder contract ID.
 
-| Event | Indexed action |
-| ----- | -------------- |
-| `folder_claimed` | Insert or update a Folder record |
-| `folder_updated` | Update Folder name, CID, template ID, and timestamp |
-| `credential_linked` | Insert or update a credential proof hash |
-| `folder_transferred` | Move Folder ownership to the recipient address |
-| `template_registered` | Insert or update a template metadata CID |
-| `template_deprecated` | Mark a template as deprecated |
+| Event                 | Indexed action                                      |
+| --------------------- | --------------------------------------------------- |
+| `folder_claimed`      | Insert or update a Folder record                    |
+| `folder_updated`      | Update Folder name, CID, template ID, and timestamp |
+| `credential_linked`   | Insert or update a credential proof hash            |
+| `folder_transferred`  | Move Folder ownership to the recipient address      |
+| `template_registered` | Insert or update a template metadata CID            |
+| `template_deprecated` | Mark a template as deprecated                       |
 
 The indexer stores its next ledger position in `indexer_state` under the `indexer_cursor` key.
 
@@ -124,26 +124,26 @@ The Express API is designed for the Folder frontend and related UI clients.
 
 See [docs/api.md](docs/api.md) for the expanded API reference.
 
-| Method | Path | Description |
-| ------ | ---- | ----------- |
-| `GET` | `/folders/:address` | Fetch a Folder by Stellar address |
-| `GET` | `/folders/name/:name` | Resolve a Folder by claimed name |
-| `GET` | `/folders/:address/credentials` | List credentials linked to a Folder owner |
-| `GET` | `/templates` | List active templates |
-| `GET` | `/templates/:id` | Fetch one template |
-| `POST` | `/upload` | Pin a file to IPFS and return `{ cid }` |
-| `GET` | `/health` | Return database and indexer status |
+| Method | Path                            | Description                               |
+| ------ | ------------------------------- | ----------------------------------------- |
+| `GET`  | `/folders/:address`             | Fetch a Folder by Stellar address         |
+| `GET`  | `/folders/name/:name`           | Resolve a Folder by claimed name          |
+| `GET`  | `/folders/:address/credentials` | List credentials linked to a Folder owner |
+| `GET`  | `/templates`                    | List active templates                     |
+| `GET`  | `/templates/:id`                | Fetch one template                        |
+| `POST` | `/upload`                       | Pin a file to IPFS and return `{ cid }`   |
+| `GET`  | `/health`                       | Return database and indexer status        |
 
 ### Upload Contract
 
 `POST /upload` expects multipart form data with a single `file` field.
 
-| Constraint | Value |
-| ---------- | ----- |
-| Field name | `file` |
-| Max size | 10 MB |
+| Constraint         | Value                                                      |
+| ------------------ | ---------------------------------------------------------- |
+| Field name         | `file`                                                     |
+| Max size           | 10 MB                                                      |
 | Allowed MIME types | `image/jpeg`, `image/png`, `image/webp`, `application/pdf` |
-| Success response | `{ "cid": "<ipfs-cid>" }` |
+| Success response   | `{ "cid": "<ipfs-cid>" }`                                  |
 
 ### `/health` response contract
 
@@ -177,10 +177,10 @@ These are the canonical TypeScript shapes exposed internally by this backend.
 
 ```typescript
 interface Folder {
-  owner: string;       // Stellar address, usually G...
-  name: string;        // claimed human-readable Folder name
-  cid: string;         // IPFS CID for portfolio content
-  templateId: number;  // references Template.id
+  owner: string; // Stellar address, usually G...
+  name: string; // claimed human-readable Folder name
+  cid: string; // IPFS CID for portfolio content
+  templateId: number; // references Template.id
   updatedAt: Date;
 }
 
@@ -290,17 +290,17 @@ cp .env.example .env
 
 Fill in the required values:
 
-| Variable | Description |
-| -------- | ----------- |
-| `PORT` | HTTP server port, defaults to `3000` |
-| `NODE_ENV` | Runtime environment, usually `development` locally |
-| `DATABASE_URL` | PostgreSQL connection string |
-| `STELLAR_RPC_URL` | Soroban RPC endpoint |
-| `STELLAR_NETWORK_PASSPHRASE` | Stellar network passphrase |
-| `FOLDER_CONTRACT_ID` | Deployed Folder contract ID |
-| `IPFS_API_URL` | Kubo/IPFS API endpoint for file pinning |
-| `IPFS_GATEWAY` | Public gateway base URL for resolving CIDs |
-| `WEBHOOK_SECRET` | Optional webhook secret reserved for integrations |
+| Variable                     | Description                                        |
+| ---------------------------- | -------------------------------------------------- |
+| `PORT`                       | HTTP server port, defaults to `3000`               |
+| `NODE_ENV`                   | Runtime environment, usually `development` locally |
+| `DATABASE_URL`               | PostgreSQL connection string                       |
+| `STELLAR_RPC_URL`            | Soroban RPC endpoint                               |
+| `STELLAR_NETWORK_PASSPHRASE` | Stellar network passphrase                         |
+| `FOLDER_CONTRACT_ID`         | Deployed Folder contract ID                        |
+| `IPFS_API_URL`               | Kubo/IPFS API endpoint for file pinning            |
+| `IPFS_GATEWAY`               | Public gateway base URL for resolving CIDs         |
+| `WEBHOOK_SECRET`             | Optional webhook secret reserved for integrations  |
 
 ### 3. Start PostgreSQL
 
@@ -332,25 +332,25 @@ This repository does not currently include a Dockerfile or Compose stack. For lo
 
 ## CLI Reference
 
-| Command | Description |
-| ------- | ----------- |
-| `npm run dev` | Start the TypeScript server with hot reload |
-| `npm run build` | Compile TypeScript into `dist/` |
-| `npm start` | Run the compiled JavaScript entry point |
-| `npm test` | Run the Jest test suite |
-| `npm run db:migrate` | Apply PostgreSQL migrations |
+| Command              | Description                                 |
+| -------------------- | ------------------------------------------- |
+| `npm run dev`        | Start the TypeScript server with hot reload |
+| `npm run build`      | Compile TypeScript into `dist/`             |
+| `npm start`          | Run the compiled JavaScript entry point     |
+| `npm test`           | Run the Jest test suite                     |
+| `npm run db:migrate` | Apply PostgreSQL migrations                 |
 
 ## Contract Functions Used by the Folder System
 
 The backend does not submit these transactions directly in the current codebase; it indexes the events emitted by the Folder contract after these actions occur elsewhere in the system.
 
-| Function | Purpose |
-| -------- | ------- |
-| `claim_folder` | Mint or claim a Folder profile |
-| `update_folder` | Update the Folder metadata CID or template |
-| `link_credential` | Link an external credential proof on-chain |
-| `transfer_folder` | Transfer Folder ownership |
-| `register_template` | Register a new Folder template |
+| Function            | Purpose                                    |
+| ------------------- | ------------------------------------------ |
+| `claim_folder`      | Mint or claim a Folder profile             |
+| `update_folder`     | Update the Folder metadata CID or template |
+| `link_credential`   | Link an external credential proof on-chain |
+| `transfer_folder`   | Transfer Folder ownership                  |
+| `register_template` | Register a new Folder template             |
 
 ## Multi-Repo Architecture
 
@@ -358,11 +358,11 @@ This repo is one part of the Folder system. The backend is the integration layer
 
 ### Repository Inventory
 
-| Repository | Role | Primary responsibility |
-| ---------- | ---- | ---------------------- |
-| [`D-Indexer/Indexer-Backend`](https://github.com/D-Indexer/Indexer-Backend) | Backend / indexer | Express API, Soroban event indexing, PostgreSQL read cache, IPFS upload service |
-| `Folder-Frontend` | Frontend application | Portfolio editor, wallet authentication, template browser, profile rendering |
-| `Folder-Contract` | Soroban smart contracts | Folder ownership, template registry, credential linking, event source |
+| Repository                                                                  | Role                    | Primary responsibility                                                          |
+| --------------------------------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------- |
+| [`D-Indexer/Indexer-Backend`](https://github.com/D-Indexer/Indexer-Backend) | Backend / indexer       | Express API, Soroban event indexing, PostgreSQL read cache, IPFS upload service |
+| `Folder-Frontend`                                                           | Frontend application    | Portfolio editor, wallet authentication, template browser, profile rendering    |
+| `Folder-Contract`                                                           | Soroban smart contracts | Folder ownership, template registry, credential linking, event source           |
 
 `D-Indexer/Indexer-Backend` is verified from this repository's git remote. The frontend and contract names above are the architecture names documented by this repository; if their GitHub slugs differ or the repos are private, update these links when the canonical locations are available.
 
@@ -424,13 +424,13 @@ sequenceDiagram
 
 ### Shared Contracts (must stay in sync across repos)
 
-| Contract surface | Owner | Consumers |
-| ---------------- | ----- | --------- |
-| Soroban event names and topic ordering | Folder-Contract | D-Indexer/Indexer-Backend |
-| REST response shapes | D-Indexer/Indexer-Backend | Folder-Frontend |
-| Upload CID semantics | D-Indexer/Indexer-Backend | Folder-Frontend, Folder-Contract |
-| Template IDs and metadata CIDs | Folder-Contract | D-Indexer/Indexer-Backend, Folder-Frontend |
-| Environment variables for API and contract IDs | Each deployed service | Deployment configuration |
+| Contract surface                               | Owner                     | Consumers                                  |
+| ---------------------------------------------- | ------------------------- | ------------------------------------------ |
+| Soroban event names and topic ordering         | Folder-Contract           | D-Indexer/Indexer-Backend                  |
+| REST response shapes                           | D-Indexer/Indexer-Backend | Folder-Frontend                            |
+| Upload CID semantics                           | D-Indexer/Indexer-Backend | Folder-Frontend, Folder-Contract           |
+| Template IDs and metadata CIDs                 | Folder-Contract           | D-Indexer/Indexer-Backend, Folder-Frontend |
+| Environment variables for API and contract IDs | Each deployed service     | Deployment configuration                   |
 
 See [docs/events.md](docs/events.md) for the event indexing contract.
 
@@ -482,17 +482,17 @@ D-Indexer-Backend gives Folder a practical application layer without weakening t
 
 ## Dependencies
 
-| Package | Purpose |
-| ------- | ------- |
-| `express` | HTTP server and route handling |
-| `@stellar/stellar-sdk` | Soroban RPC access and ScVal decoding |
-| `pg` | PostgreSQL client |
-| `kubo-rpc-client` | IPFS/Kubo RPC integration |
-| `multer` | Multipart file upload parsing |
-| `zod` | Runtime request validation |
-| `dotenv` | Local environment configuration |
-| `jest` / `ts-jest` | Test runner and TypeScript test integration |
-| `typescript` | Static typing and build output |
+| Package                | Purpose                                     |
+| ---------------------- | ------------------------------------------- |
+| `express`              | HTTP server and route handling              |
+| `@stellar/stellar-sdk` | Soroban RPC access and ScVal decoding       |
+| `pg`                   | PostgreSQL client                           |
+| `kubo-rpc-client`      | IPFS/Kubo RPC integration                   |
+| `multer`               | Multipart file upload parsing               |
+| `zod`                  | Runtime request validation                  |
+| `dotenv`               | Local environment configuration             |
+| `jest` / `ts-jest`     | Test runner and TypeScript test integration |
+| `typescript`           | Static typing and build output              |
 
 ## License
 
@@ -509,11 +509,11 @@ When changing this backend, keep the contract, frontend, and API expectations al
 
 ## Folder Organization
 
-| Repo | Responsibility |
-| ---- | -------------- |
-| `Folder-Frontend` | React/Vite portfolio UI, wallet auth, and template browser |
+| Repo                | Responsibility                                             |
+| ------------------- | ---------------------------------------------------------- |
+| `Folder-Frontend`   | React/Vite portfolio UI, wallet auth, and template browser |
 | `D-Indexer-Backend` | This TypeScript/Node.js API, indexer, and IPFS integration |
-| `Folder-Contract` | Rust/Soroban Folder contract and event source |
+| `Folder-Contract`   | Rust/Soroban Folder contract and event source              |
 
 ## Support
 

@@ -63,14 +63,18 @@ describe('rpc client', () => {
       })
     );
 
-    const err = await client(fetchImpl).getEvents(params).catch((e) => e);
+    const err = await client(fetchImpl)
+      .getEvents(params)
+      .catch((e) => e);
     expect(err).toBeInstanceOf(LedgerRangeError);
     expect(err).toMatchObject({ oldestLedger: 5533280, latestLedger: 5654239 });
   });
 
   it('never puts credentials or query strings in error messages', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(jsonResponse({}, 500));
-    const err = await client(fetchImpl).getEvents(params).catch((e) => e);
+    const err = await client(fetchImpl)
+      .getEvents(params)
+      .catch((e) => e);
 
     expect(err.message).toContain('https://rpc.example/v1');
     expect(err.message).not.toContain('secret');

@@ -70,7 +70,13 @@ describe('portfolio controller', () => {
   });
 
   it('returns the portfolio', async () => {
-    const portfolio = { owner: validAddress, templateId: 1, ipfsCid: 'bafy', mintedAt: new Date(), updatedAt: new Date() };
+    const portfolio = {
+      owner: validAddress,
+      templateId: 1,
+      ipfsCid: 'bafy',
+      mintedAt: new Date(),
+      updatedAt: new Date(),
+    };
     mockPortfolioService.getPortfolio.mockResolvedValue(portfolio);
     const res = mockResponse();
 
@@ -81,7 +87,9 @@ describe('portfolio controller', () => {
 
   it('returns not found when nothing is minted', async () => {
     mockPortfolioService.getPortfolio.mockResolvedValue(null);
-    const { next } = await invokeHandler(portfolioController.getByAddress, { params: { address: validAddress } });
+    const { next } = await invokeHandler(portfolioController.getByAddress, {
+      params: { address: validAddress },
+    });
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 404 }));
   });
 });

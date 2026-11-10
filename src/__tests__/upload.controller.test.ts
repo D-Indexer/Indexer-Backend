@@ -40,7 +40,12 @@ describe('upload controller', () => {
 
   it('rejects unsupported file types', async () => {
     const req = {
-      file: { buffer: Buffer.from('data'), originalname: 'test.exe', mimetype: 'application/x-msdownload', size: 100 },
+      file: {
+        buffer: Buffer.from('data'),
+        originalname: 'test.exe',
+        mimetype: 'application/x-msdownload',
+        size: 100,
+      },
     } as unknown as Request;
     const res = mockResponse();
 
