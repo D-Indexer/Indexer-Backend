@@ -1,0 +1,100 @@
+name: Nightly testnet
+
+# Runs the Indexer-Contract smoke script against the deployed testnet contract
+# (fresh Friendbot account, no secrets), then indexes from just before that run
+# and checks the folder and portfolio it created are in Postgres.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-testnet
+  cancel-in-progress: false
+
+jobs:
+  testnet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      STELLAR_CLI_VERSION: 28.1.0
+      STELLAR_CLI_SHA256: c1680deee94301d33ada7a17f98411e642a4248c727afbd2e43050d345746462
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: folder
+          POSTGRES_PASSWORD: folder
+          POSTGRES_DB: folder_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U folder"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+
+      - name: Checkout contract
+        uses: actions/checkout@v4
+        with:
+          repository: D-Indexer/Indexer-Contract
+          path: contract
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Stellar CLI
+        run: |
+          archive="stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/$archive"
+          echo "${STELLAR_CLI_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Read deployment
+        id: deployment
+        working-directory: contract
+        run: |
+          echo "contract_id=$(jq -r .contract_id deployments/testnet.json)" >> "$GITHUB_OUTPUT"
+          echo "rpc_url=$(jq -r .rpc_url deployments/testnet.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Run contract smoke script
+        id: smoke
+        working-directory: contract
+        env:
+          RPC_URL: ${{ steps.deployment.outputs.rpc_url }}
+        run: |
+          start=$(curl -fsS -X POST "$RPC_URL" -H 'content-type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"getLatestLedger"}' | jq -r .result.sequence)
+          ./scripts/smoke-testnet.sh | tee "$RUNNER_TEMP/smoke.log"
+          echo "start_ledger=$start" >> "$GITHUB_OUTPUT"
+          echo "owner=$(awk '/^user:/ {print $2}' "$RUNNER_TEMP/smoke.log")" >> "$GITHUB_OUTPUT"
+          echo "folder=$(awk '/^folder:/ {print $2}' "$RUNNER_TEMP/smoke.log")" >> "$GITHUB_OUTPUT"
+
+      - name: Index and verify
+        env:
+          TESTNET_INTEGRATION: '1'
+          TEST_DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          FOLDER_CONTRACT_ID: ${{ steps.deployment.outputs.contract_id }}
+          STELLAR_RPC_URL: ${{ steps.deployment.outputs.rpc_url }}
+          SMOKE_START_LEDGER: ${{ steps.smoke.outputs.start_ledger }}
+          SMOKE_OWNER: ${{ steps.smoke.outputs.owner }}
+          SMOKE_FOLDER: ${{ steps.smoke.outputs.folder }}
+          LOG_LEVEL: info
+        run: npx jest --runInBand src/__tests__/testnet.integration.test.ts
