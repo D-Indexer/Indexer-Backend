@@ -1,22 +1,103 @@
+# Local stack: Postgres + IPFS (Kubo) + API + indexer, pointed at the Folder
+# contract on Stellar testnet. Start with `docker compose up --build` from the
+# repo root (compose.yaml includes this file). Overrides come from your shell
+# or a root .env file, e.g. FOLDER_CONTRACT_ID=... docker compose up.
+
+x-app-env: &app-env
+  NODE_ENV: development
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL: postgresql://folder:folder@postgres:5432/folder
+  STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+  STELLAR_NETWORK_PASSPHRASE: ${STELLAR_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+  FOLDER_CONTRACT_ID: ${FOLDER_CONTRACT_ID:-CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV}
+  # Testnet deployment ledger; clamped to the oldest retained ledger once it ages out.
+  INDEXER_START_LEDGER: ${INDEXER_START_LEDGER:-5647760}
+  INDEXER_ON_RETENTION_GAP: ${INDEXER_ON_RETENTION_GAP:-halt}
+  IPFS_API_URL: http://ipfs:5001
+  IPFS_GATEWAY: ${IPFS_GATEWAY:-https://ipfs.io/ipfs}
+  CORS_ORIGIN: ${CORS_ORIGIN:-}
+
 services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: folder_db
+      POSTGRES_USER: folder
+      POSTGRES_PASSWORD: folder
+      POSTGRES_DB: folder
     ports:
-      - '5432:5432'
+      - '127.0.0.1:5432:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      # Applied on first start of an empty volume; the indexer re-applies it (idempotent).
+      - ../database/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U folder -d folder']
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   ipfs:
     image: ipfs/kubo:v0.29.0
     ports:
-      - '5001:5001'
-      - '8080:8080'
+      # The Kubo RPC API is an admin interface: keep it on localhost.
+      - '127.0.0.1:5001:5001'
+      - '127.0.0.1:8080:8080'
     volumes:
       - ipfs-data:/data/ipfs
+    healthcheck:
+      test: ['CMD', 'ipfs', 'id']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  indexer:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: folder-indexer-backend:local
+    command: ['node', 'dist/indexer/main.js']
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'node', 'dist/indexer/cli.js', 'healthcheck']
+      interval: 15s
+      timeout: 10s
+      start_period: 60s
+      retries: 5
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: folder-indexer-backend:local
+    command: ['node', 'dist/server.js']
+    environment:
+      <<: *app-env
+      PORT: 3000
+    ports:
+      - '${API_PORT:-3000}:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ipfs:
+        condition: service_healthy
+      indexer:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres-data:
