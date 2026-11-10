@@ -10,6 +10,7 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/folders/:address`](#get-foldersaddress)       | Folder claimed by an address          |
 | `GET`  | [`/folders/name/:name`](#get-foldersnamename)    | Folder by name                        |
 | `GET`  | [`/portfolios/:address`](#get-portfoliosaddress) | Portfolio NFT minted by an address    |
+| `GET`  | [`/admins`](#get-admins)                         | Indexed contract admin set            |
 | `GET`  | [`/templates`](#get-templates)                   | All registered templates              |
 | `GET`  | [`/templates/:id`](#get-templatesid)             | One template                          |
 | `POST` | [`/upload`](#post-upload)                        | Add and pin a file on IPFS            |
@@ -143,6 +144,19 @@ curl localhost:3000/portfolios/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX
 ```
 
 Errors: `400` invalid address, `404` `Portfolio not found`.
+
+## `GET /admins`
+
+The contract's admin set (`init`, `adm_add`, `adm_rm`), ordered by `addedAt` ascending, then `address` ascending.
+
+```json
+[
+  {
+    "address": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
+    "addedAt": "2026-11-09T22:14:42.000Z"
+  }
+]
+```
 
 ## `GET /templates`
 

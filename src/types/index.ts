@@ -24,3 +24,9 @@ export interface Portfolio {
   mintedAt: Date;
   updatedAt: Date;
 }
+
+/** A contract admin (contract events `init` / `adm_add` / `adm_rm`). */
+export interface Admin {
+  address: string;
+  addedAt: Date;
+}
