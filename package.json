@@ -1,18 +1,24 @@
 {
   "name": "d-indexer-backend",
   "version": "1.0.0",
-  "description": "Core API and indexing engine for Folder — handles off-chain data, IPFS uploads, metadata caching, and Stellar ledger hooks",
+  "description": "Core API and indexing engine for Folder \u2014 handles off-chain data, IPFS uploads, metadata caching, and Stellar ledger hooks",
   "main": "dist/server.js",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "dev:indexer": "ts-node-dev --respawn --transpile-only src/indexer/main.ts",
     "build": "tsc",
     "start": "node dist/server.js",
+    "start:indexer": "node dist/indexer/main.js",
+    "indexer": "node -r ts-node/register src/indexer/cli.ts",
     "test": "jest --runInBand",
+    "test:integration": "TESTNET_INTEGRATION=1 jest --runInBand src/__tests__/testnet.integration.test.ts",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write . && eslint --fix .",
+    "check": "npm run typecheck && npm run lint && npm test",
     "db:migrate": "node -r ts-node/register src/db/migrate.ts"
   },
   "dependencies": {
@@ -25,16 +31,21 @@
     "zod": "3.23.8"
   },
   "devDependencies": {
+    "@eslint/js": "9.39.5",
     "@types/cors": "2.8.17",
     "@types/express": "4.17.21",
     "@types/jest": "29.5.12",
-    "@types/node": "20.14.2",
     "@types/multer": "1.4.11",
+    "@types/node": "20.14.2",
     "@types/pg": "8.11.6",
+    "eslint": "9.39.5",
+    "eslint-config-prettier": "10.1.8",
     "jest": "29.7.0",
+    "prettier": "3.9.10",
     "ts-jest": "29.1.5",
     "ts-node": "10.9.2",
     "ts-node-dev": "2.0.0",
-    "typescript": "5.4.5"
+    "typescript": "5.4.5",
+    "typescript-eslint": "8.72.1"
   }
 }

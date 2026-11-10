@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+import { Request } from 'express';
 import { upload } from '../controllers/upload.controller';
 import { invokeHandler, mockResponse } from './testUtils';
 import { pinFile } from '../services/ipfs';
