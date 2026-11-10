@@ -2,12 +2,11 @@ import 'dotenv/config';
 import { createApp } from './app';
 import { getEnv } from './config/env';
 import pool from './db/client';
-import { startIndexer } from './indexer/stellar';
 import { logger } from './utils/logger';
 
+/** API process entrypoint. The indexer runs separately: see src/indexer/main.ts. */
 const env = getEnv();
 const app = createApp(env);
-const indexer = startIndexer();
 
 const server = app.listen(env.PORT, () => {
   logger.info('Server started', { port: env.PORT, nodeEnv: env.NODE_ENV });
@@ -15,7 +14,6 @@ const server = app.listen(env.PORT, () => {
 
 async function shutdown(signal: string): Promise<void> {
   logger.info('Shutdown requested', { signal });
-  indexer.stop();
 
   const timeout = setTimeout(() => {
     logger.error('Shutdown timed out', { timeoutMs: env.SHUTDOWN_TIMEOUT_MS });
