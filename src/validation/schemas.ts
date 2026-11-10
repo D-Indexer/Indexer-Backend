@@ -13,7 +13,7 @@ export const folderNameSchema = z
 /** Template ids are u32 on-chain. */
 export const templateIdSchema = z
   .string()
-  .regex(/^\d{1,10}$/, 'Template ID must be a number')
+  .regex(/^\d+$/, 'Template ID must be a number')
   .transform(Number)
   .refine((n) => n <= 0xffffffff, 'Template ID must be at most 4294967295');
 

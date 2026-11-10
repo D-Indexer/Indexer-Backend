@@ -215,6 +215,20 @@ describe('pollOnce', () => {
   });
 });
 
+describe('scanned ledger', () => {
+  it('records the ledger the RPC scanned to, not just the last event', async () => {
+    const { db, calls } = fakeDb();
+    // End-of-range cursor as returned for a partial page (ledger 5654242).
+    await processPage(
+      db,
+      TESTNET_CONTRACT,
+      page(testnetEvents, { cursor: '0024284788768636927-4294967295' })
+    );
+
+    expect(calls.find((c) => c.params?.[0] === 'last_ledger')?.params).toEqual(['last_ledger', '5654242']);
+  });
+});
+
 describe('indexer loop', () => {
   it('reads the ledger out of an RPC event id', () => {
     expect(ledgerFromCursor(testnetEvents[0].id)).toBe(testnetEvents[0].ledger);

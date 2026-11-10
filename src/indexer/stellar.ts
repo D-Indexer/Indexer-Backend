@@ -56,6 +56,14 @@ export function ledgerFromCursor(cursor: string): number {
   return Number(toid >> 32n);
 }
 
+function scannedLedger(page: GetEventsResult): number {
+  try {
+    return ledgerFromCursor(page.cursor);
+  } catch {
+    return page.events.length ? page.events[page.events.length - 1].ledger : page.latestLedger;
+  }
+}
+
 export async function readState(db: Pick<Pool, 'query'>): Promise<Partial<Record<string, string>>> {
   const { rows } = await db.query<{ key: string; value: string }>('SELECT key, value FROM indexer_state');
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
@@ -171,7 +179,9 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
       if (outcome === 'duplicate') result.duplicates++;
       else result[outcome]++;
     }
-    const lastLedger = page.events.length ? page.events[page.events.length - 1].ledger : page.latestLedger;
+    // The paging cursor encodes how far the RPC scanned (the chain tip for a
+    // partial page), which is further than the last event's ledger.
+    const lastLedger = scannedLedger(page);
     await writeState(client, {
       [STATE.cursor]: page.cursor,
       [STATE.startLedger]: null,
