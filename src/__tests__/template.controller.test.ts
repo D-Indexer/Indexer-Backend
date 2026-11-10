@@ -5,19 +5,19 @@ import { invokeHandler, mockResponse } from './testUtils';
 jest.mock('../services/template');
 
 const mockTemplateService = templateService as jest.Mocked<typeof templateService>;
+const template = { id: 2, metadataUri: 'ipfs://bafy', creator: 'GADMIN', registeredAt: new Date() };
 
 describe('template controller', () => {
   afterEach(() => jest.clearAllMocks());
 
   it('lists templates', async () => {
-    const templates = [{ id: 1, metadataCid: 'QmTemplate', deprecated: false, createdAt: new Date() }];
-    mockTemplateService.listTemplates.mockResolvedValue(templates);
+    mockTemplateService.listTemplates.mockResolvedValue([template]);
     const res = mockResponse();
 
     const { next } = await invokeHandler(list, {}, res);
 
     expect(next).not.toHaveBeenCalled();
-    expect(res.json).toHaveBeenCalledWith(templates);
+    expect(res.json).toHaveBeenCalledWith([template]);
   });
 
   it('rejects non-numeric template ids', async () => {
@@ -26,8 +26,17 @@ describe('template controller', () => {
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400 }));
   });
 
+  it.each(['4294967296', '99999999999', '1'.repeat(400)])(
+    'rejects template id %s outside the u32 range with 400 instead of a database error',
+    async (id) => {
+      const { next } = await invokeHandler(getOne, { params: { id } });
+
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400 }));
+      expect(mockTemplateService.getTemplate).not.toHaveBeenCalled();
+    }
+  );
+
   it('returns one template', async () => {
-    const template = { id: 2, metadataCid: 'QmTemplate', deprecated: false, createdAt: new Date() };
     mockTemplateService.getTemplate.mockResolvedValue(template);
     const res = mockResponse();
 
@@ -36,6 +45,14 @@ describe('template controller', () => {
     expect(next).not.toHaveBeenCalled();
     expect(mockTemplateService.getTemplate).toHaveBeenCalledWith(2);
     expect(res.json).toHaveBeenCalledWith(template);
+  });
+
+  it('accepts the largest u32 template id', async () => {
+    mockTemplateService.getTemplate.mockResolvedValue(null);
+
+    await invokeHandler(getOne, { params: { id: '4294967295' } });
+
+    expect(mockTemplateService.getTemplate).toHaveBeenCalledWith(4294967295);
   });
 
   it('returns not found for missing templates', async () => {

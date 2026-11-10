@@ -21,11 +21,3 @@ export const getByName = asyncHandler(async (req: Request, res: Response) => {
   if (!folder) throw notFound('Folder not found');
   res.json(folder);
 });
-
-export const getCredentials = asyncHandler(async (req: Request, res: Response) => {
-  const parsed = stellarAddressSchema.safeParse(req.params.address);
-  if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
-
-  const credentials = await folderService.getCredentials(parsed.data);
-  res.json(credentials);
-});

@@ -13,7 +13,7 @@ export const getOne = asyncHandler(async (req: Request, res: Response) => {
   const parsed = templateIdSchema.safeParse(req.params.id);
   if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
 
-  const template = await templateService.getTemplate(Number(parsed.data));
+  const template = await templateService.getTemplate(parsed.data);
   if (!template) throw notFound('Template not found');
   res.json(template);
 });
