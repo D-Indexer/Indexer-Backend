@@ -6,7 +6,12 @@
 x-app-env: &app-env
   NODE_ENV: development
   LOG_LEVEL: ${LOG_LEVEL:-info}
+  # Owner/migration connection. The API and indexer use the least-privilege
+  # roles below instead; DATABASE_URL is only a fallback for both.
   DATABASE_URL: postgresql://folder:folder@postgres:5432/folder
+  # Least-privilege roles created by database/roles.sql (see docs/operations.md).
+  API_DATABASE_URL: ${API_DATABASE_URL:-postgresql://folder_api:folder_api@postgres:5432/folder}
+  INDEXER_DATABASE_URL: ${INDEXER_DATABASE_URL:-postgresql://folder_indexer:folder_indexer@postgres:5432/folder}
   STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
   STELLAR_NETWORK_PASSPHRASE: ${STELLAR_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
   FOLDER_CONTRACT_ID: ${FOLDER_CONTRACT_ID:-CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV}
@@ -30,6 +35,9 @@ services:
       - postgres-data:/var/lib/postgresql/data
       # Applied on first start of an empty volume; the indexer re-applies it (idempotent).
       - ../database/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+      # Creates the least-privilege folder_api / folder_indexer roles. Runs after
+      # the schema so grants target existing tables; idempotent on re-apply.
+      - ../database/roles.sql:/docker-entrypoint-initdb.d/002-roles.sql:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U folder -d folder']
       interval: 5s
@@ -56,7 +64,10 @@ services:
       dockerfile: deploy/Dockerfile
     image: folder-indexer-backend:local
     command: ['node', 'dist/indexer/main.js']
-    environment: *app-env
+    environment:
+      <<: *app-env
+      # The indexer connects with its own DML-only role.
+      DATABASE_URL: ${INDEXER_DATABASE_URL:-postgresql://folder_indexer:folder_indexer@postgres:5432/folder}
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,6 +87,8 @@ services:
     command: ['node', 'dist/server.js']
     environment:
       <<: *app-env
+      # The API connects with its SELECT-only (plus API-owned tables) role.
+      DATABASE_URL: ${API_DATABASE_URL:-postgresql://folder_api:folder_api@postgres:5432/folder}
       PORT: 3000
     ports:
       - '${API_PORT:-3000}:3000'

@@ -3,6 +3,8 @@
  * TEST_DATABASE_URL is set (CI provides one; locally see CONTRIBUTING.md).
  * The database is wiped: point it at a throwaway database.
  */
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { Pool } from 'pg';
 import { migrate } from '../db/migrate';
 import { GetEventsResult } from '../indexer/rpc';
@@ -11,6 +13,17 @@ import { addr, makeEvent, OWNER, str, TESTNET_CONTRACT, testnetEvents, u32 } fro
 
 const url = process.env.TEST_DATABASE_URL;
 const describeDb = url ? describe : describe.skip;
+
+const API_ROLE = 'folder_api';
+const API_ROLE_PASSWORD = 'folder_api_test_password';
+const ROLES_SQL = readFileSync(join(__dirname, '..', '..', 'database', 'roles.sql'), 'utf8');
+
+function apiRoleUrl(base: string): string {
+  const parsed = new URL(base);
+  parsed.username = API_ROLE;
+  parsed.password = API_ROLE_PASSWORD;
+  return parsed.toString();
+}
 
 function page(events = testnetEvents, cursor = 'cursor-1'): GetEventsResult {
   return { events, cursor, latestLedger: 5654239, oldestLedger: 5533280 };
@@ -23,6 +36,9 @@ describeDb('indexer against Postgres', () => {
     pool = new Pool({ connectionString: url });
     await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
     await migrate(pool);
+    // Create the least-privilege roles and grant them access to the schema.
+    await pool.query(ROLES_SQL);
+    await pool.query(`ALTER ROLE ${API_ROLE} WITH LOGIN PASSWORD '${API_ROLE_PASSWORD}'`);
   });
 
   beforeEach(async () => {
@@ -143,5 +159,49 @@ describeDb('indexer against Postgres', () => {
     await pool.query('ALTER TABLE folders ADD COLUMN cid TEXT');
     await expect(migrate(pool)).rejects.toThrow(/Legacy schema detected/);
     await pool.query('ALTER TABLE folders DROP COLUMN cid');
+  });
+
+  describe('least-privilege API role', () => {
+    let apiPool: Pool;
+
+    beforeAll(() => {
+      apiPool = new Pool({ connectionString: apiRoleUrl(url as string) });
+    });
+
+    afterAll(async () => {
+      await apiPool.end();
+    });
+
+    it('can SELECT from read-model tables', async () => {
+      await processPage(pool, TESTNET_CONTRACT, page());
+      const { rows } = await apiPool.query('SELECT owner, name FROM folders WHERE owner = $1', [OWNER]);
+      expect(rows[0]).toMatchObject({ name: 'smoke-1794262900.folder' });
+      const templates = await apiPool.query('SELECT id FROM templates ORDER BY id');
+      expect(templates.rows.map((r) => Number(r.id))).toEqual([1, 2, 3]);
+    });
+
+    it('cannot INSERT INTO folders', async () => {
+      await expect(
+        apiPool.query(
+          'INSERT INTO folders (owner, name, template_id) VALUES ($1, $2, $3)',
+          [OWNER, 'forbidden.folder', '1']
+        )
+      ).rejects.toThrow(/permission denied/i);
+    });
+
+    it('cannot UPDATE or DELETE from folders', async () => {
+      await expect(
+        apiPool.query('UPDATE folders SET name = $1 WHERE owner = $2', ['hacked.folder', OWNER])
+      ).rejects.toThrow(/permission denied/i);
+      await expect(apiPool.query('DELETE FROM folders WHERE owner = $1', [OWNER])).rejects.toThrow(
+        /permission denied/i
+      );
+    });
+
+    it('cannot write to indexer-owned tables', async () => {
+      await expect(
+        apiPool.query('INSERT INTO indexer_state (id, cursor) VALUES (1, $1)', ['x'])
+      ).rejects.toThrow(/permission denied/i);
+    });
   });
 });

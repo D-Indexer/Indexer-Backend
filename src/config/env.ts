@@ -15,6 +15,8 @@ const envSchema = z
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     PORT: z.coerce.number().int().positive().max(65535).default(3000),
     DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+    API_DATABASE_URL: z.string().min(1).optional(),
+    INDEXER_DATABASE_URL: z.string().min(1).optional(),
     STELLAR_RPC_URL: z
       .string({ required_error: `STELLAR_RPC_URL is required (testnet: ${TESTNET_RPC_URL})` })
       .url('STELLAR_RPC_URL must be a valid URL'),
@@ -29,6 +31,12 @@ const envSchema = z
     IPFS_API_URL: z.string().url('IPFS_API_URL must be a valid URL'),
     IPFS_GATEWAY: z.string().url('IPFS_GATEWAY must be a valid URL'),
     IPFS_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+    CID_DENYLIST_ENABLED: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((value) => value === 'true'),
+    RESUMABLE_UPLOAD_DIR: z.string().min(1).default('tmp/resumable-uploads'),
+    RESUMABLE_UPLOAD_TTL_MS: z.coerce.number().int().positive().default(86400000),
     CORS_ORIGIN: z.string().optional(),
     REQUEST_BODY_LIMIT: z.string().default('1mb'),
     INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
@@ -54,6 +62,16 @@ const envSchema = z
   });
 
 export type AppEnv = z.infer<typeof envSchema>;
+
+/** Connection string for the internet-facing API process (falls back to DATABASE_URL). */
+export function getApiDatabaseUrl(env: AppEnv): string {
+  return env.API_DATABASE_URL ?? env.DATABASE_URL;
+}
+
+/** Connection string for the indexer process (falls back to DATABASE_URL). */
+export function getIndexerDatabaseUrl(env: AppEnv): string {
+  return env.INDEXER_DATABASE_URL ?? env.DATABASE_URL;
+}
 
 let cachedEnv: AppEnv | null = null;
 

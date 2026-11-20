@@ -53,4 +53,54 @@ describe('environment configuration', () => {
       loadEnv({ ...validEnv, NODE_ENV: 'production', CORS_ORIGIN: 'https://folder.app' }).CORS_ORIGIN
     ).toBe('https://folder.app');
   });
+
+  it('parses resumable upload tuning with defaults', () => {
+    const env = loadEnv(validEnv);
+    expect(env.RESUMABLE_UPLOAD_DIR).toBeTruthy();
+    expect(env.RESUMABLE_UPLOAD_TTL_MS).toBeGreaterThan(0);
+    expect(env.RESUMABLE_UPLOAD_MAX_BYTES).toBeGreaterThan(0);
+    expect(env.RESUMABLE_UPLOAD_CLEANUP_INTERVAL_MS).toBeGreaterThan(0);
+  });
+
+  it('accepts resumable upload overrides', () => {
+    const env = loadEnv({
+      ...validEnv,
+      RESUMABLE_UPLOAD_DIR: '/var/tmp/uploads',
+      RESUMABLE_UPLOAD_TTL_MS: '3600000',
+      RESUMABLE_UPLOAD_MAX_BYTES: '104857600',
+      RESUMABLE_UPLOAD_CLEANUP_INTERVAL_MS: '60000',
+    });
+    expect(env.RESUMABLE_UPLOAD_DIR).toBe('/var/tmp/uploads');
+    expect(env.RESUMABLE_UPLOAD_TTL_MS).toBe(3600000);
+    expect(env.RESUMABLE_UPLOAD_MAX_BYTES).toBe(104857600);
+    expect(env.RESUMABLE_UPLOAD_CLEANUP_INTERVAL_MS).toBe(60000);
+  });
+
+  it('rejects invalid resumable upload tuning', () => {
+    expect(() => loadEnv({ ...validEnv, RESUMABLE_UPLOAD_TTL_MS: '0' })).toThrow(/RESUMABLE_UPLOAD_TTL_MS/);
+    expect(() => loadEnv({ ...validEnv, RESUMABLE_UPLOAD_MAX_BYTES: '-1' })).toThrow(
+      /RESUMABLE_UPLOAD_MAX_BYTES/
+    );
+  });
+
+  it('falls back to DATABASE_URL when per-process urls are unset', () => {
+    const env = loadEnv(validEnv);
+    expect(env.API_DATABASE_URL).toBe(validEnv.DATABASE_URL);
+    expect(env.INDEXER_DATABASE_URL).toBe(validEnv.DATABASE_URL);
+  });
+
+  it('accepts separate API and indexer database urls', () => {
+    const env = loadEnv({
+      ...validEnv,
+      API_DATABASE_URL: 'postgresql://folder_api:secret@localhost:5432/folder_test',
+      INDEXER_DATABASE_URL: 'postgresql://folder_indexer:secret@localhost:5432/folder_test',
+    });
+    expect(env.API_DATABASE_URL).toBe('postgresql://folder_api:secret@localhost:5432/folder_test');
+    expect(env.INDEXER_DATABASE_URL).toBe('postgresql://folder_indexer:secret@localhost:5432/folder_test');
+  });
+
+  it('rejects invalid per-process database urls', () => {
+    expect(() => loadEnv({ ...validEnv, API_DATABASE_URL: 'not-a-url' })).toThrow(/API_DATABASE_URL/);
+    expect(() => loadEnv({ ...validEnv, INDEXER_DATABASE_URL: 'not-a-url' })).toThrow(/INDEXER_DATABASE_URL/);
+  });
 });
