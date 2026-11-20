@@ -2,7 +2,7 @@ import { StrKey } from '@stellar/stellar-sdk';
 import { z } from 'zod';
 
 const optionalPositiveInt = z
-  .union([z.literal('').transform(() => undefined), z.coerce.number().int().positive()])
+  .union([z.literal('').transform((): undefined => undefined), z.coerce.number().int().positive()])
   .optional();
 
 /** Deployed Folder contract on Stellar testnet (Indexer-Contract deployments/testnet.json). */
@@ -29,7 +29,10 @@ const envSchema = z
     IPFS_API_URL: z.string().url('IPFS_API_URL must be a valid URL'),
     IPFS_GATEWAY: z.string().url('IPFS_GATEWAY must be a valid URL'),
     IPFS_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
-    CORS_ORIGIN: z.string().optional(),
+    CORS_ORIGIN: z
+      .string()
+      .optional()
+      .transform((value) => value),
     REQUEST_BODY_LIMIT: z.string().default('1mb'),
     INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
     INDEXER_PAGE_LIMIT: z.coerce.number().int().min(1).max(10000).default(200),
@@ -44,7 +47,8 @@ const envSchema = z
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   })
   .superRefine((env, ctx) => {
-    if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN?.trim()) {
+    const corsOrigin = env.CORS_ORIGIN;
+    if (env.NODE_ENV === 'production' && !(corsOrigin !== undefined && corsOrigin.trim() !== '')) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['CORS_ORIGIN'],

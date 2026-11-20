@@ -1,16 +1,18 @@
 import { Request, Response } from 'express';
 import { pinFile } from '../services/ipfs';
-import { asyncHandler } from '../middleware/asyncHandler';
 import { uploadFileSchema } from '../validation/schemas';
 import { sniffContentType } from '../validation/fileType';
 import { badRequest } from '../http/errors';
 
-export const upload = asyncHandler(async (req: Request, res: Response) => {
+export const upload = async (req: Request, res: Response): Promise<void> => {
   const file = req.file;
   if (!file) throw badRequest('No file provided');
 
   const result = uploadFileSchema.safeParse({ mimetype: file.mimetype, size: file.size });
-  if (!result.success) throw badRequest(result.error.errors[0].message);
+  if (!result.success) {
+    const firstError = result.error.errors[0];
+    throw badRequest(firstError ? firstError.message : 'Invalid file');
+  }
 
   if (sniffContentType(file.buffer) !== file.mimetype) {
     throw badRequest('File content does not match its declared type');
@@ -18,4 +20,4 @@ export const upload = asyncHandler(async (req: Request, res: Response) => {
 
   const cid = await pinFile(file.buffer, file.originalname);
   res.json({ cid });
-});
+};
