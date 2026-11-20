@@ -42,6 +42,12 @@ const envSchema = z
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+    UPLOAD_MAX_IMAGE_PIXELS: z.coerce.number().int().positive().default(40_000_000),
+    UPLOAD_MAX_IMAGE_SIDE: z.coerce.number().int().positive().default(10000),
+    UPLOAD_MAX_CONCURRENT: z.coerce.number().int().positive().default(4),
+    UPLOAD_BUNDLE_MAX_FILES: z.coerce.number().int().positive().default(10),
+    UPLOAD_BUNDLE_MAX_BYTES: z.coerce.number().int().positive().default(30 * 1024 * 1024),
+    PDF_PARSE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN?.trim()) {

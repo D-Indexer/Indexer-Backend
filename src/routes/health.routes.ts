@@ -3,6 +3,7 @@ import pool from '../db/client';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { getEnv } from '../config/env';
 import { readState, STATE } from '../indexer/stellar';
+import { getUploadConcurrency } from '../middleware/uploadSemaphore';
 
 const router = Router();
 const env = getEnv();
@@ -51,6 +52,7 @@ router.get(
         lastSuccessAt,
         lastError: state[STATE.lastError] ?? null,
       },
+      uploads: getUploadConcurrency(),
       requestId: req.id,
     });
   })
