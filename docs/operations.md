@@ -132,10 +132,34 @@ the deployment ledger), truncate the tables above, and restart the indexer.
 - Backups: the read model can always be rebuilt from the ledger while events are in the RPC
   window. Beyond it, `contract_events` is the only copy, so back it up like any other
   database.
-- Use a least-privilege role in production. It needs `CREATE` for the migration and
-  read/write on the tables above.
 - Connect locally to the compose database:
   `docker compose exec postgres psql -U folder folder`.
+
+### Roles and privileges
+
+`database/roles.sql` (applied by `npm run db:migrate`, the indexer at startup and the compose
+init) defines three roles:
+
+| Role             | Purpose                          | Privileges                                                                 |
+| ---------------- | -------------------------------- | -------------------------------------------------------------------------- |
+| `folder_owner`   | Migrations / schema owner        | Owns the schema; `CREATE` and DDL. Used only by migrations.                |
+| `folder_indexer` | Indexer process                  | `SELECT`/`INSERT`/`UPDATE`/`DELETE` on indexer tables (`contract_events`, `folders`, `templates`, `portfolios`, `admins`, `indexer_state`). No DDL at runtime. |
+| `folder_api`     | API process (internet-facing)    | `SELECT` on read-model tables; `INSERT`/`UPDATE`/`DELETE` only on API-owned tables (e.g. idempotency keys). |
+
+The API must run with `folder_api` only. An `INSERT INTO folders` as `folder_api` fails with
+`permission denied for table folders`; a Postgres-backed test asserts this in CI.
+
+Each process can use its own connection string, falling back to `DATABASE_URL`:
+
+| Variable              | Used by | Falls back to   |
+| --------------------- | ------- | --------------- |
+| `API_DATABASE_URL`     | API     | `DATABASE_URL`  |
+| `INDEXER_DATABASE_URL` | Indexer | `DATABASE_URL`  |
+
+Compose creates the restricted roles and points each service at its own URL. In production,
+give the API only `API_DATABASE_URL` (as `folder_api`) and the indexer only
+`INDEXER_DATABASE_URL` (as `folder_indexer`); keep the owner credentials for migrations.
+=======
 
 ## IPFS
 
@@ -147,6 +171,45 @@ the deployment ledger), truncate the tables above, and restart the indexer.
   pinning-provider interface is a tracked issue.
 - Check a node: `docker compose exec ipfs ipfs id`. List pins:
   `docker compose exec ipfs ipfs pin ls --type=recursive`.
+
+### CID denylist (takedowns)
+
+On-chain references can't be removed, but we can stop serving and pinning a CID. The
+`cid_denylist` table records each takedown: `cid`, a reason category, an external reference
+(e.g. a ticket or notice id), `created_by` and `created_at`. Every add/remove is auditable
+through these columns; never delete rows to "undo" a takedown — remove the entry via the CLI
+so the change is recorded.
+
+Manage entries with the CLI:
+
+```bash
+npm run denylist -- add <cid> --reason copyright --reference TICKET-123 --by alice
+npm run denylist -- remove <cid> --by alice
+npm run denylist -- list
+# in the container image (no ts-node there):
+docker compose exec api node dist/cli/denylist.js add <cid> --reason copyright --reference TICKET-123 --by alice
+```
+
+Enforcement points:
+
+- **Upload**: `POST /upload` rejects re-uploading content whose hash matches a denylisted CID.
+- **Gateway proxy**: requests for a denylisted CID return `451 Unavailable For Legal Reasons`.
+- **Reconciler**: never re-pins a denylisted CID and unpins it if already pinned, so a
+  denylisted CID is unpinned and unserveable within one reconciler cycle.
+- **API responses**: resources whose content is denylisted are flagged with
+  `contentRemoved: true` (the on-chain record is still returned).
+
+#### Shared lists (`sha256(CID)`)
+
+Lists can be shared without republishing CIDs by hashing each CID: the entry is the hex
+`sha256(CID)` (the CID string, UTF-8). The CLI accepts either form, so a shared list can be
+imported as-is:
+
+```bash
+npm run denylist -- add sha256:<hex digest> --reason copyright --reference NOTICE-42 --by alice
+```
+
+Hashed entries match the same enforcement points as plain CIDs.
 
 ## Shutdown
 

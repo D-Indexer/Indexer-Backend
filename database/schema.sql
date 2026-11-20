@@ -63,3 +63,22 @@ CREATE TABLE IF NOT EXISTS indexer_state (
   value       TEXT NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Takedown denylist (issue #213). CIDs listed here must never be pinned or
+-- served: uploads are rejected, the gateway returns 451, the reconciler
+-- unpins, and API responses flag `contentRemoved: true`.
+-- `cid_hash` is the community double-hash format, sha256(CID) as lowercase
+-- hex, so shared lists can be applied without republishing the raw CID.
+CREATE TABLE IF NOT EXISTS cid_denylist (
+  cid          TEXT PRIMARY KEY,
+  cid_hash     TEXT NOT NULL,
+  reason       TEXT NOT NULL,
+  reference    TEXT,
+  created_by   TEXT NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cid_denylist_cid_hash
+  ON cid_denylist (cid_hash);
+CREATE INDEX IF NOT EXISTS idx_cid_denylist_created_at
+  ON cid_denylist (created_at);
