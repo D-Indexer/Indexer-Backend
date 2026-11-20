@@ -26,6 +26,16 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      kubo:
+        # Keep in sync with deploy/docker-compose.yml (pinned Kubo version).
+        image: ipfs/kubo:v0.30.0
+        ports:
+          - 5001:5001
+        options: >-
+          --health-cmd "ipfs id"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     steps:
       - name: Checkout
@@ -50,6 +60,9 @@ jobs:
         env:
           # Enables the Postgres-backed indexer tests (idempotency, atomic cursor).
           TEST_DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          # Enables the IPFS integration tests that hit the real Kubo node above.
+          IPFS_INTEGRATION: "1"
+          IPFS_API_URL: http://localhost:5001
         run: npm test
 
       - name: Build
