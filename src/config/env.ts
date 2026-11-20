@@ -42,6 +42,15 @@ const envSchema = z
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+    ERROR_TRACKING_DSN: z
+      .union([z.literal('').transform(() => undefined), z.string().url('ERROR_TRACKING_DSN must be a valid URL')])
+      .optional(),
+    ERROR_TRACKING_RELEASE: z
+      .union([z.literal('').transform(() => undefined), z.string().min(1)])
+      .optional(),
+    ERROR_TRACKING_ENVIRONMENT: z
+      .union([z.literal('').transform(() => undefined), z.string().min(1)])
+      .optional(),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN?.trim()) {
