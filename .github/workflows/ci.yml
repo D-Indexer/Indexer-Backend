@@ -65,6 +65,60 @@ jobs:
           IPFS_GATEWAY: https://ipfs.io/ipfs
         run: node -e "require('./dist/app'); require('./dist/indexer/stellar'); require('./dist/db/migrate')"
 
+  schema-upgrade:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: folder
+          POSTGRES_PASSWORD: folder
+          POSTGRES_DB: folder_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U folder"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history and tags so the script can find the latest release tag.
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Verify schema upgrades from previous release
+        env:
+          TEST_DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: folder
+          PGPASSWORD: folder
+        run: sh scripts/schema-upgrade-check.sh
+
+  devcontainer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build dev container image
+        run: docker build -f .devcontainer/Dockerfile -t folder-indexer-devcontainer:ci .devcontainer
+
   docker:
     runs-on: ubuntu-latest
     needs: check

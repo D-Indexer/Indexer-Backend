@@ -17,6 +17,15 @@ x-app-env: &app-env
   IPFS_GATEWAY: ${IPFS_GATEWAY:-https://ipfs.io/ipfs}
   CORS_ORIGIN: ${CORS_ORIGIN:-}
 
+# Chaos profile overrides (issue #251). When `--profile chaos` is active these
+# values win over x-app-env and route every upstream through Toxiproxy.
+# Toxiproxy proxies are created by scripts/chaos/init.sh; the proxy names are
+# postgres, ipfs and rpc.
+x-chaos-env: &chaos-env
+  DATABASE_URL: postgresql://folder:folder@toxiproxy:5433/folder
+  IPFS_API_URL: http://toxiproxy:5002
+  STELLAR_RPC_URL: http://toxiproxy:8545
+
 services:
   postgres:
     image: postgres:16
@@ -56,7 +65,9 @@ services:
       dockerfile: deploy/Dockerfile
     image: folder-indexer-backend:local
     command: ['node', 'dist/indexer/main.js']
-    environment: *app-env
+    environment:
+      <<: *app-env
+      <<: *chaos-env
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,6 +87,7 @@ services:
     command: ['node', 'dist/server.js']
     environment:
       <<: *app-env
+      <<: *chaos-env
       PORT: 3000
     ports:
       - '${API_PORT:-3000}:3000'
@@ -98,6 +110,31 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Toxiproxy fronts Postgres, Kubo and the Stellar RPC so network faults can be
+  # injected locally. Only started with `docker compose --profile chaos up`.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    profiles: ['chaos']
+    command: ['-host', '0.0.0.0']
+    ports:
+      # Control API used by scripts/chaos/*.sh.
+      - '127.0.0.1:8474:8474'
+      # Proxy ports (one per upstream).
+      - '127.0.0.1:5433:5433'
+      - '127.0.0.1:5002:5002'
+      - '127.0.0.1:8545:8545'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ipfs:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:8474/version']
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   postgres-data:
