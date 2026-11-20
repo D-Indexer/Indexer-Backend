@@ -4,6 +4,7 @@ import folderRoutes from './routes/folder.routes';
 import templateRoutes from './routes/template.routes';
 import uploadRoutes from './routes/upload.routes';
 import portfolioRoutes from './routes/portfolio.routes';
+import ipfsRoutes from './routes/ipfs.routes';
 import healthRoutes from './routes/health.routes';
 import { errorHandler } from './middleware/errorHandler';
 import { multerErrorHandler } from './middleware/multerErrorHandler';
@@ -48,6 +49,7 @@ export function createApp(env: AppEnv) {
   app.use('/templates', templateRoutes);
   app.use('/portfolios', portfolioRoutes);
   app.use('/upload', uploadRoutes);
+  app.use('/ipfs', ipfsRoutes);
   app.use('/health', healthRoutes);
 
   app.use(notFoundHandler);
