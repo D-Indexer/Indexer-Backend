@@ -4,6 +4,15 @@ import { applyEvent } from './handlers';
 import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
 import { logger } from '../utils/logger';
 
+/** Subscriber types that receive an outbox row for every applied event. */
+export const OUTBOX_SUBSCRIBERS = ['webhook', 'changes'] as const;
+export type OutboxSubscriber = (typeof OUTBOX_SUBSCRIBERS)[number];
+
+/** Stable idempotency key for an outbox row; sinks must dedupe on it. */
+export function outboxIdempotencyKey(eventId: string, subscriber: string): string {
+  return `${eventId}:${subscriber}`;
+}
+
 /** indexer_state keys. */
 export const STATE = {
   cursor: 'cursor',
@@ -147,6 +156,7 @@ async function storeEvent(
   await client.query('SAVEPOINT apply_event');
   try {
     await applyEvent(client, decoded, new Date(event.ledgerClosedAt));
+    await enqueueOutbox(client, event, decoded);
     await client.query('RELEASE SAVEPOINT apply_event');
     return 'applied';
   } catch (err) {
@@ -159,6 +169,32 @@ async function storeEvent(
     ]);
     logger.warn('Rejected contract event the database refused', { id: event.id, topic, error: message });
     return 'rejected';
+  }
+}
+
+/**
+ * Insert one outbox row per subscriber for an applied event. Runs inside the
+ * page transaction, so a rolled-back page leaves no rows and a committed page
+ * always has them (crash-safe delivery on restart). ON CONFLICT keeps replays
+ * idempotent.
+ */
+async function enqueueOutbox(client: PoolClient, event: RawEvent, decoded: DecodedEvent): Promise<void> {
+  const payload = JSON.stringify({
+    id: event.id,
+    ledger: event.ledger,
+    ledgerClosedAt: event.ledgerClosedAt,
+    txHash: event.txHash,
+    contractId: event.contractId,
+    topic: decodeTopic(event) ?? '',
+    event: decoded,
+  });
+  for (const subscriber of OUTBOX_SUBSCRIBERS) {
+    await client.query(
+      `INSERT INTO outbox (idempotency_key, event_id, subscriber, payload)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (idempotency_key) DO NOTHING`,
+      [outboxIdempotencyKey(event.id, subscriber), event.id, subscriber, payload]
+    );
   }
 }
 
