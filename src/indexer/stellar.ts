@@ -3,6 +3,7 @@ import { decodeEvent, decodeTopic, DecodedEvent, EventDecodeError } from './deco
 import { applyEvent } from './handlers';
 import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
 import { logger } from '../utils/logger';
+import { runWithContext } from '../utils/context';
 
 /** indexer_state keys. */
 export const STATE = {
@@ -168,6 +169,12 @@ async function storeEvent(
  * after a crash or a manual cursor rewind is safe.
  */
 export async function processPage(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
+  return runWithContext({ pageId: page.cursor, cursor: page.cursor }, () =>
+    processPageInContext(db, contractId, page)
+  );
+}
+
+async function processPageInContext(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
   const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0 };
   const client = await db.connect();
 
@@ -241,6 +248,15 @@ function requestedLedger(params: GetEventsParams): number {
 export async function pollOnce(deps: IndexerDependencies): Promise<{ events: number; result: PageResult }> {
   const state = await readState(deps.db);
   const { params, fromConfig } = await nextRequest(deps, state);
+  const pageId = params.cursor ?? `start:${params.startLedger}`;
+  return runWithContext({ pageId, cursor: params.cursor }, () => pollOnceInContext(deps, params, fromConfig));
+}
+
+async function pollOnceInContext(
+  deps: IndexerDependencies,
+  params: GetEventsParams,
+  fromConfig: boolean
+): Promise<{ events: number; result: PageResult }> {
 
   let page: GetEventsResult;
   try {

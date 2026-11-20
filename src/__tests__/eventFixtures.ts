@@ -5,6 +5,7 @@ import fixture from './fixtures/testnet-events.json';
 export const TESTNET_CONTRACT = 'CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV';
 export const OWNER = 'GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM';
 export const ADMIN = 'GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ';
+export const RECIPIENT = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
 
 /** Real events emitted by the deployed testnet contract. */
 export const testnetEvents: RawEvent[] = fixture.events;
@@ -35,4 +36,20 @@ export function makeEvent(
     value: (Array.isArray(fields) ? xdr.ScVal.scvVec(fields) : fields).toXDR('base64'),
     ...overrides,
   };
+}
+
+/**
+ * Build a synthetic `port_transfer` event.
+ *
+ * Expected shape (to be confirmed with Indexer-Contract):
+ *   topics: [Symbol("port_transfer")]
+ *   data:   [tokenId: u32, from: Address, to: Address]
+ */
+export function makeTransferEvent(
+  tokenId: number,
+  from: string,
+  to: string,
+  overrides: Partial<RawEvent> = {}
+): RawEvent {
+  return makeEvent('port_transfer', [u32(tokenId), addr(from), addr(to)], overrides);
 }

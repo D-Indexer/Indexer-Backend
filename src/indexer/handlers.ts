@@ -4,6 +4,13 @@ import type { DecodedEvent } from './decode';
 export type Queryable = Pick<PoolClient, 'query'>;
 
 /**
+ * Feature flag for portfolio ownership transfers (see docs/architecture.md).
+ * While disabled, `port_transfer` events are ignored so the read model keeps
+ * behaving exactly as before transfers were introduced.
+ */
+export const TRANSFERS_ENABLED = process.env.PORTFOLIO_TRANSFERS_ENABLED === 'true';
+
+/**
  * Apply one decoded contract event to the read model. Runs inside the page
  * transaction (see processPage); `at` is the ledger close time of the event.
  * Each event id is applied at most once, so handlers don't need to be
@@ -62,14 +69,21 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
       return;
 
     case 'port_mint':
-      // mint_portfolio also sets the owner's selected template.
+      // mint_portfolio also sets the owner's selected template. Portfolios are
+      // keyed by token id; owner is an indexed attribute so transfers don't
+      // orphan data. The token id is the agreed stable identifier.
       await db.query(
-        `INSERT INTO portfolios (owner, template_id, ipfs_cid, minted_at, updated_at)
-         VALUES ($1, $2, $3, $4, $4)
-         ON CONFLICT (owner) DO UPDATE
-           SET template_id = EXCLUDED.template_id, ipfs_cid = EXCLUDED.ipfs_cid,
-               updated_at = EXCLUDED.updated_at`,
-        [event.owner, event.templateId, event.ipfsCid, at]
+        `INSERT INTO portfolios (token_id, owner, template_id, ipfs_cid, minted_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $5)
+         ON CONFLICT (token_id) DO UPDATE
+           SET owner = EXCLUDED.owner, template_id = EXCLUDED.template_id,
+               ipfs_cid = EXCLUDED.ipfs_cid, updated_at = EXCLUDED.updated_at`,
+        [event.tokenId, event.owner, event.templateId, event.ipfsCid, at]
+      );
+      await db.query(
+        `INSERT INTO ownership_history (token_id, owner, acquired_at, reason)
+         VALUES ($1, $2, $3, 'mint') ON CONFLICT DO NOTHING`,
+        [event.tokenId, event.owner, at]
       );
       await db.query('UPDATE folders SET template_id = $2, updated_at = $3 WHERE owner = $1', [
         event.owner,
@@ -79,11 +93,26 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
       return;
 
     case 'port_upd':
-      await db.query('UPDATE portfolios SET ipfs_cid = $2, updated_at = $3 WHERE owner = $1', [
-        event.owner,
+      await db.query('UPDATE portfolios SET ipfs_cid = $2, updated_at = $3 WHERE token_id = $1', [
+        event.tokenId,
         event.ipfsCid,
         at,
       ]);
+      return;
+
+    case 'port_transfer':
+      // Ownership transfer: move the owner attribute and record history
+      // without deleting any portfolio data. No-op while the feature is off.
+      if (!TRANSFERS_ENABLED) return;
+      await db.query(
+        `UPDATE portfolios SET owner = $2, updated_at = $3 WHERE token_id = $1`,
+        [event.tokenId, event.to, at]
+      );
+      await db.query(
+        `INSERT INTO ownership_history (token_id, owner, acquired_at, reason)
+         VALUES ($1, $2, $3, 'transfer') ON CONFLICT DO NOTHING`,
+        [event.tokenId, event.to, at]
+      );
       return;
   }
 }
