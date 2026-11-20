@@ -40,7 +40,15 @@ if (require.main === module) {
   // Imported lazily so loading this module (e.g. in tests) doesn't need env.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const pool: Pool = require('./client').default;
-  migrate(pool)
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { waitForDatabase } = require('./client');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { env } = require('../config/env');
+  waitForDatabase(pool, {
+    timeoutMs: env.DB_WAIT_TIMEOUT_MS,
+    maxDelayMs: env.DB_WAIT_MAX_DELAY_MS,
+  })
+    .then(() => migrate(pool))
     .then(() => logger.info('Migrations applied'))
     .catch((err) => {
       logger.error('Migration failed', { error: err instanceof Error ? err.message : err });

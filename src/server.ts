@@ -3,10 +3,19 @@ import { createApp } from './app';
 import { getEnv } from './config/env';
 import pool from './db/client';
 import { logger } from './utils/logger';
+import { installProcessHandlers } from './utils/process';
+import { initErrorReporter, getErrorReporter } from './utils/errorReporter';
 
 /** API process entrypoint. The indexer runs separately: see src/indexer/main.ts. */
 const env = getEnv();
 const app = createApp(env);
+
+const errorReporter = initErrorReporter({
+  dsn: env.ERROR_TRACKING_DSN,
+  environment: env.NODE_ENV,
+  release: env.RELEASE_VERSION,
+  logger,
+});
 
 const server = app.listen(env.PORT, () => {
   logger.info('Server started', { port: env.PORT, nodeEnv: env.NODE_ENV });
@@ -43,13 +52,11 @@ process.on('SIGINT', () => {
   void shutdown('SIGINT');
 });
 
-process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled promise rejection', { reason });
-});
-
-process.on('uncaughtException', (err) => {
-  logger.error('Uncaught exception', { error: err.message });
-  void shutdown('uncaughtException');
+installProcessHandlers({
+  logger,
+  shutdown,
+  errorReporter: getErrorReporter(),
+  isProduction: env.NODE_ENV === 'production',
 });
 
 export default app;

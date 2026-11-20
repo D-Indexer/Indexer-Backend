@@ -4,6 +4,11 @@ import { applyEvent } from './handlers';
 import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
 import { logger } from '../utils/logger';
 
+/** Ledger span covered by each `contract_events` partition. */
+export const PARTITION_LEDGER_SPAN = 1_000_000;
+/** How many partitions beyond the current one to keep ready. */
+export const PARTITION_LOOKAHEAD = 2;
+
 /** indexer_state keys. */
 export const STATE = {
   cursor: 'cursor',
@@ -69,6 +74,49 @@ export async function readState(db: Pick<Pool, 'query'>): Promise<Partial<Record
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
 }
 
+/** Name of the partition covering `ledger` (range [start, start + span)). */
+export function partitionNameForLedger(ledger: number, span = PARTITION_LEDGER_SPAN): string {
+  const start = Math.floor(ledger / span) * span;
+  return `contract_events_p${start}`;
+}
+
+/**
+ * Create the partition covering `ledger` (and the next `lookahead` ones) if
+ * missing, plus the default partition as a safety net. Idempotent and safe to
+ * call concurrently: CREATE TABLE IF NOT EXISTS + CREATE ... PARTITION OF are
+ * guarded by the catalog, and duplicate-object races are ignored.
+ */
+export async function ensurePartitions(
+  db: Pick<Pool, 'query'>,
+  ledger: number,
+  lookahead = PARTITION_LOOKAHEAD,
+  span = PARTITION_LEDGER_SPAN
+): Promise<void> {
+  if (!Number.isFinite(ledger) || ledger < 0) return;
+  const first = Math.floor(ledger / span) * span;
+  for (let i = 0; i <= lookahead; i++) {
+    const start = first + i * span;
+    const end = start + span;
+    const name = `contract_events_p${start}`;
+    try {
+      await db.query(
+        `CREATE TABLE IF NOT EXISTS ${name} PARTITION OF contract_events
+           FOR VALUES FROM (${start}) TO (${end})`
+      );
+    } catch (err) {
+      // 42P07 duplicate_table / 23505 unique_violation: another worker won the race.
+      const code = (err as { code?: unknown })?.code;
+      if (code !== '42P07' && code !== '23505') throw err;
+    }
+  }
+  try {
+    await db.query('CREATE TABLE IF NOT EXISTS contract_events_default PARTITION OF contract_events DEFAULT');
+  } catch (err) {
+    const code = (err as { code?: unknown })?.code;
+    if (code !== '42P07' && code !== '23505') throw err;
+  }
+}
+
 export async function writeState(
   db: Pick<Pool, 'query'>,
   entries: Partial<Record<string, string | null>>
@@ -114,6 +162,9 @@ async function storeEvent(
   }
 
   const status = error ? 'rejected' : decoded ? 'applied' : 'ignored';
+  // contract_events is range-partitioned on ledger; the primary key is
+  // (ledger, id) and a separate unique index on id preserves idempotent
+  // inserts. ON CONFLICT (id) targets that unique index.
   const inserted = await client.query(
     `INSERT INTO contract_events
        (id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error)
@@ -182,6 +233,9 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
     // The paging cursor encodes how far the RPC scanned (the chain tip for a
     // partial page), which is further than the last event's ledger.
     const lastLedger = scannedLedger(page);
+    // Keep partitions ready ahead of the chain tip so inserts never fall into
+    // the default partition during normal operation.
+    await ensurePartitions(client, Math.max(lastLedger, page.latestLedger));
     await writeState(client, {
       [STATE.cursor]: page.cursor,
       [STATE.startLedger]: null,
@@ -279,6 +333,10 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
       startLedger: resumeAt,
     });
   }
+
+  // Ensure partitions exist for the scanned range before inserting, even when
+  // the page is empty (e.g. a caught-up poll at the chain tip).
+  await ensurePartitions(deps.db, Math.max(scannedLedger(page), page.latestLedger));
 
   const result = await processPage(deps.db, deps.config.contractId, page);
   if (page.events.length > 0) {
