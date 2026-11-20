@@ -18,6 +18,8 @@
     "start": "node dist/server.js",
     "start:indexer": "node dist/indexer/main.js",
     "indexer": "node -r ts-node/register src/indexer/cli.ts",
+    "gen:events": "node -r ts-node/register scripts/gen-events.ts",
+    "gen:events:check": "node -r ts-node/register scripts/gen-events.ts --check",
     "test": "jest --runInBand",
     "test:integration": "TESTNET_INTEGRATION=1 jest --runInBand src/__tests__/testnet.integration.test.ts",
     "typecheck": "tsc --noEmit",
