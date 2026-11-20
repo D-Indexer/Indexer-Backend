@@ -1,13 +1,16 @@
 import { Pool } from 'pg';
-import { getEnv } from '../config/env';
+import type { AppEnv } from '../config/env';
 
-const env = getEnv();
+export type PoolEnv = Pick<
+  AppEnv,
+  'DATABASE_URL' | 'DB_MAX_CONNECTIONS' | 'DB_IDLE_TIMEOUT_MS' | 'DB_CONNECTION_TIMEOUT_MS'
+>;
 
-const pool = new Pool({
-  connectionString: env.DATABASE_URL,
-  max: env.DB_MAX_CONNECTIONS,
-  idleTimeoutMillis: env.DB_IDLE_TIMEOUT_MS,
-  connectionTimeoutMillis: env.DB_CONNECTION_TIMEOUT_MS,
-});
-
-export default pool;
+export function createPool(env: PoolEnv): Pool {
+  return new Pool({
+    connectionString: env.DATABASE_URL,
+    max: env.DB_MAX_CONNECTIONS,
+    idleTimeoutMillis: env.DB_IDLE_TIMEOUT_MS,
+    connectionTimeoutMillis: env.DB_CONNECTION_TIMEOUT_MS,
+  });
+}
