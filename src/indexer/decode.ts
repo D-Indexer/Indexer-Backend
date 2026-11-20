@@ -28,6 +28,10 @@ export type DecodedEvent =
 
 export type KnownTopic = DecodedEvent['topic'];
 
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 function parseScVal(base64: string, what: string): xdr.ScVal {
   try {
     return xdr.ScVal.fromXDR(base64, 'base64');
@@ -40,7 +44,12 @@ function parseScVal(base64: string, what: string): xdr.ScVal {
 export function decodeTopic(event: Pick<RawEvent, 'topic'>): string | null {
   if (event.topic.length === 0) return null;
   const first = parseScVal(event.topic[0], 'topic[0]');
-  return first.switch().name === 'scvSymbol' ? first.sym().toString() : null;
+  if (first.switch().name !== 'scvSymbol') return null;
+  try {
+    return first.sym().toString();
+  } catch (err) {
+    throw new EventDecodeError(`topic[0]: malformed symbol (${describe(err)})`);
+  }
 }
 
 class Fields {
@@ -72,15 +81,36 @@ class Fields {
   }
 
   address(index: number, name: string): string {
-    return Address.fromScVal(this.expect(index, name, 'scvAddress')).toString();
+    const value = this.expect(index, name, 'scvAddress');
+    try {
+      return Address.fromScVal(value).toString();
+    } catch (err) {
+      throw new EventDecodeError(
+        `${this.topic}: field ${index} (${name}) is not a valid address (${describe(err)})`
+      );
+    }
   }
 
   u32(index: number, name: string): number {
-    return this.expect(index, name, 'scvU32').u32();
+    const value = this.expect(index, name, 'scvU32');
+    try {
+      return value.u32();
+    } catch (err) {
+      throw new EventDecodeError(
+        `${this.topic}: field ${index} (${name}) is not a valid u32 (${describe(err)})`
+      );
+    }
   }
 
   string(index: number, name: string): string {
-    return this.expect(index, name, 'scvString').str().toString();
+    const value = this.expect(index, name, 'scvString');
+    try {
+      return value.str().toString();
+    } catch (err) {
+      throw new EventDecodeError(
+        `${this.topic}: field ${index} (${name}) is not a valid string (${describe(err)})`
+      );
+    }
   }
 }
 
@@ -89,7 +119,13 @@ function dataFields(topic: string, valueXdr: string): Fields {
   if (value.switch().name !== 'scvVec') {
     throw new EventDecodeError(`${topic}: data is ${value.switch().name}, expected scvVec`);
   }
-  return new Fields(topic, value.vec() ?? []);
+  let vec: xdr.ScVal[] | null;
+  try {
+    vec = value.vec();
+  } catch (err) {
+    throw new EventDecodeError(`${topic}: malformed data vector (${describe(err)})`);
+  }
+  return new Fields(topic, vec ?? []);
 }
 
 /**
@@ -97,6 +133,17 @@ function dataFields(topic: string, valueXdr: string): Fields {
  * (stored as `ignored`); throws EventDecodeError for malformed known topics.
  */
 export function decodeEvent(event: Pick<RawEvent, 'topic' | 'value'>): DecodedEvent | null {
+  try {
+    return decodeKnownEvent(event);
+  } catch (err) {
+    // Defensive: any unexpected SDK exception must not escape and poison the
+    // indexer. Surface it as a decode error so the event is stored as rejected.
+    if (err instanceof EventDecodeError) throw err;
+    throw new EventDecodeError(`unexpected decode failure: ${describe(err)}`);
+  }
+}
+
+function decodeKnownEvent(event: Pick<RawEvent, 'topic' | 'value'>): DecodedEvent | null {
   const topic = decodeTopic(event);
   switch (topic) {
     case 'init': {

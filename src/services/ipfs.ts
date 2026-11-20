@@ -4,6 +4,19 @@ import { HttpError } from '../http/errors';
 const env = getEnv();
 
 /**
+ * Build the headers for a Kubo RPC request, including the bearer token when
+ * `IPFS_API_AUTH` is configured. Kubo's `API.Authorizations` (>= 0.25) expects
+ * `Authorization: Bearer <token>` on every RPC call.
+ */
+function rpcHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (env.IPFS_API_AUTH) {
+    headers.Authorization = `Bearer ${env.IPFS_API_AUTH}`;
+  }
+  return headers;
+}
+
+/**
  * Add a file to the configured Kubo node and pin it (`pin=true` is explicit so
  * no separate pin call is needed). Upstream failures surface as 502/504.
  */
@@ -19,6 +32,7 @@ export async function pinFile(buffer: Buffer, filename: string): Promise<string>
   try {
     addResponse = await fetch(addUrl, {
       method: 'POST',
+      headers: rpcHeaders(),
       body: formData,
       signal: AbortSignal.timeout(env.IPFS_TIMEOUT_MS),
     });
@@ -43,4 +57,30 @@ export async function pinFile(buffer: Buffer, filename: string): Promise<string>
 
 export async function resolveUrl(cid: string): Promise<string> {
   return new URL(cid, `${env.IPFS_GATEWAY.replace(/\/$/, '')}/`).toString();
+}
+
+/**
+ * Probe the Kubo RPC without credentials and warn if it is accepted. This lets
+ * operators know when the node is reachable unauthenticated (e.g. a shared
+ * network or a misconfigured `API.Authorizations`). Safe to call at startup;
+ * never throws.
+ */
+export async function checkKuboAuth(): Promise<void> {
+  const versionUrl = new URL('/api/v0/version', env.IPFS_API_URL);
+  try {
+    const response = await fetch(versionUrl, {
+      method: 'POST',
+      signal: AbortSignal.timeout(env.IPFS_TIMEOUT_MS),
+    });
+    if (response.ok) {
+      console.warn(
+        '[ipfs] Kubo RPC accepted an unauthenticated request to /api/v0/version. ' +
+          'Restrict network access to the API and configure API.Authorizations ' +
+          '(IPFS_API_AUTH) so only authenticated callers can reach the node.',
+      );
+    }
+  } catch {
+    // Unreachable or timed out: nothing to warn about here; uploads will
+    // surface connectivity problems with their own errors.
+  }
 }

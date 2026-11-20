@@ -12,7 +12,45 @@ Invalid environment configuration: FOLDER_CONTRACT_ID: FOLDER_CONTRACT_ID is req
 
 Copy [`.env.example`](../.env.example) to `.env` for local runs; it is preset for testnet.
 
+## Secrets from files (`*_FILE`)
+
+Every secret-bearing variable can instead be supplied as a file, which is how
+Docker and Kubernetes secrets are mounted:
+
+| Variable          | File variant          |
+| ----------------- | --------------------- |
+| `DATABASE_URL`    | `DATABASE_URL_FILE`   |
+| `IPFS_API_AUTH`   | `IPFS_API_AUTH_FILE`  |
+
+Rules:
+
+- `<NAME>_FILE` points to a file whose **trimmed** content is used as the value
+  of `<NAME>` (trailing newlines from `echo`/secret mounts are ignored).
+- Setting both `<NAME>` and `<NAME>_FILE` is an error; the process exits at
+  startup. Prefer the file variant in containers.
+- A missing or unreadable file is an error.
+- Secret values are never printed: validation errors name the variable but
+  redact its value.
+
+Example with Docker Compose secrets:
+
+```yaml
+services:
+  api:
+    secrets:
+      - database_url
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+secrets:
+  database_url:
+    file: ./secrets/database_url.txt
+```
+
+With Kubernetes, mount the secret as a file and set `DATABASE_URL_FILE` (or
+`IPFS_API_AUTH_FILE`) to the mount path, e.g. `/etc/secrets/database_url`.
+
 ## Testnet values
+=======
 
 | Variable                     | Value                                                                     |
 | ---------------------------- | ------------------------------------------------------------------------- |
@@ -53,6 +91,7 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `INDEXER_MAX_BACKOFF_MS`          | `60000`                     | Cap for exponential backoff after failed polls                                             |
 | `INDEXER_STALE_AFTER_MS`          | `120000`                    | Indexer counts as unhealthy after this long without a successful poll                      |
 | `IPFS_TIMEOUT_MS`                 | `30000`                     | Timeout for the Kubo `add` call                                                            |
+| `IPFS_API_AUTH`                   | unset                       | Kubo RPC `Authorization` header value. Also accepts `IPFS_API_AUTH_FILE`.                  |
 | `DB_MAX_CONNECTIONS`              | `10`                        | Pool size, per process                                                                     |
 | `DB_IDLE_TIMEOUT_MS`              | `30000`                     | Pool idle timeout                                                                          |
 | `DB_CONNECTION_TIMEOUT_MS`        | `5000`                      | Pool connection timeout                                                                    |
