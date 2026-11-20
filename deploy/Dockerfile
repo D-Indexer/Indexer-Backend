@@ -1,6 +1,15 @@
 # One image for both processes:
 #   API:     node dist/server.js         (default)
 #   Indexer: node dist/indexer/main.js   (applies database/schema.sql on start)
+#
+# Healthchecking is intentionally NOT defined at the image level. A single
+# image-level HEALTHCHECK cannot be correct for both entrypoints: the API
+# serves /health on PORT, while the indexer serves /healthz and /readyz on
+# INDEXER_HTTP_PORT. Probing the API's /health from the indexer container
+# (the previous behaviour) was misleading and always reported the wrong
+# process. Instead, each service declares its own healthcheck in
+# deploy/docker-compose.yml, and the indexer probes its own in-process
+# endpoint (a single HTTP request, no extra Node process or DB connection).
 
 FROM node:20-bookworm-slim AS deps
 WORKDIR /app
@@ -23,6 +32,4 @@ COPY --from=build /app/dist ./dist
 COPY database ./database
 USER node
 EXPOSE 3000
-HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=5 \
-  CMD node -e "fetch('http://localhost:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
 CMD ["node", "dist/server.js"]

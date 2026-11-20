@@ -5,6 +5,7 @@ import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
 import { createRpcClient, redactUrl } from './rpc';
 import { createIndexer } from './stellar';
+import { createHealthServer } from './httpHealth';
 
 /** Indexer process entrypoint: `npm run start:indexer` (or `dev:indexer`). */
 async function main(): Promise<void> {
@@ -13,6 +14,13 @@ async function main(): Promise<void> {
 
   const rpc = createRpcClient({ url: env.STELLAR_RPC_URL, timeoutMs: env.STELLAR_RPC_TIMEOUT_MS });
   logger.info('Connecting indexer', { rpc: redactUrl(env.STELLAR_RPC_URL) });
+
+  const health = createHealthServer({
+    port: env.INDEXER_HTTP_PORT,
+    pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
+    tickWindowMultiplier: env.INDEXER_HEALTH_TICK_WINDOW_MULTIPLIER,
+    staleAfterMs: env.INDEXER_STALE_AFTER_MS,
+  });
 
   const indexer = createIndexer({
     db: pool,
@@ -25,12 +33,16 @@ async function main(): Promise<void> {
       onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
       maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
     },
+    onTick: (state) => health.update(state),
   });
+
+  health.start();
 
   const shutdown = async (signal: string) => {
     logger.info('Shutdown requested', { signal });
     const timeout = setTimeout(() => process.exit(1), env.SHUTDOWN_TIMEOUT_MS);
     timeout.unref();
+    await health.stop();
     await indexer.stop();
     await pool.end();
     process.exit(0);
