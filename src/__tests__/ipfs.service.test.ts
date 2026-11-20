@@ -24,6 +24,32 @@ describe('ipfs service', () => {
     expect(init).toMatchObject({ method: 'POST', signal: expect.any(AbortSignal) });
   });
 
+  it('sends the Authorization header when IPFS_API_AUTH is configured', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ Hash: 'bafyAuthed' }),
+    } as Response);
+
+    await expect(pinFile(Buffer.from('data'), 'profile.png')).resolves.toBe('bafyAuthed');
+
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.get('authorization')).toBe('Bearer test-secret');
+  });
+
+  it('omits the Authorization header when IPFS_API_AUTH is unset', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ Hash: 'bafyAnon' }),
+    } as Response);
+
+    await expect(pinFile(Buffer.from('data'), 'profile.png')).resolves.toBe('bafyAnon');
+
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.has('authorization')).toBe(false);
+  });
+
   it('maps a timeout to 504 and an unreachable node to 502', async () => {
     const timeout = Object.assign(new Error('timed out'), { name: 'TimeoutError' });
     jest

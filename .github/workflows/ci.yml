@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
@@ -52,6 +53,13 @@ jobs:
           TEST_DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
         run: npm test
 
+      - name: Fuzz (short budget)
+        env:
+          # Reduced case count so PR builds stay fast; the nightly workflow runs the
+          # longer budget. The fuzz test asserts >= 10,000 cases by default.
+          FUZZ_CASES: '10000'
+        run: npm run test:fuzz
+
       - name: Build
         run: npm run build
 
@@ -68,9 +76,120 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     needs: check
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Build image
         run: docker build -f deploy/Dockerfile -t folder-indexer-backend:ci .
+
+      - name: Generate SBOM (Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: folder-indexer-backend:ci
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          upload-artifact: false
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+          if-no-files-found: error
+
+  # Signing/publishing only happens on pushes to main and tags. PR builds stop at
+  # the `docker` job above: they produce an SBOM but never sign or publish.
+  publish:
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    permissions:
+      contents: read
+      id-token: write # keyless cosign signing via GitHub OIDC
+      packages: write # push to GHCR
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download SBOM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: .
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image reference
+        id: image
+        run: |
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          ref="ghcr.io/${owner}/folder-indexer-backend"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="main-${GITHUB_SHA::12}"
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "digest_ref=${ref}@${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.image.outputs.ref }}:${{ steps.image.outputs.tag }}
+            ${{ steps.image.outputs.ref }}:sha-${{ github.sha }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless)
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE_REF}"
+
+      - name: Attest SBOM
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}
+        run: cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "${IMAGE_REF}"
+
+      - name: Generate SLSA provenance
+        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+        with:
+          image: ${{ steps.image.outputs.ref }}
+          digest: ${{ steps.build.outputs.digest }}
+          registry-username: ${{ github.actor }}
+        secrets:
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify image signature
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify "${IMAGE_REF}" \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+      - name: Verify SBOM attestation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify-attestation "${IMAGE_REF}" \
+            --type cyclonedx \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
