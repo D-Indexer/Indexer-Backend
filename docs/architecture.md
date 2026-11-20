@@ -39,6 +39,9 @@ the API never talks to the RPC.
 | `src/indexer/stellar.ts`                        | Poll loop, page transactions, cursor, retention-gap handling                                                      |
 | `src/indexer/cli.ts`                            | `status`, `reset-cursor`, `healthcheck`                                                                           |
 | `src/routes`, `src/controllers`, `src/services` | REST API: routing, validation, SQL                                                                                |
+| `src/cache`                                     | In-process LRU cache with per-key TTL and tag invalidation, flushed by indexer NOTIFY messages                    |
+| `src/jobs`                                      | Postgres-leased background job runner: cron schedules, retries with backoff, per-job concurrency                  |
+| `src/cli/moderation.ts`                         | `hide` / `flag` / `unhide` / `list` moderation commands with an audit trail                                       |
 | `src/config/env.ts`                             | Zod schema for all configuration; the process exits on invalid config                                             |
 | `database/schema.sql`                           | The only schema definition; applied by `npm run db:migrate`, the indexer at startup and the compose Postgres init |
 
@@ -113,10 +116,52 @@ from archive data is not implemented yet.
 | `portfolios`      | `owner`                 | `port_mint`, `port_upd`, `tmpl_set`                                                            |
 | `admins`          | `address`               | `init`, `adm_add`, `adm_rm`                                                                    |
 | `indexer_state`   | `key`                   | `cursor`, `last_ledger`, `last_success_at`, `status`, `last_error`, `start_ledger`, `last_gap` |
+| `moderation`      | `(entity_type, key)`    | operator actions: `hidden` / `flagged`, reason, actor, timestamps                              |
+| `jobs`            | `id`                    | job runner state: name, payload, run at, attempts, lease owner/expiry, status, last error      |
 
 Template ids are `BIGINT` because the contract uses `u32`. There are no foreign keys between
 `folders` and `portfolios`: an indexer that starts partway through history can see a mint
 whose claim is outside the window.
+
+`moderation` is deliberately independent of the indexed tables. On-chain data can't be
+deleted, and the indexer would restore anything removed from `folders` or `portfolios` on
+the next replay, so hiding is recorded separately and applied at read time. Hidden entries
+are excluded from listings, search and stats; direct lookups still return the row with
+`moderation: { hidden: true }`. Every action appends an audit row with actor and reason, so
+`npm run moderation -- list` shows who hid what and why.
+
+## Caching
+
+Hot, rarely-changing reads (`indexer_state`, needed on every request for
+`X-Indexed-Ledger`, template lists/details and stats) go through `src/cache`: a small
+in-process LRU with a per-key TTL and tag-based invalidation. Entries are tagged by what
+they depend on (`indexer_state`, `templates`, `stats`), and a write invalidates the tag
+rather than individual keys.
+
+Replicas stay consistent through Postgres `LISTEN`/`NOTIFY`. After a page is committed the
+indexer sends a NOTIFY naming the tags it touched; every API replica listening on that
+channel drops those tags within one round trip, so no replica serves stale data for a TTL
+after a change. If the LISTEN connection is down, entries simply expire by TTL, bounding
+staleness; on reconnect the cache is flushed entirely so anything missed while disconnected
+is discarded. Hit and miss counts are exposed in the debug/status output
+(`GET /health` and the CLI `status` command).
+
+## Background jobs
+
+Periodic and queued work (IPFS GC and pin reconciliation, webhook dispatch, transaction
+enrichment, TTL tracking, stats rebuilds, idempotency-key cleanup) runs through
+`src/jobs`, a Postgres-backed runner. Jobs live in the `jobs` table and are claimed with
+`FOR UPDATE SKIP LOCKED`, so a scheduled tick runs exactly once even with several worker
+replicas. The runner supports cron schedules, retries with exponential backoff, a maximum
+attempt count after which a job is marked `failed`, and per-job concurrency limits.
+
+The runner runs inside the indexer process by default; compose can instead start a
+dedicated `worker` process from the same image. To run and monitor it:
+
+- `npm run jobs -- status` lists pending, running and failed jobs with attempt counts.
+- `npm run jobs -- retry <id>` re-queues a failed job.
+- `GET /health` reports the runner's last tick and failed-job count alongside cache stats.
+======
 
 ## Design decisions
 

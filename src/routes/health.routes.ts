@@ -1,8 +1,9 @@
 import { Router } from 'express';
-import pool from '../db/client';
+import pool, { getListenStatus } from '../db/client';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { getEnv } from '../config/env';
 import { readState, STATE } from '../indexer/stellar';
+import { getCacheStats } from '../cache';
 
 const router = Router();
 const env = getEnv();
@@ -41,6 +42,8 @@ router.get(
     const lastSuccessMs = lastSuccessAt ? Date.parse(lastSuccessAt) : NaN;
     const stale = !Number.isFinite(lastSuccessMs) || Date.now() - lastSuccessMs > env.INDEXER_STALE_AFTER_MS;
 
+    const cacheStats = getCacheStats();
+
     res.status(dbOk ? 200 : 503).json({
       status: dbOk ? 'ok' : 'degraded',
       db: dbOk ? 'ok' : 'unreachable',
@@ -50,6 +53,12 @@ router.get(
         lastLedger: state[STATE.lastLedger] ? Number(state[STATE.lastLedger]) : null,
         lastSuccessAt,
         lastError: state[STATE.lastError] ?? null,
+      },
+      cache: {
+        hits: cacheStats.hits,
+        misses: cacheStats.misses,
+        size: cacheStats.size,
+        listen: getListenStatus(),
       },
       requestId: req.id,
     });

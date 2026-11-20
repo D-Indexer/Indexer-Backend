@@ -27,7 +27,7 @@
     "db:migrate": "node -r ts-node/register src/db/migrate.ts"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "12.3.0",
+    "@stellar/stellar-base": "12.1.1",
     "cors": "2.8.5",
     "dotenv": "16.4.5",
     "express": "4.19.2",

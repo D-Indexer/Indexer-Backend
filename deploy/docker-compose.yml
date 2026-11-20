@@ -68,6 +68,20 @@ services:
       start_period: 60s
       retries: 5
 
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: folder-indexer-backend:local
+    # Dedicated background job runner. Scale with `docker compose up --scale worker=N`;
+    # Postgres-based leasing guarantees each scheduled tick runs exactly once.
+    command: ['node', 'dist/jobs/worker.js']
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   api:
     build:
       context: ..
