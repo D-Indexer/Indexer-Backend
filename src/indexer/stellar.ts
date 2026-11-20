@@ -36,6 +36,44 @@ export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerCon
 
 export type PageResult = { applied: number; ignored: number; rejected: number; duplicates: number };
 
+/** Channel used to announce committed pages to API replicas. */
+export const INDEXED_CHANNEL = 'folder_indexed';
+
+/** Postgres NOTIFY payloads must stay below 8000 bytes. */
+export const MAX_NOTIFY_PAYLOAD_BYTES = 8000;
+
+export type IndexedNotification = {
+  last_ledger: number;
+  /** Compact list of affected entity keys; empty when `full_refresh` is set. */
+  keys: string[];
+  /** True when the key list was truncated; consumers must re-read all state. */
+  full_refresh: boolean;
+};
+
+/**
+ * Build the `folder_indexed` payload for a committed page, truncating the key
+ * list so the serialized JSON stays under the NOTIFY payload limit. When even
+ * a single key would overflow, fall back to a full-refresh signal.
+ */
+export function buildIndexedNotification(lastLedger: number, keys: Iterable<string>): string {
+  const unique = [...new Set(keys)];
+  const encode = (list: string[], fullRefresh: boolean) =>
+    JSON.stringify({ last_ledger: lastLedger, keys: list, full_refresh: fullRefresh } satisfies IndexedNotification);
+
+  const full = encode(unique, false);
+  if (Buffer.byteLength(full, 'utf8') <= MAX_NOTIFY_PAYLOAD_BYTES) return full;
+
+  // Drop keys from the end until the payload fits, then flag a full refresh so
+  // consumers know the list is incomplete.
+  let kept = unique.length;
+  while (kept > 0) {
+    kept--;
+    const candidate = encode(unique.slice(0, kept), true);
+    if (Buffer.byteLength(candidate, 'utf8') <= MAX_NOTIFY_PAYLOAD_BYTES) return candidate;
+  }
+  return encode([], true);
+}
+
 export class RetentionGapError extends Error {
   constructor(
     readonly requestedLedger: number,
@@ -94,6 +132,31 @@ export async function writeState(
 export function isDeterministicDbError(err: unknown): boolean {
   const code = (err as { code?: unknown })?.code;
   return typeof code === 'string' && (code.startsWith('22') || code.startsWith('23'));
+}
+
+/**
+ * Entity keys touched by an event, used to keep NOTIFY payloads compact.
+ * Falls back to the event's contract and topic when no finer key is known.
+ */
+function affectedEntityKeys(event: RawEvent): string[] {
+  const keys: string[] = [];
+  try {
+    const decoded = decodeEvent(event);
+    if (decoded && typeof decoded === 'object') {
+      const record = decoded as unknown as Record<string, unknown>;
+      for (const field of ['key', 'id', 'address', 'account', 'folderId', 'folder_id']) {
+        const value = record[field];
+        if (typeof value === 'string' && value.length > 0) keys.push(value);
+      }
+    }
+  } catch {
+    // Undecodable events were rejected or ignored; nothing to announce.
+  }
+  if (keys.length === 0) {
+    const topic = decodeTopic(event);
+    if (topic) keys.push(topic);
+  }
+  return keys;
 }
 
 async function storeEvent(
@@ -169,6 +232,7 @@ async function storeEvent(
  */
 export async function processPage(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
   const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0 };
+  const affectedKeys = new Set<string>();
   const client = await db.connect();
 
   try {
@@ -178,6 +242,9 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
       const outcome = await storeEvent(client, contractId, event);
       if (outcome === 'duplicate') result.duplicates++;
       else result[outcome]++;
+      if (outcome === 'applied') {
+        for (const key of affectedEntityKeys(event)) affectedKeys.add(key);
+      }
     }
     // The paging cursor encodes how far the RPC scanned (the chain tip for a
     // partial page), which is further than the last event's ledger.
@@ -190,6 +257,12 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
       [STATE.status]: 'ok',
       [STATE.lastError]: null,
     });
+    // Postgres delivers NOTIFY only on commit, so a rolled-back page emits
+    // nothing. Exactly one notification is sent per committed page.
+    await client.query('SELECT pg_notify($1, $2)', [
+      INDEXED_CHANNEL,
+      buildIndexedNotification(lastLedger, affectedKeys),
+    ]);
     await client.query('COMMIT');
     return result;
   } catch (err) {
