@@ -63,3 +63,26 @@ CREATE TABLE IF NOT EXISTS indexer_state (
   value       TEXT NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Abuse controls for the unauthenticated upload endpoint.
+-- Per-client daily upload accounting. `client_hash` is a salted hash of the
+-- client identity (IP, or wallet address once auth exists); raw IPs are never
+-- persisted. `day` is the UTC date (YYYY-MM-DD) the usage belongs to.
+CREATE TABLE IF NOT EXISTS upload_usage (
+  client_hash  TEXT NOT NULL,
+  day          DATE NOT NULL,
+  bytes        BIGINT NOT NULL DEFAULT 0 CHECK (bytes >= 0),
+  file_count   BIGINT NOT NULL DEFAULT 0 CHECK (file_count >= 0),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (client_hash, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_upload_usage_day_bytes
+  ON upload_usage (day, bytes DESC);
+
+-- SHA-256 blocklist of known-bad content, checked before pinning to Kubo.
+CREATE TABLE IF NOT EXISTS content_blocklist (
+  content_hash  TEXT PRIMARY KEY CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+  reason        TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

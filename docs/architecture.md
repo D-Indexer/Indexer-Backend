@@ -118,6 +118,49 @@ Template ids are `BIGINT` because the contract uses `u32`. There are no foreign 
 `folders` and `portfolios`: an indexer that starts partway through history can see a mint
 whose claim is outside the window.
 
+### Domain constraints
+
+The schema enforces the contract's domain invariants with `CHECK` constraints, so a buggy
+handler, a manual fix or a future writer can't store values the API can't represent. A
+deterministic Postgres error becomes a `rejected` event, so these constraints are also the
+indexer's last line of defence.
+
+| Constraint                                   | Column(s)                                                          | Rule                                 |
+| -------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------ |
+| `*_strkey_chk`                               | `folders.owner`, `portfolios.owner`, `templates.creator`, `admins.address` | `^[GC][A-Z2-7]{55}$` (ed25519 / contract strkey) |
+| `*_template_id_chk`                          | `folders.template_id`, `templates.id`, `portfolios.template_id`    | `BETWEEN 0 AND 4294967295` (`u32`)   |
+| `folders_name_chk`                           | `folders.name`                                                     | length and charset per contract rules |
+| `contract_events_ledger_chk`                 | `contract_events.ledger`                                           | `> 0`                                |
+| `templates_metadata_uri_chk`                 | `templates.metadata_uri`                                           | `<> ''`                              |
+
+Nullable columns (`template_id`, `metadata_uri`) allow `NULL`; the checks only apply to
+non-null values.
+
+#### Two-phase migration
+
+Adding a `CHECK` to a large table takes an `ACCESS EXCLUSIVE` lock and scans every row. To
+migrate existing deployments without long locks, each constraint is added in two phases:
+
+1. **Add `NOT VALID`.** `ALTER TABLE ... ADD CONSTRAINT ... CHECK (...) NOT VALID;` takes
+   only a brief lock. New and updated rows are checked immediately; existing rows are not
+   scanned.
+2. **Validate.** `ALTER TABLE ... VALIDATE CONSTRAINT ...;` scans existing rows under a
+   weaker `SHARE UPDATE EXCLUSIVE` lock, so reads and writes continue. If old rows violate
+   the rule, validation fails and the constraint stays `NOT VALID` until the data is fixed.
+
+`database/schema.sql` runs both phases in order, so a fresh database gets validated
+constraints and an existing one migrates in place. To apply the steps by hand:
+
+```sql
+ALTER TABLE folders ADD CONSTRAINT folders_owner_strkey_chk
+  CHECK (owner ~ '^[GC][A-Z2-7]{55}$') NOT VALID;
+ALTER TABLE folders VALIDATE CONSTRAINT folders_owner_strkey_chk;
+-- repeat for each constraint in the table above
+```
+
+Run the `VALIDATE CONSTRAINT` statements in a separate transaction (or during low traffic)
+so the scan doesn't hold a lock while the `ADD` statements commit.
+
 ## Design decisions
 
 - **The ledger is the source of truth.** Postgres is a rebuildable read model. Every

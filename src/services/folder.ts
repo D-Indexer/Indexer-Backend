@@ -1,4 +1,4 @@
-import pool from '../db/client';
+import { getReadPool } from '../db/client';
 import { Folder } from '../types';
 
 type FolderRow = {
@@ -21,12 +21,14 @@ function mapFolder(row: FolderRow): Folder {
 
 const COLUMNS = 'owner, name, template_id, claimed_at, updated_at';
 
-export async function getFolderByAddress(owner: string): Promise<Folder | null> {
+export async function getFolderByAddress(owner: string, minLedger?: number): Promise<Folder | null> {
+  const pool = await getReadPool({ minLedger });
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE owner = $1`, [owner]);
   return rows[0] ? mapFolder(rows[0]) : null;
 }
 
-export async function getFolderByName(name: string): Promise<Folder | null> {
+export async function getFolderByName(name: string, minLedger?: number): Promise<Folder | null> {
+  const pool = await getReadPool({ minLedger });
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE name = $1`, [name]);
   return rows[0] ? mapFolder(rows[0]) : null;
 }
