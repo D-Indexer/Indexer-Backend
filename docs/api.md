@@ -13,6 +13,7 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/templates`](#get-templates)                   | All registered templates              |
 | `GET`  | [`/templates/:id`](#get-templatesid)             | One template                          |
 | `POST` | [`/upload`](#post-upload)                        | Add and pin a file on IPFS            |
+| `POST` | [`/upload/bundle`](#post-uploadbundle)           | Add and pin a portfolio bundle        |
 
 ## Errors
 
@@ -24,10 +25,10 @@ Every error has the same shape:
 
 | Status | When                                                  | `error` examples                                                                                                                                                                                                                                                             |
 | ------ | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | Invalid path parameter or upload                      | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit` |
+| `400`  | Invalid path parameter or upload                      | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit`, `Image dimensions exceed limit`, `PDF contains active content`, `Encrypted PDF not allowed`, `Invalid manifest`, `Too many files`, `Bundle exceeds size limit` |
 | `404`  | Resource not indexed, or unknown route                | `Folder not found`, `Portfolio not found`, `Template not found`, `Route not found` (also includes `path`)                                                                                                                                                                    |
 | `502`  | IPFS node unreachable or returned an error            | `IPFS node unreachable`, `IPFS add failed with status 500`                                                                                                                                                                                                                   |
-| `503`  | `/health` only: database unreachable                  | see below                                                                                                                                                                                                                                                                    |
+| `503`  | `/health` only: database unreachable; uploads: concurrency saturated | see below; uploads include a `Retry-After` header                                                                                                                                                                                                                            |
 | `504`  | IPFS node timed out (`IPFS_TIMEOUT_MS`)               | `IPFS node timed out`                                                                                                                                                                                                                                                        |
 | `500`  | Anything unexpected; details are logged, not returned | `Internal server error`                                                                                                                                                                                                                                                      |
 
@@ -173,6 +174,19 @@ Kubo node with `pin=true` and its CID (v1) returned.
 - Allowed types: `image/jpeg`, `image/png`, `image/webp`, `application/pdf`.
 - The declared type must match the file's leading bytes.
 - Maximum size: 10 MB. One file per request.
+- Images are checked from their headers without full decoding. Images above
+  `UPLOAD_MAX_IMAGE_PIXELS` (default 40 MP) or with a side longer than
+  `UPLOAD_MAX_IMAGE_SIDE` are rejected with `400 Image dimensions exceed limit`.
+- PDFs are parsed (not rendered) and rejected with `400` if they contain active
+  content: JavaScript (`/JS`, `/JavaScript`), auto-actions (`/OpenAction`, `/AA`),
+  launch actions (`/Launch`), embedded files (`/EmbeddedFile`) or rich media
+  (`/RichMedia`). The `error` message names the reason, e.g.
+  `PDF contains active content: JavaScript`. Encrypted PDFs are rejected with
+  `400 Encrypted PDF not allowed` because their content can't be inspected.
+  Parsing is time- and memory-bounded; a parser failure is treated as a rejection.
+- At most `UPLOAD_MAX_CONCURRENT` uploads are buffered at once. When saturated,
+  the request is rejected immediately with `503` and a `Retry-After` header
+  (seconds) without reading the body.
 
 ```bash
 curl -F "file=@avatar.png;type=image/png" localhost:3000/upload
@@ -183,7 +197,49 @@ curl -F "file=@avatar.png;type=image/png" localhost:3000/upload
 { "cid": "bafkreiacuprjr4kth5rfldcy4tdq5xfltl22kdlc3es72u4qsqqcb6ypxa" }
 ```
 
-Errors: `400` (no file, type, size, content mismatch), `502` / `504` (IPFS).
+Errors: `400` (no file, type, size, content mismatch, image dimensions, PDF active
+content, encrypted PDF), `502` / `504` (IPFS), `503` (concurrency saturated, see
+`Retry-After`).
 
 The endpoint is unauthenticated and not rate limited yet; don't expose it publicly
 without a proxy that enforces limits.
+
+## `POST /upload/bundle`
+
+Multipart upload of a portfolio bundle: one or more files plus a `manifest.json`
+field. All files are validated with the same type, size, sniffing, image-dimension
+and PDF rules as [`POST /upload`](#post-upload), then added to Kubo as a single
+directory (`wrap-with-directory=true`) with stable paths. The root CID is the
+reference unit for GC and reconciliation.
+
+- Fields: `manifest` (the `manifest.json` file) and `files` (one or more files).
+- Limits: at most `UPLOAD_MAX_BUNDLE_FILES` files (default 20); total size at most
+  `UPLOAD_MAX_BUNDLE_BYTES` (default 50 MB); each file at most 10 MB.
+- The manifest must be valid JSON matching the bundle schema: an object with a
+  `version` and a list of entries whose `path` values match the uploaded files.
+- If any file or the manifest is invalid, the whole bundle is rejected with `400`
+  and nothing is pinned.
+
+```bash
+curl -F "manifest=@manifest.json;type=application/json" \
+     -F "files=@avatar.png;type=image/png" \
+     -F "files=@cv.pdf;type=application/pdf" \
+     localhost:3000/upload/bundle
+```
+
+```json
+{
+  "rootCid": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+  "files": {
+    "manifest.json": "bafkreiacuprjr4kth5rfldcy4tdq5xfltl22kdlc3es72u4qsqqcb6ypxa",
+    "avatar.png": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
+    "cv.pdf": "bafkreiejxg6d3gqvi3737mcwxkv4u7gismaraxgv5zfoqtfuc3nbdgve7i"
+  }
+}
+```
+
+`/<rootCid>/manifest.json` resolves through the gateway.
+
+Errors: `400` (no files, too many files, bundle size, invalid manifest, per-file
+type/size/content/dimension/PDF errors), `502` / `504` (IPFS), `503` (concurrency
+saturated, see `Retry-After`).
