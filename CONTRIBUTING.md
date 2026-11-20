@@ -26,6 +26,12 @@ npm run dev                     # terminal 2: API on http://localhost:3000
 
 Or run everything in containers with `docker compose up --build` (see the README).
 
+If something doesn't work, run `npm run doctor` first. It checks the environment, database,
+RPC and Kubo node end to end, prints a table with timings and a hint for each failure, and
+exits non-zero if anything is broken. `npm run doctor -- --json` prints the same results as
+stable JSON (see [`docs/operations.md`](docs/operations.md#doctor)). Secrets are never
+printed and URLs are redacted.
+
 ## Checks
 
 CI runs these on every pull request. Run them before pushing:
@@ -93,6 +99,8 @@ When it changes, update `src/indexer/decode.ts`, `src/indexer/handlers.ts`,
 - Use [Conventional Commit](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`,
   `docs:`, `test:`, `chore:`, `ci:`).
 - Describe what changed and how you tested it. Link the issue (`Closes #12`).
+- For bug reports, include the output of `npm run doctor` (or `npm run doctor -- --json`).
+  It gives maintainers the configuration and dependency state needed to help.
 - Never commit `.env` or secrets.
 
 By contributing you agree that your contributions are licensed under the [MIT License](LICENSE).

@@ -24,7 +24,9 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write . && eslint --fix .",
     "check": "npm run typecheck && npm run lint && npm test",
-    "db:migrate": "node -r ts-node/register src/db/migrate.ts"
+    "db:migrate": "node -r ts-node/register src/db/migrate.ts",
+    "doctor": "node -r ts-node/register src/cli/doctor.ts",
+    "doctor:dist": "node dist/cli/doctor.js"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "12.3.0",
