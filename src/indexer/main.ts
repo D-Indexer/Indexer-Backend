@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { getEnv } from '../config/env';
-import pool from '../db/client';
+import pool, { startCacheListener, stopCacheListener } from '../db/client';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
 import { createRpcClient, redactUrl } from './rpc';
@@ -27,11 +27,18 @@ async function main(): Promise<void> {
     },
   });
 
+  // Start the cache LISTEN connection so this process receives NOTIFY messages
+  // and invalidates its in-process cache. The indexer publishes NOTIFY messages
+  // after applying events (see the publish point in src/indexer/stellar.ts);
+  // if the LISTEN connection is down, cache staleness is bounded by the TTL.
+  await startCacheListener();
+
   const shutdown = async (signal: string) => {
     logger.info('Shutdown requested', { signal });
     const timeout = setTimeout(() => process.exit(1), env.SHUTDOWN_TIMEOUT_MS);
     timeout.unref();
     await indexer.stop();
+    await stopCacheListener();
     await pool.end();
     process.exit(0);
   };

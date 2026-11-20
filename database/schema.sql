@@ -63,3 +63,44 @@ CREATE TABLE IF NOT EXISTS indexer_state (
   value       TEXT NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Background job queue. Workers lease rows with FOR UPDATE SKIP LOCKED so a
+-- scheduled job runs exactly once per tick across replicas. Cron schedules are
+-- materialised as rows with a deterministic id (name + tick) so duplicate
+-- enqueues are no-ops.
+CREATE TABLE IF NOT EXISTS jobs (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  payload       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  run_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  locked_by     TEXT,
+  locked_at     TIMESTAMPTZ,
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  max_attempts  INTEGER NOT NULL DEFAULT 5,
+  last_error    TEXT,
+  status        TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Claim path: pick the oldest due pending job.
+CREATE INDEX IF NOT EXISTS idx_jobs_claim
+  ON jobs (run_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_jobs_name_status ON jobs (name, status);
+
+-- Moderation overrides, kept independent of indexed tables so replays never
+-- overwrite them. entity_type names the kind of record (e.g. 'folder',
+-- 'portfolio'); entity_key is its natural key (owner address or name).
+CREATE TABLE IF NOT EXISTS moderation (
+  entity_type  TEXT NOT NULL,
+  entity_key   TEXT NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN ('hidden', 'flagged')),
+  reason       TEXT NOT NULL,
+  actor        TEXT NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (entity_type, entity_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_moderation_state ON moderation (state);
