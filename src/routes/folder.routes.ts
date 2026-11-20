@@ -1,10 +1,20 @@
 import { Router } from 'express';
-import * as ctrl from '../controllers/folder.controller';
+import { createFolderController } from '../controllers/folder.controller';
+import type { FolderService } from '../services/folder.service';
 
-const router = Router();
+export interface FolderRoutesDeps {
+  folderService: FolderService;
+}
 
-// /name/:name must be registered before /:address to avoid wildcard shadowing
-router.get('/name/:name', ctrl.getByName);
-router.get('/:address', ctrl.getByAddress);
+export function createFolderRoutes(deps: FolderRoutesDeps): Router {
+  const router = Router();
+  const ctrl = createFolderController({ folderService: deps.folderService });
 
-export default router;
+  // /name/:name must be registered before /:address to avoid wildcard shadowing
+  router.get('/name/:name', ctrl.getByName);
+  router.get('/:address', ctrl.getByAddress);
+
+  return router;
+}
+
+export default createFolderRoutes;

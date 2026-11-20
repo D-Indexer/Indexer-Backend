@@ -46,6 +46,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Check generated config docs
+        run: |
+          npm run docs:config
+          git diff --exit-code -- docs/configuration.md .env.example
+
       - name: Test
         env:
           # Enables the Postgres-backed indexer tests (idempotency, atomic cursor).
@@ -74,3 +79,67 @@ jobs:
 
       - name: Build image
         run: docker build -f deploy/Dockerfile -t folder-indexer-backend:ci .
+
+      - name: Smoke test graceful shutdown (API and indexer)
+        env:
+          DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+          FOLDER_CONTRACT_ID: CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV
+          IPFS_API_URL: http://localhost:5001
+          IPFS_GATEWAY: https://ipfs.io/ipfs
+        run: |
+          set -euo pipefail
+          for target in api indexer; do
+            if [ "$target" = "api" ]; then
+              cmd="node dist/server.js"
+            else
+              cmd="node dist/indexer/main.js"
+            fi
+            cid=$(docker run -d --name "smoke-$target" \
+              -e DATABASE_URL -e STELLAR_RPC_URL -e FOLDER_CONTRACT_ID \
+              -e IPFS_API_URL -e IPFS_GATEWAY \
+              folder-indexer-backend:ci $cmd)
+            # Give the process time to register signal handlers.
+            sleep 5
+            start=$(date +%s)
+            docker stop --time 30 "$cid" >/dev/null
+            elapsed=$(( $(date +%s) - start ))
+            code=$(docker inspect -f '{{.State.ExitCode}}' "$cid")
+            docker rm "$cid" >/dev/null
+            echo "$target exited with code $code after ${elapsed}s"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::$target did not exit gracefully (code $code)"
+              exit 1
+            fi
+            if [ "$elapsed" -ge 30 ]; then
+              echo "::error::$target did not shut down before the kill timeout"
+              exit 1
+            fi
+          done
+
+      - name: Smoke test no zombie processes
+        env:
+          DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+          FOLDER_CONTRACT_ID: CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV
+          IPFS_API_URL: http://localhost:5001
+          IPFS_GATEWAY: https://ipfs.io/ipfs
+        run: |
+          set -euo pipefail
+          cid=$(docker run -d --name smoke-zombies \
+            -e DATABASE_URL -e STELLAR_RPC_URL -e FOLDER_CONTRACT_ID \
+            -e IPFS_API_URL -e IPFS_GATEWAY \
+            folder-indexer-backend:ci node dist/server.js)
+          sleep 5
+          for i in $(seq 1 10); do
+            docker exec smoke-zombies sh -c 'true' >/dev/null 2>&1 || true
+          done
+          zombies=$(docker exec smoke-zombies sh -c \
+            'ps -eo stat 2>/dev/null | grep -c "^Z" || true' | tr -d '[:space:]')
+          docker stop --time 30 "$cid" >/dev/null
+          docker rm "$cid" >/dev/null
+          echo "zombie process count: ${zombies:-0}"
+          if [ "${zombies:-0}" -ne 0 ]; then
+            echo "::error::zombie processes accumulated (${zombies})"
+            exit 1
+          fi

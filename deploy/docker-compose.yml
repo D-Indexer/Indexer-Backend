@@ -55,8 +55,16 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     image: folder-indexer-backend:local
+    # The image's ENTRYPOINT is tini, which runs as PID 1, forwards SIGTERM to
+    # Node and reaps zombies. `init: true` is a belt-and-braces fallback for
+    # images built before tini was baked in; it is a no-op when tini is already
+    # PID 1. The command override is passed to tini as the child process.
+    init: true
     command: ['node', 'dist/indexer/main.js']
     environment: *app-env
+    # Give Node time to shut down gracefully before Docker escalates to SIGKILL.
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,10 +81,15 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     image: folder-indexer-backend:local
+    # See the indexer service: tini is PID 1 via the image ENTRYPOINT, with
+    # `init: true` as a fallback so SIGTERM always reaches Node.
+    init: true
     command: ['node', 'dist/server.js']
     environment:
       <<: *app-env
       PORT: 3000
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
     ports:
       - '${API_PORT:-3000}:3000'
     depends_on:
