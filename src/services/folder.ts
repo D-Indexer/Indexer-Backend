@@ -23,10 +23,12 @@ const COLUMNS = 'owner, name, template_id, claimed_at, updated_at';
 
 export async function getFolderByAddress(owner: string): Promise<Folder | null> {
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE owner = $1`, [owner]);
-  return rows[0] ? mapFolder(rows[0]) : null;
+  const row = rows[0];
+  return row ? mapFolder(row) : null;
 }
 
 export async function getFolderByName(name: string): Promise<Folder | null> {
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE name = $1`, [name]);
-  return rows[0] ? mapFolder(rows[0]) : null;
+  const row = rows[0];
+  return row ? mapFolder(row) : null;
 }

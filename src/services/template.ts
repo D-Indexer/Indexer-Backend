@@ -26,5 +26,6 @@ export async function listTemplates(): Promise<Template[]> {
 
 export async function getTemplate(id: number): Promise<Template | null> {
   const { rows } = await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates WHERE id = $1`, [id]);
-  return rows[0] ? mapTemplate(rows[0]) : null;
+  const row = rows[0];
+  return row ? mapTemplate(row) : null;
 }

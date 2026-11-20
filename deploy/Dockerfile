@@ -2,23 +2,30 @@
 #   API:     node dist/server.js         (default)
 #   Indexer: node dist/indexer/main.js   (applies database/schema.sql on start)
 
-FROM node:20-bookworm-slim AS deps
+FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-FROM node:20-bookworm-slim AS build
+FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json package-lock.json tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
-FROM node:20-bookworm-slim AS runtime
+# Prune the dependency tree down to production-only packages so the runtime
+# image no longer ships the full dev tree.
+FROM node:22-bookworm-slim AS prod-deps
 WORKDIR /app
-ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
+
+FROM node:22-bookworm-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=prod-deps /app/node_modules ./node_modules
+COPY package.json package-lock.json ./
 COPY --from=build /app/dist ./dist
 COPY database ./database
 USER node
