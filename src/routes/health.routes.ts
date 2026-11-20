@@ -43,6 +43,7 @@ router.get(
 
     res.status(dbOk ? 200 : 503).json({
       status: dbOk ? 'ok' : 'degraded',
+      network: env.STELLAR_NETWORK,
       db: dbOk ? 'ok' : 'unreachable',
       indexer: {
         status: state[STATE.status] ?? 'not_started',

@@ -107,7 +107,8 @@ curl localhost:3000/folders/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJ
   "name": "smoke-1794262900.folder",
   "templateId": 1,
   "claimedAt": "2026-11-09T22:22:27.000Z",
-  "updatedAt": "2026-11-09T22:23:07.000Z"
+  "updatedAt": "2026-11-09T22:23:07.000Z",
+  "archival": { "liveUntilLedger": 5658123, "archived": false }
 }
 ```
 
@@ -138,7 +139,8 @@ curl localhost:3000/portfolios/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX
   "templateId": 1,
   "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
   "mintedAt": "2026-11-09T22:23:07.000Z",
-  "updatedAt": "2026-11-09T22:23:52.000Z"
+  "updatedAt": "2026-11-09T22:23:52.000Z",
+  "archival": { "liveUntilLedger": 5658123, "archived": false }
 }
 ```
 
@@ -154,7 +156,8 @@ All registered templates (`tmpl_reg`), ordered by id. Not paginated yet.
     "id": 1,
     "metadataUri": "ipfs://bafkreiejxg6d3gqvi3737mcwxkv4u7gismaraxgv5zfoqtfuc3nbdgve7i",
     "creator": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
-    "registeredAt": "2026-11-09T22:14:42.000Z"
+    "registeredAt": "2026-11-09T22:14:42.000Z",
+    "archival": { "liveUntilLedger": 5658123, "archived": false }
   }
 ]
 ```
@@ -164,6 +167,26 @@ All registered templates (`tmpl_reg`), ordered by id. Not paginated yet.
 One template, same shape as a list item.
 
 Errors: `400` invalid id, `404` `Template not found`.
+
+## Archival
+
+Soroban persistent storage entries have a TTL and are archived when it expires unless it
+is extended. Folder claims, template registrations and portfolios are all stored this way,
+and archival is not announced by contract events, so the indexer periodically queries
+`getLedgerEntries` for the storage keys backing each entity and records their TTL.
+
+Every folder, portfolio and template response includes an `archival` object:
+
+| Field             | Meaning                                                                                                                       |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `liveUntilLedger` | The ledger at which the entity's storage entry expires, or `null` if it hasn't been checked yet.                              |
+| `archived`        | `true` when the entry is no longer live (its TTL has passed or the key is missing on-chain).                                  |
+
+An archived entry must be restored (via `RestoreFootprint`) before the contract can read
+or write it, so treat `archived: true` as "not currently usable on-chain" even though the
+read model still returns the last indexed data. The indexer prioritises recently active
+entities and batches `getLedgerEntries` calls to keep RPC usage bounded; see
+[operations](operations.md#status-cli) for the soon-to-expire list in the status CLI.
 
 ## `POST /upload`
 
@@ -187,3 +210,15 @@ Errors: `400` (no file, type, size, content mismatch), `502` / `504` (IPFS).
 
 The endpoint is unauthenticated and not rate limited yet; don't expose it publicly
 without a proxy that enforces limits.
+
+## RPC usage limits
+
+TTL tracking is the only part of the indexer that calls `getLedgerEntries`; event polling
+uses a separate cursor. To stay within provider quotas:
+
+- Keys are queried in batches (`TTL_BATCH_SIZE`, default 50) rather than one call per entity.
+- Polls run on an interval (`TTL_POLL_INTERVAL_MS`, default 60000) and are skipped while a
+  previous poll is still in flight.
+- Recently active entities are checked first; entities whose TTL is far from expiry are
+  refreshed less often.
+- If the RPC returns a rate-limit error the poll backs off and retries on the next interval.

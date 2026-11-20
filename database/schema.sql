@@ -25,6 +25,8 @@ CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
   ON contract_events (indexed_at) WHERE status = 'rejected';
 
 -- folder_cl (owner <-> folder_name); template_id tracks tmpl_set / port_mint.
+-- live_until_ledger is the TTL of the folder's persistent storage entry as
+-- reported by getLedgerEntries; NULL means not yet probed.
 CREATE TABLE IF NOT EXISTS folders (
   owner        TEXT PRIMARY KEY,
   name         TEXT UNIQUE NOT NULL,
@@ -33,6 +35,12 @@ CREATE TABLE IF NOT EXISTS folders (
   updated_at   TIMESTAMPTZ NOT NULL
 );
 
+ALTER TABLE folders ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;
+ALTER TABLE folders ADD COLUMN IF NOT EXISTS ttl_checked_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_folders_live_until
+  ON folders (live_until_ledger) WHERE live_until_ledger IS NOT NULL;
+
 -- tmpl_reg
 CREATE TABLE IF NOT EXISTS templates (
   id             BIGINT PRIMARY KEY,
@@ -40,6 +48,12 @@ CREATE TABLE IF NOT EXISTS templates (
   creator        TEXT,
   registered_at  TIMESTAMPTZ NOT NULL
 );
+
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS ttl_checked_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_templates_live_until
+  ON templates (live_until_ledger) WHERE live_until_ledger IS NOT NULL;
 
 -- port_mint / port_upd / tmpl_set. No foreign key to folders: the indexer can
 -- start partway through history, so a portfolio may arrive before its folder.
@@ -50,6 +64,12 @@ CREATE TABLE IF NOT EXISTS portfolios (
   minted_at    TIMESTAMPTZ NOT NULL,
   updated_at   TIMESTAMPTZ NOT NULL
 );
+
+ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;
+ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS ttl_checked_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_portfolios_live_until
+  ON portfolios (live_until_ledger) WHERE live_until_ledger IS NOT NULL;
 
 -- init / adm_add / adm_rm
 CREATE TABLE IF NOT EXISTS admins (

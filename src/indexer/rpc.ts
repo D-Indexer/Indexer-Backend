@@ -37,9 +37,33 @@ export type HealthResult = {
   ledgerRetentionWindow?: number;
 };
 
+/** A single ledger entry as returned by the RPC `getLedgerEntries` method. */
+export type RawLedgerEntry = {
+  /** Base64-encoded `LedgerKey` XDR, echoed back by the RPC. */
+  key: string;
+  /** Base64-encoded `LedgerEntryData` XDR. */
+  xdr: string;
+  /** Ledger sequence at which the entry expires (0 for non-TTL entries). */
+  liveUntilLedgerSeq?: number;
+  lastModifiedLedgerSeq?: number;
+  /** Present when the entry has been archived/evicted and only its TTL remains. */
+  ext?: unknown;
+};
+
+export type GetLedgerEntriesResult = {
+  entries: RawLedgerEntry[];
+  latestLedger: number;
+};
+
+export type GetLedgerEntriesParams = {
+  /** Base64-encoded `LedgerKey` XDR values to look up. */
+  keys: string[];
+};
+
 export interface EventSource {
   getEvents(params: GetEventsParams): Promise<GetEventsResult>;
   getHealth(): Promise<HealthResult>;
+  getLedgerEntries(params: GetLedgerEntriesParams): Promise<GetLedgerEntriesResult>;
 }
 
 export class RpcError extends Error {
@@ -160,6 +184,9 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     },
     getHealth() {
       return call<HealthResult>('getHealth');
+    },
+    getLedgerEntries(params) {
+      return call<GetLedgerEntriesResult>('getLedgerEntries', { keys: params.keys });
     },
   };
 }
