@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import pool from '../db/client';
+import pool, { getReplicaStatus } from '../db/client';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { getEnv } from '../config/env';
 import { readState, STATE } from '../indexer/stellar';
@@ -41,9 +41,17 @@ router.get(
     const lastSuccessMs = lastSuccessAt ? Date.parse(lastSuccessAt) : NaN;
     const stale = !Number.isFinite(lastSuccessMs) || Date.now() - lastSuccessMs > env.INDEXER_STALE_AFTER_MS;
 
+    const replicaStatus = getReplicaStatus();
+
     res.status(dbOk ? 200 : 503).json({
       status: dbOk ? 'ok' : 'degraded',
       db: dbOk ? 'ok' : 'unreachable',
+      replica: {
+        configured: replicaStatus.configured,
+        lagMs: replicaStatus.lagMs,
+        servingReads: replicaStatus.servingReads,
+        lastCheckedAt: replicaStatus.lastCheckedAt,
+      },
       indexer: {
         status: state[STATE.status] ?? 'not_started',
         stale,

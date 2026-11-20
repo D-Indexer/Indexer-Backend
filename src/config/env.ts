@@ -40,6 +40,15 @@ const envSchema = z
     DB_MAX_CONNECTIONS: z.coerce.number().int().positive().default(10),
     DB_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+    DATABASE_READ_URL: z
+      .union([z.literal('').transform(() => undefined), z.string().url('DATABASE_READ_URL must be a valid URL')])
+      .optional(),
+    DB_REPLICA_MAX_LAG_MS: z.coerce.number().int().positive().default(5000),
+    UPLOAD_DAILY_BYTES_QUOTA: optionalPositiveInt,
+    UPLOAD_DAILY_FILE_QUOTA: optionalPositiveInt,
+    UPLOAD_IP_HASH_SALT: z
+      .union([z.literal('').transform(() => undefined), z.string().min(1)])
+      .optional(),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   })
@@ -51,9 +60,36 @@ const envSchema = z
         message: 'CORS_ORIGIN is required in production (comma-separated origins, or * to allow all)',
       });
     }
+
+    const quotasEnabled =
+      env.UPLOAD_DAILY_BYTES_QUOTA !== undefined || env.UPLOAD_DAILY_FILE_QUOTA !== undefined;
+
+    if (quotasEnabled && !env.UPLOAD_IP_HASH_SALT) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['UPLOAD_IP_HASH_SALT'],
+        message:
+          'UPLOAD_IP_HASH_SALT is required when UPLOAD_DAILY_BYTES_QUOTA or UPLOAD_DAILY_FILE_QUOTA is set (raw IPs are never persisted)',
+      });
+    }
   });
 
 export type AppEnv = z.infer<typeof envSchema>;
+
+/** Upload abuse-control settings; `null` when quotas are disabled. */
+export interface UploadQuotaConfig {
+  dailyBytesQuota: number | null;
+  dailyFileQuota: number | null;
+  ipHashSalt: string | null;
+}
+
+export function getUploadQuotaConfig(env: AppEnv = getEnv()): UploadQuotaConfig {
+  return {
+    dailyBytesQuota: env.UPLOAD_DAILY_BYTES_QUOTA ?? null,
+    dailyFileQuota: env.UPLOAD_DAILY_FILE_QUOTA ?? null,
+    ipHashSalt: env.UPLOAD_IP_HASH_SALT ?? null,
+  };
+}
 
 let cachedEnv: AppEnv | null = null;
 

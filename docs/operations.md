@@ -148,7 +148,62 @@ the deployment ledger), truncate the tables above, and restart the indexer.
 - Check a node: `docker compose exec ipfs ipfs id`. List pins:
   `docker compose exec ipfs ipfs pin ls --type=recursive`.
 
+## Upload abuse controls
+
+`POST /upload` is unauthenticated, so the API applies abuse controls before anything is
+sent to Kubo.
+
+### Daily quotas
+
+Uploads are counted per client per UTC day in `upload_usage` (bytes and file count). A
+client is identified by a salted hash of its IP address (and, once auth exists, its wallet
+address). Exceeding either the daily byte quota (`UPLOAD_DAILY_BYTES_QUOTA`) or the daily
+file count quota (`UPLOAD_DAILY_FILES_QUOTA`) returns `429` with a `Retry-After` header and
+a reset time in the body:
+
+```json
+{
+  "error": "Daily upload quota exceeded",
+  "reset_at": "2026-11-11T00:00:00.000Z"
+}
+```
+
+`reset_at` is the start of the next UTC day, when the counters roll over. Quotas are
+configurable per deployment; see [configuration.md](configuration.md).
+
+### Content blocklist
+
+Every upload's SHA-256 is checked against `blocked_content_hashes` before the bytes reach
+Kubo. A match returns `403` and nothing is pinned. Add hashes with the CLI (below) or
+directly:
+
+```sql
+INSERT INTO blocked_content_hashes (sha256, reason) VALUES ('<hex>', 'abuse report') ON CONFLICT DO NOTHING;
+```
+
+### Privacy
+
+No raw IP addresses are persisted. Only a salted hash (`UPLOAD_IP_HASH_SALT`) is stored in
+`upload_usage.client_hash`, so rotating the salt resets all counters and makes old rows
+unlinkable to an address.
+
+### Inspecting and blocking clients
+
+```bash
+npm run abuse -- top-uploaders --days 1 --limit 20
+npm run abuse -- block-client <client_hash> --reason "spam"
+npm run abuse -- unblock-client <client_hash>
+# in the container image (no ts-node there):
+docker compose exec api node dist/cli/abuse.js top-uploaders --days 1
+```
+
+`top-uploaders` prints the busiest client hashes with their byte and file totals for the
+window. `block-client` adds the hash to `blocked_clients`; subsequent uploads from that
+client return `403`. Blocking a client hash only affects that hash: if the salt is rotated,
+previously blocked clients get new hashes and must be re-blocked.
+
 ## Shutdown
+=======
 
 Both processes handle SIGTERM/SIGINT. The API stops accepting connections and closes the
 pool. The indexer finishes the in-flight page (one transaction) and stops. Either exits

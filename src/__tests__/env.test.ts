@@ -53,4 +53,48 @@ describe('environment configuration', () => {
       loadEnv({ ...validEnv, NODE_ENV: 'production', CORS_ORIGIN: 'https://folder.app' }).CORS_ORIGIN
     ).toBe('https://folder.app');
   });
+
+  it('parses upload quota configuration', () => {
+    const env = loadEnv({
+      ...validEnv,
+      UPLOAD_DAILY_BYTE_QUOTA: '1048576',
+      UPLOAD_DAILY_FILE_QUOTA: '25',
+      UPLOAD_IP_HASH_SALT: 'a-very-secret-salt',
+    });
+
+    expect(env.UPLOAD_DAILY_BYTE_QUOTA).toBe(1048576);
+    expect(env.UPLOAD_DAILY_FILE_QUOTA).toBe(25);
+    expect(env.UPLOAD_IP_HASH_SALT).toBe('a-very-secret-salt');
+  });
+
+  it('applies upload quota defaults and rejects invalid values', () => {
+    const env = loadEnv(validEnv);
+    expect(env.UPLOAD_DAILY_BYTE_QUOTA).toBeGreaterThan(0);
+    expect(env.UPLOAD_DAILY_FILE_QUOTA).toBeGreaterThan(0);
+    expect(env.UPLOAD_IP_HASH_SALT).toBeDefined();
+
+    expect(() => loadEnv({ ...validEnv, UPLOAD_DAILY_BYTE_QUOTA: '-1' })).toThrow(/UPLOAD_DAILY_BYTE_QUOTA/);
+    expect(() => loadEnv({ ...validEnv, UPLOAD_DAILY_FILE_QUOTA: 'abc' })).toThrow(/UPLOAD_DAILY_FILE_QUOTA/);
+  });
+
+  it('leaves DATABASE_READ_URL unset by default', () => {
+    const env = loadEnv(validEnv);
+    expect(env.DATABASE_READ_URL).toBeUndefined();
+    expect(env.DB_REPLICA_MAX_LAG_MS).toBeGreaterThan(0);
+  });
+
+  it('parses DATABASE_READ_URL and DB_REPLICA_MAX_LAG_MS', () => {
+    const env = loadEnv({
+      ...validEnv,
+      DATABASE_READ_URL: 'postgresql://user:password@replica:5432/folder_test',
+      DB_REPLICA_MAX_LAG_MS: '2500',
+    });
+
+    expect(env.DATABASE_READ_URL).toBe('postgresql://user:password@replica:5432/folder_test');
+    expect(env.DB_REPLICA_MAX_LAG_MS).toBe(2500);
+  });
+
+  it('rejects an invalid DATABASE_READ_URL', () => {
+    expect(() => loadEnv({ ...validEnv, DATABASE_READ_URL: 'not-a-url' })).toThrow(/DATABASE_READ_URL/);
+  });
 });

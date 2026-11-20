@@ -1,4 +1,4 @@
-import pool from '../db/client';
+import { getReadPool } from '../db/client';
 import { Template } from '../types';
 
 type TemplateRow = {
@@ -19,12 +19,14 @@ function mapTemplate(row: TemplateRow): Template {
 
 const COLUMNS = 'id, metadata_uri, creator, registered_at';
 
-export async function listTemplates(): Promise<Template[]> {
+export async function listTemplates(minLedger?: number): Promise<Template[]> {
+  const pool = await getReadPool(minLedger);
   const { rows } = await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates ORDER BY id`);
   return rows.map(mapTemplate);
 }
 
-export async function getTemplate(id: number): Promise<Template | null> {
+export async function getTemplate(id: number, minLedger?: number): Promise<Template | null> {
+  const pool = await getReadPool(minLedger);
   const { rows } = await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates WHERE id = $1`, [id]);
   return rows[0] ? mapTemplate(rows[0]) : null;
 }
