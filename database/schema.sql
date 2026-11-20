@@ -43,13 +43,22 @@ CREATE TABLE IF NOT EXISTS templates (
 
 -- port_mint / port_upd / tmpl_set. No foreign key to folders: the indexer can
 -- start partway through history, so a portfolio may arrive before its folder.
+-- ipfs_cid holds the canonical CIDv1 base32 form (NULL when the stored string
+-- is not a parseable CID); ipfs_cid_raw keeps the original string as minted.
 CREATE TABLE IF NOT EXISTS portfolios (
   owner        TEXT PRIMARY KEY,
   template_id  BIGINT NOT NULL,
-  ipfs_cid     TEXT NOT NULL,
+  ipfs_cid     TEXT,
+  ipfs_cid_raw TEXT,
+  cid_valid    BOOLEAN NOT NULL DEFAULT true,
   minted_at    TIMESTAMPTZ NOT NULL,
   updated_at   TIMESTAMPTZ NOT NULL
 );
+
+-- Idempotent upgrades for databases created before CID normalisation.
+ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS ipfs_cid_raw TEXT;
+ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS cid_valid BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE portfolios ALTER COLUMN ipfs_cid DROP NOT NULL;
 
 -- init / adm_add / adm_rm
 CREATE TABLE IF NOT EXISTS admins (
