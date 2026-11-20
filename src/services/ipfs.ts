@@ -1,5 +1,6 @@
 import { getEnv } from '../config/env';
 import { HttpError } from '../http/errors';
+import { getContext, recordTiming } from '../utils/context';
 
 const env = getEnv();
 
@@ -15,19 +16,30 @@ export async function pinFile(buffer: Buffer, filename: string): Promise<string>
   addUrl.searchParams.set('pin', 'true');
   addUrl.searchParams.set('cid-version', '1');
 
+  const headers: Record<string, string> = {};
+  const context = getContext();
+  if (context?.requestId) {
+    headers['x-request-id'] = context.requestId;
+  }
+
+  const startedAt = performance.now();
   let addResponse: Response;
   try {
     addResponse = await fetch(addUrl, {
       method: 'POST',
       body: formData,
+      headers,
       signal: AbortSignal.timeout(env.IPFS_TIMEOUT_MS),
     });
   } catch (err) {
+    recordTiming('ipfs', performance.now() - startedAt);
     if (err instanceof Error && err.name === 'TimeoutError') {
       throw new HttpError(504, 'IPFS node timed out', true);
     }
     throw new HttpError(502, 'IPFS node unreachable', true);
   }
+
+  recordTiming('ipfs', performance.now() - startedAt);
 
   if (!addResponse.ok) {
     throw new HttpError(502, `IPFS add failed with status ${addResponse.status}`, true);

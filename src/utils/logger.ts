@@ -1,3 +1,5 @@
+import { getContext } from './context';
+
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 type LogContext = Record<string, unknown>;
@@ -15,9 +17,17 @@ function serializeContext(context?: LogContext): string {
   return ` ${JSON.stringify(context)}`;
 }
 
+function mergeContext(context?: LogContext): LogContext | undefined {
+  const ambient = getContext();
+  if (!ambient) return context;
+  if (!context) return { ...ambient };
+  return { ...ambient, ...context };
+}
+
 function write(level: LogLevel, message: string, context?: LogContext): void {
   if (LEVELS[level] < threshold()) return;
-  const line = `${new Date().toISOString()} ${level.toUpperCase()} ${message}${serializeContext(context)}`;
+  const merged = mergeContext(context);
+  const line = `${new Date().toISOString()} ${level.toUpperCase()} ${message}${serializeContext(merged)}`;
 
   if (level === 'error') {
     console.error(line);

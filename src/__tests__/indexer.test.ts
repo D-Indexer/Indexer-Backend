@@ -125,6 +125,46 @@ describe('processPage', () => {
   });
 });
 
+describe('portfolio ownership transfers', () => {
+  const NEW_OWNER = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
+
+  it('moves ownership and records history without losing portfolio data', async () => {
+    const { db, calls } = fakeDb();
+    const mint = makeEvent('port_init', [addr(OWNER), str('bafyportfolio')]);
+    const transfer = makeEvent('port_xfer', [addr(OWNER), addr(NEW_OWNER), u32(1)]);
+
+    const result = await processPage(db, TESTNET_CONTRACT, page([mint, transfer]));
+
+    expect(result).toMatchObject({ applied: 2, rejected: 0, ignored: 0 });
+
+    // Ownership is updated in place on the stable portfolio id, not re-minted.
+    const update = calls.find((c) => /UPDATE portfolios\s+SET owner/.test(c.sql));
+    expect(update).toBeDefined();
+    expect(update!.params).toEqual(expect.arrayContaining([NEW_OWNER]));
+
+    // History row is appended for the transfer.
+    const history = calls.find((c) => c.sql.includes('INSERT INTO ownership_history'));
+    expect(history).toBeDefined();
+    expect(history!.params).toEqual(expect.arrayContaining([NEW_OWNER, OWNER]));
+
+    // No portfolio data is deleted or re-created by the transfer.
+    expect(calls.some((c) => /DELETE FROM portfolios/.test(c.sql))).toBe(false);
+    expect(sqls(calls)).toContain('COMMIT');
+  });
+
+  it('keeps non-transferred events writing the same read-model rows', async () => {
+    const { db, calls } = fakeDb();
+
+    await processPage(db, TESTNET_CONTRACT, page());
+
+    expect(calls.some((c) => c.sql.includes('INSERT INTO folders'))).toBe(true);
+    expect(calls.some((c) => c.sql.includes('INSERT INTO portfolios'))).toBe(true);
+    expect(calls.some((c) => c.sql.includes('INSERT INTO templates'))).toBe(true);
+    expect(calls.some((c) => c.sql.includes('INSERT INTO ownership_history'))).toBe(false);
+    expect(calls.some((c) => /UPDATE portfolios\s+SET owner/.test(c.sql))).toBe(false);
+  });
+});
+
 describe('pollOnce', () => {
   it('starts at the oldest retained ledger when there is no cursor or start ledger', async () => {
     const { db } = fakeDb();

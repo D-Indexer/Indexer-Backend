@@ -43,13 +43,79 @@ CREATE TABLE IF NOT EXISTS templates (
 
 -- port_mint / port_upd / tmpl_set. No foreign key to folders: the indexer can
 -- start partway through history, so a portfolio may arrive before its folder.
+--
+-- Keyed by a stable token id (not owner) so ownership transfers do not look
+-- like a mint for the new owner plus orphaned data for the old one. `owner` is
+-- an indexed attribute; owner-based endpoints query it directly.
 CREATE TABLE IF NOT EXISTS portfolios (
-  owner        TEXT PRIMARY KEY,
+  token_id     BIGINT PRIMARY KEY,
+  owner        TEXT NOT NULL,
   template_id  BIGINT NOT NULL,
   ipfs_cid     TEXT NOT NULL,
   minted_at    TIMESTAMPTZ NOT NULL,
   updated_at   TIMESTAMPTZ NOT NULL
 );
+
+-- Idempotent migration for databases created before the token_id key.
+-- Adds token_id when missing and backfills it for existing rows. Legacy rows
+-- were keyed by owner, so a deterministic hash of the owner is used as the
+-- token id; this keeps the backfill stable across re-runs.
+ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS token_id BIGINT;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'portfolios'
+      AND column_name = 'token_id'
+      AND is_nullable = 'YES'
+  ) THEN
+    UPDATE portfolios
+       SET token_id = ('x' || substr(md5(owner), 1, 15))::bit(60)::bigint
+     WHERE token_id IS NULL;
+
+    ALTER TABLE portfolios ALTER COLUMN token_id SET NOT NULL;
+  END IF;
+END $$;
+
+-- Replace the legacy owner primary key with the token_id primary key.
+DO $$
+DECLARE
+  pk_name TEXT;
+BEGIN
+  SELECT conname INTO pk_name
+    FROM pg_constraint
+   WHERE conrelid = 'portfolios'::regclass
+     AND contype = 'p';
+
+  IF pk_name IS NOT NULL AND pk_name <> 'portfolios_pkey' THEN
+    EXECUTE format('ALTER TABLE portfolios DROP CONSTRAINT %I', pk_name);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'portfolios'::regclass
+      AND contype = 'p'
+  ) THEN
+    ALTER TABLE portfolios ADD CONSTRAINT portfolios_pkey PRIMARY KEY (token_id);
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_portfolios_owner ON portfolios (owner);
+
+-- Ownership history for portfolios. One row per ownership period; the current
+-- owner is the row with the greatest acquired_at for a token_id. event_id
+-- references contract_events.id so a transfer can be traced to its event.
+CREATE TABLE IF NOT EXISTS ownership_history (
+  token_id     BIGINT NOT NULL,
+  owner        TEXT NOT NULL,
+  acquired_at  TIMESTAMPTZ NOT NULL,
+  event_id     TEXT,
+  PRIMARY KEY (token_id, acquired_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ownership_history_token
+  ON ownership_history (token_id);
 
 -- init / adm_add / adm_rm
 CREATE TABLE IF NOT EXISTS admins (

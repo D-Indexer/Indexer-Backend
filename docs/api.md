@@ -13,6 +13,8 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/templates`](#get-templates)                   | All registered templates              |
 | `GET`  | [`/templates/:id`](#get-templatesid)             | One template                          |
 | `POST` | [`/upload`](#post-upload)                        | Add and pin a file on IPFS            |
+| `GET`  | [`/.well-known/stellar.toml`](#get-well-knownstellartoml) | SEP-1 stellar.toml          |
+| `GET`  | [`/federation`](#get-federation)                 | SEP-2 federation lookup               |
 
 ## Errors
 
@@ -24,8 +26,8 @@ Every error has the same shape:
 
 | Status | When                                                  | `error` examples                                                                                                                                                                                                                                                             |
 | ------ | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | Invalid path parameter or upload                      | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit` |
-| `404`  | Resource not indexed, or unknown route                | `Folder not found`, `Portfolio not found`, `Template not found`, `Route not found` (also includes `path`)                                                                                                                                                                    |
+| `400`  | Invalid path parameter, query parameter or upload     | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `Invalid federation type`, `Invalid federation query`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit` |
+| `404`  | Resource not indexed, or unknown route                | `Folder not found`, `Portfolio not found`, `Template not found`, `Federation record not found`, `Route not found` (also includes `path`)                                                                                                                                    |
 | `502`  | IPFS node unreachable or returned an error            | `IPFS node unreachable`, `IPFS add failed with status 500`                                                                                                                                                                                                                   |
 | `503`  | `/health` only: database unreachable                  | see below                                                                                                                                                                                                                                                                    |
 | `504`  | IPFS node timed out (`IPFS_TIMEOUT_MS`)               | `IPFS node timed out`                                                                                                                                                                                                                                                        |
@@ -187,3 +189,100 @@ Errors: `400` (no file, type, size, content mismatch), `502` / `504` (IPFS).
 
 The endpoint is unauthenticated and not rate limited yet; don't expose it publicly
 without a proxy that enforces limits.
+
+## `GET /.well-known/stellar.toml`
+
+Serves the [SEP-1](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0001.md)
+`stellar.toml` that lets wallets discover the federation server. The document is built
+from configuration (`STELLAR_TOML_*` / `FEDERATION_*` env vars, see
+[configuration](configuration.md)); only fields that are configured are emitted, so the
+output always validates against SEP-1 for the fields provided.
+
+```bash
+curl localhost:3000/.well-known/stellar.toml
+```
+
+```toml
+FEDERATION_SERVER = "https://api.example.com/federation"
+
+[DOCUMENTATION]
+ORG_NAME = "Folder"
+ORG_URL = "https://folder.example"
+ORG_DESCRIPTION = "Human-readable names for Stellar accounts"
+```
+
+- `Content-Type: text/plain; charset=utf-8` (SEP-1 requires `text/plain`).
+- `Access-Control-Allow-Origin: *` so browser-based wallets can fetch it.
+- `Cache-Control: public, max-age=300`.
+
+## `GET /federation`
+
+[SEP-2](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0002.md)
+federation endpoint. Two query types are supported:
+
+| Query                    | Purpose                                        |
+| ------------------------ | ---------------------------------------------- |
+| `type=name&q=<name>*<domain>` | Forward lookup: federation address → account |
+| `type=id&q=<account>`    | Reverse lookup: account → federation address   |
+
+### Forward lookup (`type=name`)
+
+`q` must be a federation address of the form `<name>*<domain>`. The domain must match
+`FEDERATION_DOMAIN` (case-insensitive); anything else is a `404`. The name part is
+normalised before lookup (see [name normalisation](#name-normalisation)).
+
+```bash
+curl 'localhost:3000/federation?type=name&q=smoke-1794262900*folder.example'
+```
+
+```json
+{
+  "stellar_address": "smoke-1794262900*folder.example",
+  "account_id": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM"
+}
+```
+
+### Reverse lookup (`type=id`)
+
+`q` must be a Stellar account strkey (`G…`). The response uses the folder's canonical
+on-chain name (including the `.folder` suffix) as the federation name.
+
+```bash
+curl 'localhost:3000/federation?type=id&q=GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM'
+```
+
+```json
+{
+  "stellar_address": "smoke-1794262900.folder*folder.example",
+  "account_id": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM"
+}
+```
+
+### Errors
+
+- `400` `Invalid federation type` when `type` is missing or not `name` / `id`.
+- `400` `Invalid federation query` when `q` is missing, malformed, or (for `type=id`)
+  not a valid `G…` account.
+- `404` `Federation record not found` when no indexed folder matches, or the domain in
+  a `type=name` query isn't the configured federation domain.
+
+### Headers
+
+- `Content-Type: application/json`.
+- `Access-Control-Allow-Origin: *` (SEP-2 clients are often browser-based).
+- `Cache-Control: public, max-age=60` on `200` responses.
+
+### Name normalisation
+
+Federation names are derived from on-chain folder names as follows:
+
+1. Take the folder name as stored on-chain (e.g. `smoke-1794262900.folder`).
+2. Strip the trailing `.folder` suffix to get the federation name
+   (`smoke-1794262900`).
+3. Lowercase the result. On-chain names are already restricted to `A-Z a-z 0-9 . _ -`,
+   so no other characters need escaping.
+
+Forward lookups apply the same normalisation to the `q` name part before matching, so
+`Smoke-1794262900*<domain>` and `smoke-1794262900*<domain>` resolve to the same account.
+Reverse lookups always return the canonical on-chain name (suffix included) so the
+address round-trips through a forward lookup.

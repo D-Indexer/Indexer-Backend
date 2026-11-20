@@ -5,6 +5,8 @@ import templateRoutes from './routes/template.routes';
 import uploadRoutes from './routes/upload.routes';
 import portfolioRoutes from './routes/portfolio.routes';
 import healthRoutes from './routes/health.routes';
+import federationRoutes from './routes/federation.routes';
+import stellarTomlRoutes from './routes/stellarToml.routes';
 import { errorHandler } from './middleware/errorHandler';
 import { multerErrorHandler } from './middleware/multerErrorHandler';
 import { notFoundHandler } from './middleware/notFound';
@@ -49,6 +51,8 @@ export function createApp(env: AppEnv) {
   app.use('/portfolios', portfolioRoutes);
   app.use('/upload', uploadRoutes);
   app.use('/health', healthRoutes);
+  app.use('/.well-known', stellarTomlRoutes);
+  app.use('/federation', federationRoutes);
 
   app.use(notFoundHandler);
   app.use(multerErrorHandler);

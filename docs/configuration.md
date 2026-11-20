@@ -58,6 +58,44 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `DB_CONNECTION_TIMEOUT_MS`        | `5000`                      | Pool connection timeout                                                                    |
 | `HEALTHCHECK_DATABASE_TIMEOUT_MS` | `2000`                      | DB timeout for `GET /health`                                                               |
 | `SHUTDOWN_TIMEOUT_MS`             | `10000`                     | Graceful shutdown limit                                                                    |
+| `PORTFOLIO_TRANSFERS_ENABLED`     | `false`                     | Decode and apply portfolio ownership transfer events (see below)                           |
+| `FEDERATION_ENABLED`              | `false`                     | Serve `/.well-known/stellar.toml` and `GET /federation` (SEP-1/SEP-2)                      |
+| `FEDERATION_DOMAIN`               | unset                       | Domain used in federation addresses (`name*<domain>`); required when federation is enabled |
+| `FEDERATION_SERVER_URL`           | unset                       | Absolute URL advertised as `FEDERATION_SERVER`; defaults to `PUBLIC_BASE_URL` + `/federation` |
+| `PUBLIC_BASE_URL`                 | unset                       | Public origin of the API, used to build absolute URLs in `stellar.toml`                    |
+| `STELLAR_TOML_ORG_NAME`           | `Folder`                    | `DOCUMENTATION.ORG_NAME` in `stellar.toml`                                                 |
+| `STELLAR_TOML_ORG_URL`            | unset                       | `DOCUMENTATION.ORG_URL` in `stellar.toml`                                                  |
+| `STELLAR_TOML_ORG_EMAIL`          | unset                       | `DOCUMENTATION.ORG_EMAIL` in `stellar.toml`                                                |
+| `SERVER_TIMING`                   | `false` in production       | Emit `Server-Timing` headers. Enabled by default outside production.                       |
+| `SLOW_REQUEST_THRESHOLD_MS`       | `1000`                      | Requests slower than this log a warning with the timing breakdown                          |
+
+## Portfolio transfers
+
+`PORTFOLIO_TRANSFERS_ENABLED` gates the decoder and handler for portfolio
+ownership transfer events. While it is `false` (the default) the indexer ignores
+transfer events and portfolios remain keyed by their original owner, so existing
+endpoints behave exactly as before. Enable it only once the contract emits the
+agreed transfer event shape; see [architecture](architecture.md#portfolio-transfers)
+for the event format and the ownership-history model.
+
+## Federation (SEP-1 / SEP-2)
+
+Setting `FEDERATION_ENABLED=true` exposes `/.well-known/stellar.toml` and
+`GET /federation`. `FEDERATION_DOMAIN` is the domain wallets append to folder
+names (`alice*<FEDERATION_DOMAIN>`); it must match the host serving the toml.
+`FEDERATION_SERVER_URL` is advertised verbatim in the toml and defaults to
+`PUBLIC_BASE_URL` + `/federation`, so set `PUBLIC_BASE_URL` when the API sits
+behind a proxy. The `STELLAR_TOML_ORG_*` variables fill the optional
+`DOCUMENTATION` section; unset values are omitted from the toml.
+
+## Server-Timing
+
+`SERVER_TIMING` controls the `Server-Timing` response header. It defaults to
+enabled in development and test and disabled in production; set
+`SERVER_TIMING=true` to turn it on in production (for example on a canary) and
+`SERVER_TIMING=false` to silence it elsewhere. When enabled, responses carry
+`db`, `ipfs` and `app` entries. Requests slower than `SLOW_REQUEST_THRESHOLD_MS`
+always log a warning with the same breakdown, regardless of this flag.
 
 ## Test-only
 

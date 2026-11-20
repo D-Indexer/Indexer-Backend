@@ -30,3 +30,27 @@ export async function getFolderByName(name: string): Promise<Folder | null> {
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE name = $1`, [name]);
   return rows[0] ? mapFolder(rows[0]) : null;
 }
+
+/**
+ * Resolve a normalised `.folder` name to its owner (Stellar account).
+ * Returns null when no folder is registered for the name.
+ */
+export async function resolveFederationName(name: string): Promise<{ name: string; account: string } | null> {
+  const folder = await getFolderByName(name);
+  if (!folder) {
+    return null;
+  }
+  return { name: folder.name, account: folder.owner };
+}
+
+/**
+ * Reverse-resolve a Stellar account to its registered `.folder` name.
+ * Returns null when the account has no folder.
+ */
+export async function resolveFederationAccount(account: string): Promise<{ name: string; account: string } | null> {
+  const folder = await getFolderByAddress(account);
+  if (!folder) {
+    return null;
+  }
+  return { name: folder.name, account: folder.owner };
+}
