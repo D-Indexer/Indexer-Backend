@@ -31,13 +31,76 @@ CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
 CREATE INDEX IF NOT EXISTS idx_contract_events_orphaned
   ON contract_events (indexed_at) WHERE status = 'orphaned';
 
+-- Read-model rows carry `last_event_id`, the contract_events row that last wrote
+-- them. Event ids are TOIDs, so they sort in ledger/transaction/operation order:
+-- every write is guarded by `last_event_id < $event_id`, which makes stale or
+-- out-of-order events no-ops and keeps the read model monotonic.
+
 -- folder_cl (owner <-> folder_name); template_id tracks tmpl_set / port_mint.
 CREATE TABLE IF NOT EXISTS folders (
-  owner        TEXT PRIMARY KEY,
-  name         TEXT UNIQUE NOT NULL,
-  template_id  BIGINT,
-  claimed_at   TIMESTAMPTZ NOT NULL,
-  updated_at   TIMESTAMPTZ NOT NULL
+  owner          TEXT PRIMARY KEY,
+  name           TEXT UNIQUE NOT NULL,
+  template_id    BIGINT,
+  claimed_at     TIMESTAMPTZ NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
+);
+
+-- tmpl_reg
+CREATE TABLE IF NOT EXISTS templates (
+  id             BIGINT PRIMARY KEY,
+  metadata_uri   TEXT NOT NULL,
+  creator        TEXT,
+  registered_at  TIMESTAMPTZ NOT NULL,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
+);
+
+-- port_mint / port_upd / tmpl_set. No foreign key to folders: the indexer can
+-- start partway through history, so a portfolio may arrive before its folder.
+CREATE TABLE IF NOT EXISTS portfolios (
+  owner          TEXT PRIMARY KEY,
+  template_id    BIGINT NOT NULL,
+  ipfs_cid       TEXT NOT NULL,
+  minted_at      TIMESTAMPTZ NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
+);
+
+-- init / adm_add / adm_rm. `removed_at` is set by adm_rm instead of deleting the
+-- row, so the removal keeps its provenance and a stale adm_add can't resurrect it.
+CREATE TABLE IF NOT EXISTS admins (
+  address        TEXT PRIMARY KEY,
+  added_at       TIMESTAMPTZ NOT NULL,
+  removed_at     TIMESTAMPTZ,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
+);
+
+-- Upgrade a database created before last_event_id existed. Rows written by the old
+-- indexer have no provenance, so they are dropped and rebuilt from contract_events
+-- on the next replay (docs/operations.md). The tables are recreated above.
+DO $$
+DECLARE
+  t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['folders', 'templates', 'portfolios', 'admins'] LOOP
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name = t AND column_name = 'last_event_id'
+    ) THEN
+      EXECUTE format('DROP TABLE %I CASCADE', t);
+    END IF;
+  END LOOP;
+END
+$$;
+
+-- folder_cl (owner <-> folder_name); template_id tracks tmpl_set / port_mint.
+CREATE TABLE IF NOT EXISTS folders (
+  owner          TEXT PRIMARY KEY,
+  name           TEXT UNIQUE NOT NULL,
+  template_id    BIGINT,
+  claimed_at     TIMESTAMPTZ NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
 );
 
 -- Every folder_cl claim, including names later moved to another owner.
@@ -55,23 +118,28 @@ CREATE TABLE IF NOT EXISTS templates (
   id             BIGINT PRIMARY KEY,
   metadata_uri   TEXT NOT NULL,
   creator        TEXT,
-  registered_at  TIMESTAMPTZ NOT NULL
+  registered_at  TIMESTAMPTZ NOT NULL,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
 );
 
 -- port_mint / port_upd / tmpl_set. No foreign key to folders: the indexer can
 -- start partway through history, so a portfolio may arrive before its folder.
 CREATE TABLE IF NOT EXISTS portfolios (
-  owner        TEXT PRIMARY KEY,
-  template_id  BIGINT NOT NULL,
-  ipfs_cid     TEXT NOT NULL,
-  minted_at    TIMESTAMPTZ NOT NULL,
-  updated_at   TIMESTAMPTZ NOT NULL
+  owner          TEXT PRIMARY KEY,
+  template_id    BIGINT NOT NULL,
+  ipfs_cid       TEXT NOT NULL,
+  minted_at      TIMESTAMPTZ NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
 );
 
--- init / adm_add / adm_rm
+-- init / adm_add / adm_rm. `removed_at` is set by adm_rm instead of deleting the
+-- row, so the removal keeps its provenance and a stale adm_add can't resurrect it.
 CREATE TABLE IF NOT EXISTS admins (
-  address   TEXT PRIMARY KEY,
-  added_at  TIMESTAMPTZ NOT NULL
+  address        TEXT PRIMARY KEY,
+  added_at       TIMESTAMPTZ NOT NULL,
+  removed_at     TIMESTAMPTZ,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
 );
 
 -- Indexer cursor and status, written in the same transaction as event data.
