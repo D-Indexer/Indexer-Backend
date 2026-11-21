@@ -32,7 +32,12 @@ export type IndexerConfig = {
   maxPagesPerTick?: number;
 };
 
-export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerConfig };
+export type IndexerDependencies = {
+  db: Db;
+  rpc: EventSource;
+  config: IndexerConfig;
+  onCidApplied?: (cid: string) => void | Promise<void>;
+};
 
 export type PageResult = { applied: number; ignored: number; rejected: number; duplicates: number };
 
@@ -167,15 +172,31 @@ async function storeEvent(
  * Events already stored (same RPC event id) are skipped, so replaying a page
  * after a crash or a manual cursor rewind is safe.
  */
-export async function processPage(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
+export async function processPage(
+  db: Db,
+  contractId: string,
+  page: GetEventsResult,
+  onCidApplied?: (cid: string) => void | Promise<void>
+): Promise<PageResult> {
   const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0 };
   const client = await db.connect();
+  const appliedCids = new Set<string>();
 
   try {
     await client.query('BEGIN');
     for (const event of page.events) {
       if (event.contractId !== contractId) continue;
       const outcome = await storeEvent(client, contractId, event);
+      if (outcome === 'applied') {
+        try {
+          const decoded = decodeEvent(event);
+          if (decoded && (decoded.topic === 'port_mint' || decoded.topic === 'port_upd')) {
+            appliedCids.add(decoded.ipfsCid);
+          }
+        } catch {
+          // The event is already handled by storeEvent; malformed events are recorded as rejected.
+        }
+      }
       if (outcome === 'duplicate') result.duplicates++;
       else result[outcome]++;
     }
@@ -191,6 +212,18 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
       [STATE.lastError]: null,
     });
     await client.query('COMMIT');
+    if (onCidApplied) {
+      for (const cid of appliedCids) {
+        try {
+          await onCidApplied(cid);
+        } catch (err) {
+          logger.warn('Immediate IPFS reconciliation failed', {
+            cid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
     return result;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -280,7 +313,7 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
     });
   }
 
-  const result = await processPage(deps.db, deps.config.contractId, page);
+  const result = await processPage(deps.db, deps.config.contractId, page, deps.onCidApplied);
   if (page.events.length > 0) {
     logger.info('Indexed events', { ...result, lastLedger: page.events[page.events.length - 1].ledger });
   }
