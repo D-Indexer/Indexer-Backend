@@ -28,6 +28,8 @@ export type GetEventsResult = {
 export type GetEventsParams = {
   contractId: string;
   limit: number;
+  /** Inclusive upper bound; only supported by RPCs that accept ranged scans. */
+  endLedger?: number;
 } & ({ startLedger: number; cursor?: never } | { cursor: string; startLedger?: never });
 
 export type HealthResult = {

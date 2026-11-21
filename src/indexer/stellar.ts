@@ -2,7 +2,14 @@ import type { Pool, PoolClient } from 'pg';
 import os from 'node:os';
 import { decodeEvent, decodeTopic, DecodedEvent, EventDecodeError } from './decode';
 import { applyEvent } from './handlers';
-import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
+import {
+  EventSource,
+  GetEventsParams,
+  GetEventsResult,
+  LedgerRangeError,
+  RawEvent,
+  RpcError,
+} from './rpc';
 import { logger } from '../utils/logger';
 
 /** indexer_state keys. */
@@ -39,6 +46,13 @@ export type IndexerConfig = {
    * up. Defaults to 1; 0 disables prefetching (strictly sequential).
    */
   prefetchPages?: number;
+  /**
+   * Catch-up gaps larger than this many ledgers are split into contiguous
+   * ranges fetched concurrently. Defaults to 1000; 0 disables parallel catch-up.
+   */
+  parallelThresholdLedgers?: number;
+  /** Max ranges fetched concurrently during parallel catch-up. Defaults to 4. */
+  parallelFetches?: number;
   /** How often a standby retries the advisory lock. Defaults to 5000ms. */
   leaderRetryMs?: number;
   /** Identifies this process in indexer_state leader info. Defaults to host:pid. */
@@ -364,6 +378,159 @@ export async function catchUp(
   deps: IndexerDependencies,
   maxPages: number,
   isStopped: () => boolean = () => false
+): Promise<void> {
+  if (await parallelCatchUp(deps, maxPages, isStopped)) return;
+  await sequentialCatchUp(deps, maxPages, isStopped);
+}
+
+/** One contiguous ledger range fetched by a parallel catch-up worker. */
+export type LedgerRange = { startLedger: number; endLedger: number };
+
+/** Split `[from, to]` into at most `parts` contiguous, non-empty ledger ranges. */
+export function splitLedgerRange(from: number, to: number, parts: number): LedgerRange[] {
+  const total = to - from + 1;
+  const count = Math.max(1, Math.min(Math.floor(parts), total));
+  const size = Math.ceil(total / count);
+  const ranges: LedgerRange[] = [];
+  for (let start = from; start <= to; start += size) {
+    ranges.push({ startLedger: start, endLedger: Math.min(start + size - 1, to) });
+  }
+  return ranges;
+}
+
+/**
+ * Fetch one contiguous ledger range with `startLedger`/`endLedger` paging.
+ * Returns null when the RPC does not support ranged scans, so the caller can
+ * fall back to sequential mode.
+ */
+async function fetchRange(
+  deps: IndexerDependencies,
+  range: LedgerRange
+): Promise<GetEventsResult[] | null> {
+  const { contractId, pageLimit: limit } = deps.config;
+  const pages: GetEventsResult[] = [];
+  let startLedger = range.startLedger;
+
+  for (;;) {
+    let page: GetEventsResult;
+    try {
+      page = await deps.rpc.getEvents({ contractId, limit, startLedger, endLedger: range.endLedger });
+    } catch (err) {
+      if (isUnsupportedEndLedger(err)) return null;
+      throw err;
+    }
+    pages.push(page);
+    if (page.events.length < limit) return pages;
+    const next = scannedLedger(page) + 1;
+    if (next > range.endLedger) return pages;
+    startLedger = next;
+  }
+}
+
+/**
+ * Parallel catch-up: when the gap to `latestLedger` is larger than
+ * `parallelThresholdLedgers`, split it into contiguous ranges fetched
+ * concurrently (bounded by `parallelFetches`) and commit them strictly in
+ * ledger order. Returns false when the gap is small or the RPC does not
+ * support ranged scans, so the caller falls back to sequential mode.
+ */
+async function parallelCatchUp(
+  deps: IndexerDependencies,
+  maxPages: number,
+  isStopped: () => boolean
+): Promise<boolean> {
+  const threshold = deps.config.parallelThresholdLedgers ?? 1000;
+  const workers = Math.max(1, deps.config.parallelFetches ?? 4);
+  if (threshold <= 0 || workers < 2) return false;
+
+  const state = await readState(deps.db);
+  const first = await nextRequest(deps, state);
+  const from = requestedLedger(first.params);
+  const { latestLedger } = await deps.rpc.getHealth();
+  if (latestLedger - from <= threshold) return false;
+
+  const ranges = splitLedgerRange(from, latestLedger, workers);
+  const fetched: (GetEventsResult[] | null)[] = new Array(ranges.length).fill(null);
+  let nextRange = 0;
+  let unsupported = false;
+  let failure: unknown = null;
+
+  // Commit each range as soon as it and every earlier range have arrived, so
+  // the cursor only ever advances over a contiguous, fully committed prefix.
+  let committed = 0;
+  let nextCommit = 0;
+  const commitReady = async () => {
+    while (nextCommit < ranges.length) {
+      const pages = fetched[nextCommit];
+      if (!pages) {
+        if (unsupported || failure || isStopped()) return;
+        await new Promise((resolve) => setImmediate(resolve));
+        continue;
+      }
+      for (const page of pages) {
+        if (committed >= maxPages || isStopped()) return;
+        const result = await processPage(deps.db, deps.config.contractId, page);
+        committed++;
+        if (page.events.length > 0) {
+          logger.info('Indexed events', {
+            ...result,
+            lastLedger: page.events[page.events.length - 1].ledger,
+          });
+        }
+      }
+      fetched[nextCommit] = null;
+      nextCommit++;
+    }
+  };
+
+  const run = async () => {
+    while (!unsupported && !failure && !isStopped()) {
+      const index = nextRange++;
+      if (index >= ranges.length) return;
+      try {
+        const pages = await fetchRange(deps, ranges[index]);
+        if (!pages) {
+          unsupported = true;
+          return;
+        }
+        fetched[index] = pages;
+      } catch (err) {
+        failure = err;
+        return;
+      }
+    }
+  };
+
+  // Commit in the foreground while the workers keep fetching ahead.
+  const fetching = Promise.all(Array.from({ length: Math.min(workers, ranges.length) }, run));
+  try {
+    await commitReady();
+  } finally {
+    await fetching;
+  }
+  if (failure) throw failure;
+  if (unsupported) return false;
+  return true;
+}
+
+/** True when the RPC rejected `endLedger` (unsupported ranged scan). */
+function isUnsupportedEndLedger(err: unknown): boolean {
+  if (err instanceof LedgerRangeError) return true;
+  if (!(err instanceof RpcError)) return false;
+  return /endLedger|end_ledger|unknown field|invalid params/i.test(err.message);
+}
+
+/** True when the RPC rejected `endLedger` (unsupported ranged scan). */
+function isUnsupportedEndLedger(err: unknown): boolean {
+  if (err instanceof LedgerRangeError) return true;
+  if (!(err instanceof RpcError)) return false;
+  return /endLedger|end_ledger|unknown field|invalid params/i.test(err.message);
+}
+
+async function sequentialCatchUp(
+  deps: IndexerDependencies,
+  maxPages: number,
+  isStopped: () => boolean
 ): Promise<void> {
   const depth = Math.max(0, deps.config.prefetchPages ?? 1);
   if (depth === 0) {
