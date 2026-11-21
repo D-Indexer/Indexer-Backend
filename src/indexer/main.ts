@@ -4,7 +4,7 @@ import pool from '../db/client';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
 import { createRpcClient, redactUrl } from './rpc';
-import { createIndexer } from './stellar';
+import { createIndexer, tryLockIndexer } from './stellar';
 
 /** Indexer process entrypoint: `npm run start:indexer` (or `dev:indexer`). */
 async function main(): Promise<void> {
@@ -28,11 +28,20 @@ async function main(): Promise<void> {
     },
   });
 
+  // Hold the indexer lock for the life of the process so `retry-rejected`
+  // refuses to write the read model concurrently.
+  const lockClient = await pool.connect();
+  if (!(await tryLockIndexer(lockClient))) {
+    lockClient.release();
+    throw new Error('Another indexer process holds the indexer lock');
+  }
+
   const shutdown = async (signal: string) => {
     logger.info('Shutdown requested', { signal });
     const timeout = setTimeout(() => process.exit(1), env.SHUTDOWN_TIMEOUT_MS);
     timeout.unref();
     await indexer.stop();
+    lockClient.release();
     await pool.end();
     process.exit(0);
   };

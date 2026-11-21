@@ -126,6 +126,160 @@ export function isDeterministicDbError(err: unknown): boolean {
   return typeof code === 'string' && (code.startsWith('22') || code.startsWith('23'));
 }
 
+/**
+ * Advisory lock key held by the indexer process and by `retry-rejected`, so the
+ * two never write the read model at the same time.
+ */
+export const INDEXER_LOCK_KEY = 0x1d1e7e5;
+
+/** Take the indexer lock for the rest of the session; false when it is held elsewhere. */
+export async function tryLockIndexer(client: Pick<PoolClient, 'query'>): Promise<boolean> {
+  const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [
+    INDEXER_LOCK_KEY,
+  ]);
+  return rows[0]?.locked === true;
+}
+
+export async function unlockIndexer(client: Pick<PoolClient, 'query'>): Promise<void> {
+  await client.query('SELECT pg_advisory_unlock($1)', [INDEXER_LOCK_KEY]);
+}
+
+export type RejectedEventRow = {
+  id: string;
+  ledger: number;
+  ledger_closed_at: Date;
+  topic: string;
+  topic_xdr: string[];
+  value_xdr: string;
+};
+
+export type RetryOptions = {
+  /** Only retry events whose decoded topic is this one. */
+  topic?: string;
+  /** Only retry events at or after this ledger. */
+  sinceLedger?: number;
+  /** Report what would change without writing anything. */
+  dryRun?: boolean;
+};
+
+export type RetryOutcome = 'applied' | 'ignored' | 'rejected';
+
+export type RetryResult = {
+  scanned: number;
+  applied: number;
+  ignored: number;
+  rejected: number;
+  changes: { id: string; topic: string; outcome: RetryOutcome; error: string | null }[];
+};
+
+/**
+ * Re-decode stored rejected events from their raw XDR and apply the ones that
+ * now decode, in ledger/TOID order. Each event is applied under a savepoint so
+ * a single failure doesn't abort the batch. Idempotent: events that still fail
+ * to decode stay rejected, and applied events are no longer selected.
+ */
+export async function retryRejected(db: Db, options: RetryOptions = {}): Promise<RetryResult> {
+  const result: RetryResult = { scanned: 0, applied: 0, ignored: 0, rejected: 0, changes: [] };
+  const client = await db.connect();
+
+  try {
+    if (!(await tryLockIndexer(client))) {
+      throw new Error('The indexer is running (advisory lock held); stop it before retrying rejected events.');
+    }
+    await client.query('BEGIN');
+    const { rows } = await client.query<RejectedEventRow>(
+      `SELECT id, ledger, ledger_closed_at, topic, topic_xdr, value_xdr
+         FROM contract_events
+        WHERE status = 'rejected'
+          AND ($1::text IS NULL OR topic = $1)
+          AND ($2::int IS NULL OR ledger >= $2)
+        ORDER BY ledger, id`,
+      [options.topic ?? null, options.sinceLedger ?? null]
+    );
+
+    for (const row of rows) {
+      result.scanned++;
+      const raw: RawEvent = {
+        type: 'contract',
+        ledger: row.ledger,
+        ledgerClosedAt: new Date(row.ledger_closed_at).toISOString(),
+        contractId: '',
+        id: row.id,
+        txHash: '',
+        topic: row.topic_xdr,
+        value: row.value_xdr,
+      };
+
+      let decoded: DecodedEvent | null = null;
+      let error: string | null = null;
+      try {
+        decoded = decodeEvent(raw);
+      } catch (err) {
+        if (!(err instanceof EventDecodeError)) throw err;
+        error = err.message;
+      }
+
+      if (!decoded) {
+        const outcome: RetryOutcome = error ? 'rejected' : 'ignored';
+        result[outcome]++;
+        result.changes.push({ id: row.id, topic: row.topic, outcome, error });
+        if (!options.dryRun) {
+          await client.query(
+            `UPDATE contract_events
+                SET status = $2, data = NULL, error = $3,
+                    retry_count = retry_count + 1, last_retry_at = NOW()
+              WHERE id = $1`,
+            [row.id, outcome, error]
+          );
+        }
+        continue;
+      }
+
+      await client.query('SAVEPOINT retry_event');
+      try {
+        await applyEvent(client, decoded, new Date(row.ledger_closed_at));
+        await client.query('RELEASE SAVEPOINT retry_event');
+        result.applied++;
+        result.changes.push({ id: row.id, topic: row.topic, outcome: 'applied', error: null });
+        if (!options.dryRun) {
+          await client.query(
+            `UPDATE contract_events
+                SET status = 'applied', data = $2, error = NULL,
+                    retry_count = retry_count + 1, last_retry_at = NOW()
+              WHERE id = $1`,
+            [row.id, JSON.stringify(decoded)]
+          );
+        }
+      } catch (err) {
+        if (!isDeterministicDbError(err)) throw err;
+        await client.query('ROLLBACK TO SAVEPOINT retry_event');
+        const message = err instanceof Error ? err.message : String(err);
+        result.rejected++;
+        result.changes.push({ id: row.id, topic: row.topic, outcome: 'rejected', error: message });
+        if (!options.dryRun) {
+          await client.query(
+            `UPDATE contract_events
+                SET status = 'rejected', data = NULL, error = $2,
+                    retry_count = retry_count + 1, last_retry_at = NOW()
+              WHERE id = $1`,
+            [row.id, message]
+          );
+        }
+      }
+    }
+
+    if (options.dryRun) await client.query('ROLLBACK');
+    else await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    await unlockIndexer(client).catch(() => undefined);
+    client.release();
+  }
+}
+
 async function storeEvent(
   client: PoolClient,
   contractId: string,

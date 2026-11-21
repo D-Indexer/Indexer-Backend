@@ -117,6 +117,25 @@ TRUNCATE contract_events, folders, templates, portfolios, admins, indexer_state;
 npm run indexer -- reset-cursor <first ledger to index>   # or leave state empty to use INDEXER_START_LEDGER
 ```
 
+### Retry rejected events
+
+Events the indexer could not decode (or the database refused) are stored with
+`status = 'rejected'` and their raw XDR. After fixing the decoder, re-decode them:
+
+```bash
+npm run indexer -- retry-rejected [--topic <t>] [--since-ledger <n>] [--dry-run]
+```
+
+- `--topic` limits the run to one event topic (e.g. `port_mint`).
+- `--since-ledger` limits the run to events at or after that ledger.
+- `--dry-run` prints what would change without writing anything.
+
+Events are retried in ledger/TOID order, each applied under a savepoint, and
+`status`, `data`, `error`, `retry_count` and `last_retry_at` are updated. The
+command takes the indexer advisory lock, so stop the indexer process first (it
+holds the lock while running). It is idempotent: events that still fail stay
+rejected, and applied events are no longer selected.
+
 ### Rejected events
 
 ```sql

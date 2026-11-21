@@ -17,8 +17,14 @@ CREATE TABLE IF NOT EXISTS contract_events (
   data              JSONB,
   status            TEXT NOT NULL CHECK (status IN ('applied', 'ignored', 'rejected')),
   error             TEXT,
+  retry_count       INTEGER NOT NULL DEFAULT 0,
+  last_retry_at     TIMESTAMPTZ,
   indexed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Columns added after the first release; keep the schema idempotent.
+ALTER TABLE contract_events ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE contract_events ADD COLUMN IF NOT EXISTS last_retry_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_contract_events_ledger ON contract_events (ledger);
 CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
