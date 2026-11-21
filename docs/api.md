@@ -64,7 +64,12 @@ change the status code; the indexer process has its own healthcheck
     "stale": false,
     "lastLedger": 5654521,
     "lastSuccessAt": "2026-11-10T07:37:30.225Z",
-    "lastError": null
+    "lastError": null,
+    "leader": {
+      "instanceId": "indexer-1:42",
+      "since": "2026-11-10T07:30:00.000Z",
+      "heartbeatAt": "2026-11-10T07:37:30.225Z"
+    }
   },
   "requestId": "03a1e532-cabc-4f9a-bfd7-b7242bb46db2"
 }
@@ -74,6 +79,8 @@ change the status code; the indexer process has its own healthcheck
   `retention_gap` (halted, [needs an operator](operations.md#retention-gap)) or `not_started`.
 - `indexer.stale`: no successful poll within `INDEXER_STALE_AFTER_MS`.
 - `indexer.lastLedger`: the ledger the indexer has scanned up to.
+- `indexer.leader`: the process holding the single-writer advisory lock
+  (`instanceId`, `since`, `heartbeatAt`), or `null`s when no indexer is leader.
 
 `503` when the database is unreachable:
 

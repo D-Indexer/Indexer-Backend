@@ -50,6 +50,11 @@ router.get(
         lastLedger: state[STATE.lastLedger] ? Number(state[STATE.lastLedger]) : null,
         lastSuccessAt,
         lastError: state[STATE.lastError] ?? null,
+        leader: {
+          instanceId: state[STATE.leaderId] ?? null,
+          since: state[STATE.leaderSince] ?? null,
+          heartbeatAt: state[STATE.leaderHeartbeatAt] ?? null,
+        },
       },
       requestId: req.id,
     });

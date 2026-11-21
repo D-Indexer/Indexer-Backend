@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import os from 'node:os';
 import { decodeEvent, decodeTopic, DecodedEvent, EventDecodeError } from './decode';
 import { applyEvent } from './handlers';
 import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
@@ -13,6 +14,9 @@ export const STATE = {
   status: 'status',
   lastError: 'last_error',
   lastGap: 'last_gap',
+  leaderId: 'leader_id',
+  leaderSince: 'leader_since',
+  leaderHeartbeatAt: 'leader_heartbeat_at',
 } as const;
 
 export type IndexerStatus = 'ok' | 'error' | 'retention_gap';
@@ -30,6 +34,10 @@ export type IndexerConfig = {
   maxBackoffMs: number;
   /** Max pages fetched back-to-back in one tick while catching up. */
   maxPagesPerTick?: number;
+  /** How often a standby retries the advisory lock. Defaults to 5000ms. */
+  leaderRetryMs?: number;
+  /** Identifies this process in indexer_state leader info. Defaults to host:pid. */
+  instanceId?: string;
 };
 
 export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerConfig };
@@ -291,6 +299,173 @@ export type RunningIndexer = {
   /** Stop polling; resolves once any in-flight poll has finished. */
   stop: () => Promise<void>;
 };
+
+/**
+ * Session-level advisory lock that makes exactly one indexer process the writer.
+ * The lock is keyed from the contract ID, so indexers for different contracts
+ * (or databases) never contend. It is held by a dedicated pooled connection and
+ * released automatically by Postgres when that session ends (crash, SIGKILL).
+ */
+export type LeaderLock = {
+  /** True while this process holds the lock. */
+  readonly held: boolean;
+  /** Try to become leader. Returns true when the lock is held afterwards. */
+  acquire: () => Promise<boolean>;
+  /** Release the lock and its connection. Safe to call when not held. */
+  release: () => Promise<void>;
+};
+
+/** Stable 64-bit advisory lock key derived from the contract ID. */
+export function leaderLockKey(contractId: string): bigint {
+  // FNV-1a 64-bit over the contract strkey, mapped into signed bigint range.
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of Buffer.from(contractId, 'utf8')) {
+    hash ^= BigInt(byte);
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return BigInt.asIntN(64, hash);
+}
+
+export function createLeaderLock(db: Db, contractId: string): LeaderLock {
+  const key = leaderLockKey(contractId);
+  let client: PoolClient | null = null;
+
+  return {
+    get held() {
+      return client !== null;
+    },
+    async acquire() {
+      if (client) return true;
+      const candidate = await db.connect();
+      try {
+        const { rows } = await candidate.query<{ locked: boolean }>(
+          'SELECT pg_try_advisory_lock($1) AS locked',
+          [key.toString()]
+        );
+        if (!rows[0]?.locked) {
+          candidate.release();
+          return false;
+        }
+        client = candidate;
+        return true;
+      } catch (err) {
+        candidate.release(true);
+        throw err;
+      }
+    },
+    async release() {
+      const held = client;
+      if (!held) return;
+      client = null;
+      try {
+        await held.query('SELECT pg_advisory_unlock($1)', [key.toString()]);
+      } finally {
+        held.release();
+      }
+    },
+  };
+}
+
+export function createIndexer(deps: IndexerDependencies): RunningIndexer {
+  const maxPages = deps.config.maxPagesPerTick ?? 50;
+  const retryMs = deps.config.leaderRetryMs ?? 5000;
+  const instanceId = deps.config.instanceId ?? `${os.hostname()}:${process.pid}`;
+  const lock = createLeaderLock(deps.db, deps.config.contractId);
+  let timer: NodeJS.Timeout | null = null;
+  let stopped = false;
+  let failures = 0;
+  let inFlight: Promise<void> = Promise.resolve();
+
+  const becomeLeader = async () => {
+    await writeState(deps.db, {
+      [STATE.leaderId]: instanceId,
+      [STATE.leaderSince]: new Date().toISOString(),
+      [STATE.leaderHeartbeatAt]: new Date().toISOString(),
+    });
+    logger.info('Indexer is leader', { instanceId, contractId: deps.config.contractId });
+  };
+
+  const stepDown = async () => {
+    await lock.release();
+    await writeState(deps.db, {
+      [STATE.leaderId]: null,
+      [STATE.leaderSince]: null,
+      [STATE.leaderHeartbeatAt]: null,
+    }).catch(() => undefined);
+    logger.info('Indexer released leadership', { instanceId });
+  };
+
+  const tick = async () => {
+    if (!lock.held) {
+      let acquired = false;
+      try {
+        acquired = await lock.acquire();
+      } catch (err) {
+        failures++;
+        logger.error('Indexer leader lock attempt failed', {
+          error: err instanceof Error ? err.message : String(err),
+          failures,
+        });
+        return;
+      }
+      if (!acquired) {
+        logger.info('Indexer is standby: another process holds the writer lock', {
+          instanceId,
+          retryMs,
+        });
+        return;
+      }
+      await becomeLeader();
+    }
+
+    try {
+      for (let page = 0; page < maxPages && !stopped; page++) {
+        const { events } = await pollOnce(deps);
+        if (events < deps.config.pageLimit) break; // caught up
+      }
+      failures = 0;
+      await writeState(deps.db, { [STATE.leaderHeartbeatAt]: new Date().toISOString() }).catch(
+        () => undefined
+      );
+    } catch (err) {
+      failures++;
+      const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof RetentionGapError) {
+        logger.error('Indexer halted: retention gap', { error: message });
+      } else {
+        logger.error('Indexer poll failed', { error: message, failures });
+        await writeState(deps.db, { [STATE.status]: 'error', [STATE.lastError]: message }).catch(
+          () => undefined
+        );
+      }
+    }
+  };
+
+  const schedule = (delay: number) => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      inFlight = tick().then(() => schedule(lock.held ? backoffDelay(deps.config, failures) : retryMs));
+    }, delay);
+  };
+
+  logger.info('Indexer started', {
+    contractId: deps.config.contractId,
+    pollIntervalMs: deps.config.pollIntervalMs,
+    pageLimit: deps.config.pageLimit,
+    instanceId,
+  });
+  schedule(0);
+
+  return {
+    stop: async () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      await inFlight;
+      await stepDown();
+      logger.info('Indexer stopped');
+    },
+  };
+}
 
 export function backoffDelay(
   config: Pick<IndexerConfig, 'pollIntervalMs' | 'maxBackoffMs'>,

@@ -14,6 +14,15 @@ Run exactly **one** indexer per database. Two would not corrupt data, since even
 deduplicate, but they would race on the cursor and waste RPC calls. The API can scale
 horizontally.
 
+Single-writer coordination is enforced with a session-level Postgres advisory lock keyed
+from `FOLDER_CONTRACT_ID`. The process that holds it polls and records itself in
+`indexer_state` (`leader_id`, `leader_since`, `leader_heartbeat_at`); any other process
+logs `Indexer is standby` and retries every `INDEXER_LEADER_RETRY_MS`. If the leader dies
+(SIGKILL, OOM, node loss) Postgres drops its session and releases the lock, so a standby
+takes over within `INDEXER_LEADER_RETRY_MS` plus the session timeout. The cursor only
+moves forward inside the page transaction, so a failover never rewinds it. On SIGTERM the
+leader releases the lock before exiting.
+
 ## Health
 
 - **API**: `GET /health` returns `200` when Postgres answers, `503` otherwise, and includes

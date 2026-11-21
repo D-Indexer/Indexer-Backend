@@ -24,6 +24,7 @@ async function main(): Promise<void> {
       startLedger: env.INDEXER_START_LEDGER,
       onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
       maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
+      leaderRetryMs: env.INDEXER_LEADER_RETRY_MS,
     },
   });
 
