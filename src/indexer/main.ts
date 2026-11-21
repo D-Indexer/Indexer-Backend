@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { getEnv, rpcUrls } from '../config/env';
+import { getEnv, rpcHeaders, rpcUrls } from '../config/env';
 import pool from '../db/client';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
@@ -12,6 +12,7 @@ async function main(): Promise<void> {
   await migrate(pool);
 
   const urls = rpcUrls(env);
+  const headers = rpcHeaders(env);
   const rpc =
     urls.length > 1
       ? createFailoverEventSource({
@@ -19,6 +20,7 @@ async function main(): Promise<void> {
           timeoutMs: env.STELLAR_RPC_TIMEOUT_MS,
           failureThreshold: env.STELLAR_RPC_FAILURE_THRESHOLD,
           cooldownMs: env.STELLAR_RPC_COOLDOWN_MS,
+          headers,
           cursorLedger: () => {
             const cursor = lastCursor;
             if (!cursor) return undefined;
@@ -29,8 +31,8 @@ async function main(): Promise<void> {
             }
           },
         })
-      : createRpcClient({ url: urls[0], timeoutMs: env.STELLAR_RPC_TIMEOUT_MS });
-  logger.info('Connecting indexer', { rpc: urls.map(redactUrl) });
+      : createRpcClient({ url: urls[0], timeoutMs: env.STELLAR_RPC_TIMEOUT_MS, headers });
+  logger.info('Connecting indexer', { rpc: urls.map(redactUrl), rpcHeaders: Object.keys(headers) });
 
   // Cached so the failover source can skip endpoints behind the saved cursor.
   let lastCursor: string | undefined;

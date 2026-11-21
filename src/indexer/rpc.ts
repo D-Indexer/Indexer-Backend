@@ -78,6 +78,8 @@ export type RpcClientOptions = {
   baseDelayMs?: number;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  /** Extra HTTP headers sent with every request (e.g. paid provider API keys). Never logged. */
+  headers?: Record<string, string>;
 };
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -98,6 +100,7 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
   const maxAttempts = options.maxAttempts ?? 3;
   const baseDelayMs = options.baseDelayMs ?? 500;
   const safeUrl = redactUrl(options.url);
+  const headers: Record<string, string> = { 'content-type': 'application/json', ...options.headers };
   let nextId = 1;
 
   async function callOnce<T>(method: string, params?: unknown): Promise<T> {
@@ -105,7 +108,7 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     try {
       response = await fetchImpl(options.url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers,
         body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
         signal: AbortSignal.timeout(options.timeoutMs),
       });
@@ -182,6 +185,8 @@ export type FailoverOptions = {
   /** Ledger the indexer has already scanned; endpoints behind it are skipped. */
   cursorLedger?: () => number | undefined;
   now?: () => number;
+  /** Extra HTTP headers sent with every request to every endpoint. Never logged. */
+  headers?: Record<string, string>;
   createClient?: (url: string) => EventSource;
 };
 
@@ -207,7 +212,8 @@ export function createFailoverEventSource(options: FailoverOptions): EventSource
   const cooldownMs = options.cooldownMs ?? 60000;
   const now = options.now ?? Date.now;
   const createClient =
-    options.createClient ?? ((url: string) => createRpcClient({ url, timeoutMs: options.timeoutMs }));
+    options.createClient ??
+    ((url: string) => createRpcClient({ url, timeoutMs: options.timeoutMs, headers: options.headers }));
   const endpoints: EndpointState[] = options.urls.map((url) => ({
     url,
     client: createClient(url),

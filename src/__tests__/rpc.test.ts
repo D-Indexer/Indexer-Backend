@@ -70,6 +70,29 @@ describe('rpc client', () => {
     expect(err).toMatchObject({ oldestLedger: 5533280, latestLedger: 5654239 });
   });
 
+  it('sends configured headers on every request and keeps them out of errors', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(jsonResponse({}, 500));
+    const rpc = createRpcClient({
+      url: 'https://rpc.example/v1',
+      timeoutMs: 1000,
+      headers: { Authorization: 'Bearer super-secret-token', 'X-Api-Key': 'key-123' },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      sleep: async () => undefined,
+    });
+
+    const err = await rpc.getEvents(params).catch((e) => e);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    for (const call of fetchImpl.mock.calls) {
+      expect(call[1].headers).toMatchObject({
+        'content-type': 'application/json',
+        Authorization: 'Bearer super-secret-token',
+        'X-Api-Key': 'key-123',
+      });
+    }
+    expect(err.message).not.toContain('super-secret-token');
+    expect(err.message).not.toContain('key-123');
+  });
+
   it('never puts credentials or query strings in error messages', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(jsonResponse({}, 500));
     const err = await client(fetchImpl)

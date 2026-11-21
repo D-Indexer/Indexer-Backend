@@ -1,4 +1,5 @@
 import { StrKey } from '@stellar/stellar-sdk';
+import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 
 const optionalPositiveInt = z
@@ -25,6 +26,10 @@ const envSchema = z
     /** Consecutive failures before an endpoint is skipped for the cool-down. */
     STELLAR_RPC_FAILURE_THRESHOLD: z.coerce.number().int().positive().default(3),
     STELLAR_RPC_COOLDOWN_MS: z.coerce.number().int().positive().default(60000),
+    /** JSON object of extra HTTP headers sent with every RPC request (e.g. paid provider API keys). */
+    STELLAR_RPC_HEADERS: z.string().optional(),
+    /** Path to a JSON file with the same shape as STELLAR_RPC_HEADERS; merged over it. */
+    STELLAR_RPC_HEADERS_FILE: z.string().optional(),
     STELLAR_NETWORK_PASSPHRASE: z.string().min(1).default(TESTNET_PASSPHRASE),
     FOLDER_CONTRACT_ID: z
       .string({ required_error: `FOLDER_CONTRACT_ID is required (testnet: ${TESTNET_CONTRACT_ID})` })
@@ -67,6 +72,14 @@ const envSchema = z
         });
       }
     }
+    for (const key of ['STELLAR_RPC_HEADERS', 'STELLAR_RPC_HEADERS_FILE'] as const) {
+      const raw = env[key];
+      if (raw === undefined || raw.trim() === '') continue;
+      const result = parseRpcHeaders(raw);
+      if (!result.ok) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: `${key} ${result.error}` });
+      }
+    }
     if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -88,6 +101,44 @@ export function parseRpcUrls(value: string | undefined): string[] {
   return [...new Set(urls)];
 }
 
+const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const FORBIDDEN_HEADERS = new Set(['host', 'content-length', 'connection', 'transfer-encoding']);
+
+export type RpcHeadersResult = { ok: true; headers: Record<string, string> } | { ok: false; error: string };
+
+/**
+ * Parse a JSON object of RPC headers. Error messages never include header
+ * values, so a malformed config cannot leak an API key into logs.
+ */
+export function parseRpcHeaders(raw: string): RpcHeadersResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, error: 'must be a JSON object of header name/value pairs' };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'must be a JSON object of header name/value pairs' };
+  }
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!HEADER_NAME_RE.test(name)) {
+      return { ok: false, error: `contains an invalid header name: ${JSON.stringify(name)}` };
+    }
+    if (FORBIDDEN_HEADERS.has(name.toLowerCase())) {
+      return { ok: false, error: `must not set the ${name} header` };
+    }
+    if (typeof value !== 'string' || value.trim() === '') {
+      return { ok: false, error: `header ${name} must have a non-empty string value` };
+    }
+    if (/[\r\n]/.test(value)) {
+      return { ok: false, error: `header ${name} must not contain line breaks` };
+    }
+    headers[name] = value;
+  }
+  return { ok: true, headers };
+}
+
 /** All configured RPC endpoints, primary first. */
 export function rpcUrls(env: Pick<AppEnv, 'STELLAR_RPC_URL' | 'STELLAR_RPC_URLS'>): string[] {
   const urls = parseRpcUrls(env.STELLAR_RPC_URLS);
@@ -96,6 +147,39 @@ export function rpcUrls(env: Pick<AppEnv, 'STELLAR_RPC_URL' | 'STELLAR_RPC_URLS'
 }
 
 let cachedEnv: AppEnv | null = null;
+
+/**
+ * Resolve the headers sent with every RPC request: STELLAR_RPC_HEADERS merged
+ * with the JSON file at STELLAR_RPC_HEADERS_FILE (file wins). Throws without
+ * echoing header values when the configuration is invalid.
+ */
+export function rpcHeaders(
+  env: Pick<AppEnv, 'STELLAR_RPC_HEADERS' | 'STELLAR_RPC_HEADERS_FILE'>,
+  readFile: (path: string) => string = (path) => readFileSync(path, 'utf8')
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const sources: Array<[string, string | undefined]> = [
+    ['STELLAR_RPC_HEADERS', env.STELLAR_RPC_HEADERS],
+    ['STELLAR_RPC_HEADERS_FILE', env.STELLAR_RPC_HEADERS_FILE],
+  ];
+  for (const [key, raw] of sources) {
+    if (raw === undefined || raw.trim() === '') continue;
+    let content = raw;
+    if (key === 'STELLAR_RPC_HEADERS_FILE') {
+      try {
+        content = readFile(raw.trim());
+      } catch {
+        throw new Error(`Invalid environment configuration: ${key} could not be read. See docs/configuration.md`);
+      }
+    }
+    const result = parseRpcHeaders(content);
+    if (!result.ok) {
+      throw new Error(`Invalid environment configuration: ${key} ${result.error}. See docs/configuration.md`);
+    }
+    Object.assign(headers, result.headers);
+  }
+  return headers;
+}
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   const parsed = envSchema.safeParse(source);

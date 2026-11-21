@@ -49,6 +49,8 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `STELLAR_RPC_TIMEOUT_MS`          | `10000`                     | Per-request RPC timeout; failed requests are retried 3× with backoff                       |
 | `STELLAR_RPC_FAILURE_THRESHOLD`   | `3`                         | Consecutive failures before an endpoint is skipped (failover)                              |
 | `STELLAR_RPC_COOLDOWN_MS`         | `60000`                     | How long a failed endpoint is skipped before it is retried                                 |
+| `STELLAR_RPC_HEADERS`             | unset                       | JSON object of extra headers sent on every RPC request (paid providers). Values are never logged. |
+| `STELLAR_RPC_HEADERS_FILE`        | unset                       | Path to a JSON file with the same shape; merged over `STELLAR_RPC_HEADERS`.                |
 | `INDEXER_POLL_INTERVAL_MS`        | `5000`                      | Delay between polls once caught up                                                         |
 | `INDEXER_PAGE_LIMIT`              | `200`                       | Events per `getEvents` page (1–10000)                                                      |
 | `INDEXER_START_LEDGER`            | unset                       | First ledger on an empty database. Unset = oldest ledger the RPC retains.                  |

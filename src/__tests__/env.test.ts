@@ -1,4 +1,4 @@
-import { loadEnv, rpcUrls, TESTNET_CONTRACT_ID } from '../config/env';
+import { loadEnv, rpcHeaders, rpcUrls, TESTNET_CONTRACT_ID } from '../config/env';
 
 const validEnv = {
   NODE_ENV: 'test',
@@ -45,6 +45,33 @@ describe('environment configuration', () => {
     const env: Record<string, string> = { ...validEnv };
     delete env[key];
     expect(() => loadEnv(env)).toThrow(new RegExp(`${key} is required \\(testnet: `));
+  });
+
+  it('parses RPC headers from JSON and rejects invalid configuration without echoing values', () => {
+    expect(rpcHeaders({ STELLAR_RPC_HEADERS: '{"Authorization":"Bearer abc"}' })).toEqual({
+      Authorization: 'Bearer abc',
+    });
+    expect(rpcHeaders({})).toEqual({});
+    expect(() => rpcHeaders({ STELLAR_RPC_HEADERS: 'not-json' })).toThrow(/STELLAR_RPC_HEADERS/);
+    expect(() => rpcHeaders({ STELLAR_RPC_HEADERS: '["Bearer abc"]' })).toThrow(/STELLAR_RPC_HEADERS/);
+    expect(() => rpcHeaders({ STELLAR_RPC_HEADERS: '{"Bad Header":"Bearer abc"}' })).toThrow(
+      /invalid header name/
+    );
+    expect(() => rpcHeaders({ STELLAR_RPC_HEADERS: '{"Authorization":""}' })).toThrow(/non-empty/);
+    expect(() => loadEnv({ ...validEnv, STELLAR_RPC_HEADERS: 'nope' })).toThrow(/STELLAR_RPC_HEADERS/);
+  });
+
+  it('merges STELLAR_RPC_HEADERS_FILE over STELLAR_RPC_HEADERS', () => {
+    const headers = rpcHeaders(
+      { STELLAR_RPC_HEADERS: '{"Authorization":"Bearer env"}', STELLAR_RPC_HEADERS_FILE: '/run/h.json' },
+      () => '{"Authorization":"Bearer file","X-Api-Key":"k"}'
+    );
+    expect(headers).toEqual({ Authorization: 'Bearer file', 'X-Api-Key': 'k' });
+    expect(() =>
+      rpcHeaders({ STELLAR_RPC_HEADERS_FILE: '/missing.json' }, () => {
+        throw new Error('ENOENT');
+      })
+    ).toThrow(/STELLAR_RPC_HEADERS_FILE/);
   });
 
   it('rejects a FOLDER_CONTRACT_ID that is not a contract address', () => {

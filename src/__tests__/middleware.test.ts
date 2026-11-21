@@ -1,9 +1,11 @@
+import { rpcHeaders } from '../config/env';
 import { errorHandler } from '../middleware/errorHandler';
 import { notFoundHandler } from '../middleware/notFound';
 import { requestId } from '../middleware/requestId';
 import { securityHeaders } from '../middleware/securityHeaders';
 import { HttpError } from '../http/errors';
 import { mockResponse } from './testUtils';
+import { logger } from '../utils/logger';
 
 describe('middleware', () => {
   it('propagates incoming request ids', () => {
@@ -65,5 +67,24 @@ describe('middleware', () => {
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({ error: 'Bad input', requestId: 'req-123' });
     logSpy.mockRestore();
+  });
+});
+
+describe('logger', () => {
+  it('never writes RPC header values to log output', () => {
+    const lines: string[] = [];
+    const spies = (['log', 'warn', 'error'] as const).map((method) =>
+      jest.spyOn(console, method).mockImplementation((line: string) => void lines.push(line))
+    );
+    const headers = rpcHeaders({ STELLAR_RPC_HEADERS: '{"Authorization":"Bearer super-secret-token"}' });
+
+    logger.info('Connecting indexer', { rpc: ['https://rpc.example/v1'], rpcHeaders: Object.keys(headers) });
+    logger.warn('RPC degraded', { rpcHeaders: Object.keys(headers) });
+    logger.error('RPC failed', { rpcHeaders: Object.keys(headers) });
+
+    spies.forEach((spy) => spy.mockRestore());
+    expect(lines).toHaveLength(3);
+    expect(lines.join('\n')).toContain('Authorization');
+    expect(lines.join('\n')).not.toContain('super-secret-token');
   });
 });
