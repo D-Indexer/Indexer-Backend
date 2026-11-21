@@ -1,7 +1,7 @@
 {
   "name": "d-indexer-backend",
   "version": "1.0.0",
-  "description": "Core API and indexing engine for Folder \u2014 handles off-chain data, IPFS uploads, metadata caching, and Stellar ledger hooks",
+  "description": "Core API and indexing engine for Folder — handles off-chain data, IPFS uploads, metadata caching, and Stellar ledger hooks",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -18,6 +18,7 @@
     "start": "node dist/server.js",
     "start:indexer": "node dist/indexer/main.js",
     "indexer": "node -r ts-node/register src/indexer/cli.ts",
+    "ipfs": "node -r ts-node/register src/ipfs/cli.ts",
     "test": "jest --runInBand",
     "test:integration": "TESTNET_INTEGRATION=1 jest --runInBand src/__tests__/testnet.integration.test.ts",
     "typecheck": "tsc --noEmit",
@@ -33,6 +34,7 @@
     "express": "4.19.2",
     "multer": "1.4.5-lts.1",
     "pg": "8.12.0",
+    "sharp": "^0.35.5",
     "zod": "3.23.8"
   },
   "devDependencies": {

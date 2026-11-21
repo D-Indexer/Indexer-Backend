@@ -7,6 +7,13 @@ import { sniffContentType } from '../validation/fileType';
 jest.mock('../services/ipfs', () => ({
   pinFile: jest.fn(),
 }));
+jest.mock('../services/imageSanitize', () => ({
+  sanitizeImage: jest.fn(async (buffer: Buffer) => buffer),
+}));
+jest.mock('../db/client', () => ({
+  __esModule: true,
+  default: { query: jest.fn().mockResolvedValue({ rows: [] }) },
+}));
 
 const mockPin = pinFile as jest.Mock;
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);

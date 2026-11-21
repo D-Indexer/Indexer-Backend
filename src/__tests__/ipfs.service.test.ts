@@ -1,8 +1,11 @@
-import { pinFile, resolveUrl } from '../services/ipfs';
+import { cidV1RawSha256, pinFile, resolveUrl } from '../services/ipfs';
+import { resetEnvCacheForTests } from '../config/env';
 
 describe('ipfs service', () => {
   afterEach(() => {
     jest.restoreAllMocks();
+    delete process.env.IPFS_VERIFY_CID;
+    resetEnvCacheForTests();
   });
 
   it('resolves gateway urls without duplicate slashes', async () => {
@@ -10,18 +13,35 @@ describe('ipfs service', () => {
   });
 
   it('adds and pins files in one Kubo RPC call with a timeout', async () => {
+    const buffer = Buffer.from('data');
+    const cid = cidV1RawSha256(buffer);
     const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ Hash: 'bafyAdded' }),
+      json: async () => ({ Hash: cid }),
     } as Response);
 
-    await expect(pinFile(Buffer.from('data'), 'profile.png')).resolves.toBe('bafyAdded');
+    await expect(pinFile(buffer, 'profile.png')).resolves.toBe(cid);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
     expect(url.pathname).toBe('/api/v0/add');
     expect(url.searchParams.get('pin')).toBe('true');
+    expect(url.searchParams.get('raw-leaves')).toBe('true');
+    expect(url.searchParams.get('hash')).toBe('sha2-256');
+    expect(url.searchParams.get('chunker')).toBe('size-262144');
     expect(init).toMatchObject({ method: 'POST', signal: expect.any(AbortSignal) });
+  });
+
+  it('rejects a mismatched CID returned by Kubo', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ Hash: 'bafy-be-a-different-cid' }),
+    } as Response);
+
+    await expect(pinFile(Buffer.from('data'), 'profile.png')).rejects.toMatchObject({
+      statusCode: 502,
+      message: 'IPFS add returned a CID that does not match the uploaded bytes',
+    });
   });
 
   it('maps a timeout to 504 and an unreachable node to 502', async () => {

@@ -5,6 +5,7 @@ import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
 import { createRpcClient, redactUrl } from './rpc';
 import { createIndexer } from './stellar';
+import { reconcileCid } from '../ipfs/reconcile';
 
 /** Indexer process entrypoint: `npm run start:indexer` (or `dev:indexer`). */
 async function main(): Promise<void> {
@@ -24,6 +25,9 @@ async function main(): Promise<void> {
       startLedger: env.INDEXER_START_LEDGER,
       onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
       maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
+    },
+    onCidApplied: async (cid) => {
+      await reconcileCid(pool, cid);
     },
   });
 

@@ -173,6 +173,9 @@ Kubo node with `pin=true` and its CID (v1) returned.
 - Allowed types: `image/jpeg`, `image/png`, `image/webp`, `application/pdf`.
 - The declared type must match the file's leading bytes.
 - Maximum size: 10 MB. One file per request.
+- JPEG, PNG, and WebP uploads are re-encoded with EXIF, XMP, IPTC, and PNG text metadata stripped
+  before CID computation and pinning. ICC colour profiles are preserved.
+- Add `?keepMetadata=true` to retain metadata. This is not the default.
 
 ```bash
 curl -F "file=@avatar.png;type=image/png" localhost:3000/upload

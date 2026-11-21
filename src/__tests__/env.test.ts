@@ -20,6 +20,7 @@ describe('environment configuration', () => {
     expect(env.INDEXER_POLL_INTERVAL_MS).toBe(5000);
     expect(env.INDEXER_ON_RETENTION_GAP).toBe('halt');
     expect(env.INDEXER_START_LEDGER).toBeUndefined();
+    expect(env.IPFS_VERIFY_CID).toBe(true);
   });
 
   it('rejects invalid urls', () => {

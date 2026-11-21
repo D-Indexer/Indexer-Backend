@@ -29,6 +29,10 @@ const envSchema = z
     IPFS_API_URL: z.string().url('IPFS_API_URL must be a valid URL'),
     IPFS_GATEWAY: z.string().url('IPFS_GATEWAY must be a valid URL'),
     IPFS_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+    IPFS_VERIFY_CID: z
+      .enum(['true', 'false'])
+      .transform((value) => value === 'true')
+      .default('true'),
     CORS_ORIGIN: z.string().optional(),
     REQUEST_BODY_LIMIT: z.string().default('1mb'),
     INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
