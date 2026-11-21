@@ -51,9 +51,9 @@ position; trailing fields are ignored because the contract only appends.
 
 | Topic       | Data (in order)                                                    | Effect                                                 |
 | ----------- | ------------------------------------------------------------------ | ------------------------------------------------------ |
-| `init`      | `admin`                                                            | insert into `admins`                                   |
-| `adm_add`   | `admin`, `new_admin`                                               | insert `new_admin` into `admins`                       |
-| `adm_rm`    | `admin`, `target`                                                  | delete `target` from `admins`                          |
+| `init`      | `admin`                                                            | insert into `admins`; append `admin_changes`           |
+| `adm_add`   | `admin`, `new_admin`                                               | insert `new_admin` into `admins`; append `admin_changes` |
+| `adm_rm`    | `admin`, `target`                                                  | delete `target` from `admins`; append `admin_changes`  |
 | `folder_cl` | `owner`, `folder_name`                                             | upsert `folders`                                       |
 | `tmpl_reg`  | `template_id: u32`, `metadata_uri`, `creator` (appended; optional) | upsert `templates`                                     |
 | `tmpl_set`  | `owner`, `template_id: u32`                                        | set `folders.template_id` and `portfolios.template_id` |
@@ -142,12 +142,19 @@ When bumping the supported range, check the
 | `folders`         | `owner` (unique `name`) | `folder_cl`, `tmpl_set`, `port_mint`                                                           |
 | `templates`       | `id`                    | `tmpl_reg`                                                                                     |
 | `portfolios`      | `owner`                 | `port_mint`, `port_upd`, `tmpl_set`                                                            |
-| `admins`          | `address`               | `init`, `adm_add`, `adm_rm`                                                                    |
+| `admins`          | `address`               | `init`, `adm_add`, `adm_rm` (current state; `added_by`, `added_event_id`)                      |
+| `admin_changes`   | `event_id`              | `init`, `adm_add`, `adm_rm` (append-only history: `ledger`, `action`, `actor`, `target`, `at`)  |
 | `indexer_state`   | `key`                   | `cursor`, `last_ledger`, `last_success_at`, `status`, `last_error`, `start_ledger`, `last_gap` |
 
 Template ids are `BIGINT` because the contract uses `u32`. There are no foreign keys between
 `folders` and `portfolios`: an indexer that starts partway through history can see a mint
 whose claim is outside the window.
+
+Admin changes are security-relevant, so they are never deleted: every `init` / `adm_add` /
+`adm_rm` appends a row to `admin_changes` (keyed by the RPC event id, so replays are no-ops)
+and `admins` is only the current-state projection. `admins.added_by` / `added_event_id` record
+who added the current admin and from which event. Historical membership is queried with the
+`admins_at_ledger(ledger)` view; see [operations](operations.md#admin-history).
 
 ## Design decisions
 

@@ -81,12 +81,33 @@ is clamped to the oldest retained ledger with a warning.
 re-reads events and skips the ones already stored. To rebuild the read model from scratch:
 
 ```sql
-TRUNCATE contract_events, folders, templates, portfolios, admins, indexer_state;
+TRUNCATE contract_events, folders, templates, portfolios, admins, admin_changes, indexer_state;
 ```
 
 ```bash
 npm run indexer -- reset-cursor <first ledger to index>   # or leave state empty to use INDEXER_START_LEDGER
 ```
+
+### Admin history
+
+`admin_changes` is append-only: one row per `init` / `adm_add` / `adm_rm` event with the
+ledger, action (`init`, `add`, `remove`), the acting admin (`actor`, NULL for `init`), the
+target address and the ledger close time. `admins` holds only the current set.
+
+```sql
+-- Who was an admin at the end of ledger 1234?
+SELECT address FROM admins_at_ledger(1234) WHERE action IN ('init', 'add');
+
+-- Who removed whom?
+SELECT ledger, actor, target, at FROM admin_changes WHERE action = 'remove' ORDER BY ledger;
+
+-- Full history of one address.
+SELECT ledger, action, actor, at FROM admin_changes WHERE target = $1 ORDER BY ledger;
+```
+
+`admins_at_ledger(ledger)` is a view taking the ledger as a parameter, so call it as a table
+function: `SELECT * FROM admins_at_ledger(1234)`. It returns the last change per address at or
+before that ledger; filter on `action IN ('init', 'add')` for the members at that point.
 
 ### Rejected events
 

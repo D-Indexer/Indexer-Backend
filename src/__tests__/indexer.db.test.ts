@@ -7,7 +7,7 @@ import { Pool } from 'pg';
 import { migrate } from '../db/migrate';
 import { GetEventsResult } from '../indexer/rpc';
 import { processPage, readState } from '../indexer/stellar';
-import { addr, makeEvent, OWNER, str, TESTNET_CONTRACT, testnetEvents, u32 } from './eventFixtures';
+import { addr, ADMIN, makeEvent, OWNER, str, TESTNET_CONTRACT, testnetEvents, u32 } from './eventFixtures';
 
 const url = process.env.TEST_DATABASE_URL;
 const describeDb = url ? describe : describe.skip;
@@ -26,7 +26,9 @@ describeDb('indexer against Postgres', () => {
   });
 
   beforeEach(async () => {
-    await pool.query('TRUNCATE contract_events, folders, templates, portfolios, admins, indexer_state');
+    await pool.query(
+      'TRUNCATE contract_events, folders, templates, portfolios, admins, admin_changes, indexer_state'
+    );
   });
 
   afterAll(async () => {
@@ -94,6 +96,40 @@ describeDb('indexer against Postgres', () => {
     expect(await count('contract_events')).toBe(1);
     expect(await count('folders')).toBe(0);
     expect((await readState(pool)).cursor).toBe('before');
+  });
+
+  it('keeps admin history across a remove/re-add sequence', async () => {
+    const other = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
+    const events = [
+      makeEvent('init', [addr(ADMIN)], { ledger: 100 }),
+      makeEvent('adm_add', [addr(ADMIN), addr(other)], { ledger: 200 }),
+      makeEvent('adm_rm', [addr(ADMIN), addr(other)], { ledger: 300 }),
+      makeEvent('adm_add', [addr(ADMIN), addr(other)], { ledger: 400 }),
+    ];
+    await processPage(pool, TESTNET_CONTRACT, page(events, 'admin-cursor'));
+
+    const changes = await pool.query(
+      'SELECT ledger, action, actor, target FROM admin_changes ORDER BY ledger'
+    );
+    expect(changes.rows).toEqual([
+      { ledger: 100, action: 'init', actor: null, target: ADMIN },
+      { ledger: 200, action: 'add', actor: ADMIN, target: other },
+      { ledger: 300, action: 'remove', actor: ADMIN, target: other },
+      { ledger: 400, action: 'add', actor: ADMIN, target: other },
+    ]);
+
+    const current = await pool.query('SELECT * FROM admins WHERE address = $1', [other]);
+    expect(current.rows[0]).toMatchObject({ added_by: ADMIN });
+    expect(current.rows[0].added_event_id).toBe(events[3].id);
+
+    const at300 = await pool.query(
+      "SELECT address FROM admins_at_ledger(300) WHERE action IN ('init', 'add') ORDER BY address"
+    );
+    expect(at300.rows.map((r) => r.address)).toEqual([ADMIN]);
+    const at400 = await pool.query(
+      "SELECT address FROM admins_at_ledger(400) WHERE action IN ('init', 'add') ORDER BY address"
+    );
+    expect(at400.rows.map((r) => r.address)).toEqual([ADMIN, other].sort());
   });
 
   it('records rejected events and still advances the cursor', async () => {

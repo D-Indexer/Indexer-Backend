@@ -146,7 +146,7 @@ async function storeEvent(
   // loss, etc.) aborts the page so it is retried.
   await client.query('SAVEPOINT apply_event');
   try {
-    await applyEvent(client, decoded, new Date(event.ledgerClosedAt));
+    await applyEvent(client, decoded, new Date(event.ledgerClosedAt), event.id, event.ledger);
     await client.query('RELEASE SAVEPOINT apply_event');
     return 'applied';
   } catch (err) {
