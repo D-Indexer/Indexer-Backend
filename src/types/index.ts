@@ -24,3 +24,12 @@ export interface Portfolio {
   mintedAt: Date;
   updatedAt: Date;
 }
+
+/** ERC-721-style metadata document served by `GET /nft/:tokenId/metadata`. */
+export interface NftMetadata {
+  name: string;
+  description: string;
+  image: string;
+  external_url: string;
+  attributes: { trait_type: string; value: string | number }[];
+}

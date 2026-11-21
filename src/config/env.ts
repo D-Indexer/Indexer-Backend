@@ -29,6 +29,7 @@ const envSchema = z
     IPFS_API_URL: z.string().url('IPFS_API_URL must be a valid URL'),
     IPFS_GATEWAY: z.string().url('IPFS_GATEWAY must be a valid URL'),
     IPFS_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+    FRONTEND_BASE_URL: z.string().url('FRONTEND_BASE_URL must be a valid URL').default('http://localhost:5173'),
     CORS_ORIGIN: z.string().optional(),
     REQUEST_BODY_LIMIT: z.string().default('1mb'),
     INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),

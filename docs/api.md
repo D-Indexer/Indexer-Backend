@@ -10,6 +10,7 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/folders/:address`](#get-foldersaddress)       | Folder claimed by an address          |
 | `GET`  | [`/folders/name/:name`](#get-foldersnamename)    | Folder by name                        |
 | `GET`  | [`/portfolios/:address`](#get-portfoliosaddress) | Portfolio NFT minted by an address    |
+| `GET`  | [`/nft/:tokenId/metadata`](#get-nfttokenidmetadata) | ERC-721-style metadata for a portfolio NFT |
 | `GET`  | [`/templates`](#get-templates)                   | All registered templates              |
 | `GET`  | [`/templates/:id`](#get-templatesid)             | One template                          |
 | `POST` | [`/upload`](#post-upload)                        | Add and pin a file on IPFS            |
@@ -164,6 +165,40 @@ All registered templates (`tmpl_reg`), ordered by id. Not paginated yet.
 One template, same shape as a list item.
 
 Errors: `400` invalid id, `404` `Template not found`.
+
+## `GET /nft/:tokenId/metadata`
+
+ERC-721-style metadata document for a minted portfolio NFT, suitable for wallets and
+marketplaces.
+
+**Token identifier convention.** The Folder contract does not mint a separate numeric
+token id: a portfolio is keyed by its owner address (`port_mint` / `port_upd` carry
+`owner`, `template_id` and `ipfs_cid`). The token id is therefore the owner's Stellar
+strkey (`G…` account or `C…` contract, 56 characters), the same value accepted by
+`GET /portfolios/:address`.
+
+The document is versioned by its `attributes` (`Metadata Version` = `1`) and served with
+`Cache-Control: public, max-age=60`. `image` is the portfolio's IPFS CID resolved through
+`IPFS_GATEWAY`; `external_url` is built from `FRONTEND_BASE_URL`.
+
+```json
+{
+  "name": "D-Indexer Portfolio #GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
+  "description": "Portfolio NFT owned by GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ, built from template 1.",
+  "image": "https://ipfs.io/ipfs/bafkreiejxg6d3gqvi3737mcwxkv4u7gismaraxgv5zfoqtfuc3nbdgve7i",
+  "external_url": "http://localhost:5173/portfolio/GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
+  "attributes": [
+    { "trait_type": "Owner", "value": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ" },
+    { "trait_type": "Template", "value": 1 },
+    { "trait_type": "IPFS CID", "value": "bafkreiejxg6d3gqvi3737mcwxkv4u7gismaraxgv5zfoqtfuc3nbdgve7i" },
+    { "trait_type": "Minted At", "value": "2026-11-09T22:14:42.000Z" },
+    { "trait_type": "Metadata Version", "value": 1 }
+  ]
+}
+```
+
+Errors: `400` invalid token id, `404` `Token not found`. The endpoint never returns a
+partial document: if the portfolio is not indexed yet, it is a `404`.
 
 ## `POST /upload`
 

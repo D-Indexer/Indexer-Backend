@@ -17,6 +17,13 @@ export const templateIdSchema = z
   .transform(Number)
   .refine((n) => n <= 0xffffffff, 'Template ID must be at most 4294967295');
 
+/**
+ * Portfolio token ids are u32 on-chain. The contract has no separate token id:
+ * a portfolio is keyed by its owner address, so the token id is the owner's
+ * strkey (see docs/api.md#get-nfttokenidmetadata).
+ */
+export const tokenIdSchema = stellarAddressSchema;
+
 export const ALLOWED_UPLOAD_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'] as const;
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
