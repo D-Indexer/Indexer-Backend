@@ -2,7 +2,9 @@ import { LedgerRangeError, EventSource, GetEventsResult } from '../indexer/rpc';
 import {
   backoffDelay,
   createIndexer,
+  CursorInvalidError,
   IndexerConfig,
+  isValidCursor,
   ledgerFromCursor,
   pollOnce,
   processPage,
@@ -141,7 +143,11 @@ describe('pollOnce', () => {
 
   it('prefers the saved cursor, then a reset start ledger, then INDEXER_START_LEDGER', async () => {
     const rpc = fakeRpc();
-    await pollOnce({ db: fakeDb({ state: { cursor: 'abc', start_ledger: '7' } }).db, rpc, config });
+    await pollOnce({
+      db: fakeDb({ state: { cursor: '0024284788768636927-4294967295', start_ledger: '7' } }).db,
+      rpc,
+      config,
+    });
     await pollOnce({
       db: fakeDb({ state: { start_ledger: '7' } }).db,
       rpc,
@@ -149,8 +155,43 @@ describe('pollOnce', () => {
     });
     await pollOnce({ db: fakeDb().db, rpc, config: { ...config, startLedger: 9 } });
 
-    expect(rpc.getEvents.mock.calls.map(([p]) => p.cursor ?? p.startLedger)).toEqual(['abc', 7, 9]);
+    expect(rpc.getEvents.mock.calls.map(([p]) => p.cursor ?? p.startLedger)).toEqual([
+      '0024284788768636927-4294967295',
+      7,
+      9,
+    ]);
     expect(rpc.getHealth).not.toHaveBeenCalled();
+  });
+
+  it('recovers from a corrupt cursor by resuming at last_ledger', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: 'garbage', last_ledger: '5654242' } });
+    const rpc = fakeRpc();
+
+    await pollOnce({ db, rpc, config });
+
+    expect(rpc.getEvents).toHaveBeenCalledWith({
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      startLedger: 5654242,
+    });
+    expect(calls.find((c) => c.params?.[0] === 'cursor')?.params).toEqual(['cursor', null]);
+    const recovered = calls.find((c) => c.params?.[0] === 'cursor_recovered');
+    expect(JSON.parse(recovered!.params![1] as string)).toMatchObject({
+      invalidCursor: 'garbage',
+      resumedAt: 5654242,
+    });
+  });
+
+  it('halts with cursor_invalid when neither the cursor nor last_ledger is valid', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: 'garbage' } });
+    const rpc = fakeRpc();
+
+    const err = await pollOnce({ db, rpc, config }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(CursorInvalidError);
+    expect(err.message).toMatch(/reset-cursor/);
+    expect(rpc.getEvents).not.toHaveBeenCalled();
+    expect(calls.find((c) => c.params?.[0] === 'status')?.params).toEqual(['status', 'cursor_invalid']);
   });
 
   it('halts with a clear error when the cursor is older than the retention window', async () => {
@@ -232,6 +273,14 @@ describe('scanned ledger', () => {
 describe('indexer loop', () => {
   it('reads the ledger out of an RPC event id', () => {
     expect(ledgerFromCursor(testnetEvents[0].id)).toBe(testnetEvents[0].ledger);
+  });
+
+  it('validates saved cursors', () => {
+    expect(isValidCursor('0024284788768636927-4294967295')).toBe(true);
+    expect(isValidCursor('garbage')).toBe(false);
+    expect(isValidCursor('')).toBe(false);
+    expect(isValidCursor('0-0')).toBe(false);
+    expect(isValidCursor('12-')).toBe(false);
   });
 
   it('backs off exponentially up to the cap', () => {

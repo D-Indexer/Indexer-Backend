@@ -13,9 +13,10 @@ export const STATE = {
   status: 'status',
   lastError: 'last_error',
   lastGap: 'last_gap',
+  cursorRecovered: 'cursor_recovered',
 } as const;
 
-export type IndexerStatus = 'ok' | 'error' | 'retention_gap';
+export type IndexerStatus = 'ok' | 'error' | 'retention_gap' | 'cursor_invalid';
 export type RetentionGapPolicy = 'halt' | 'skip';
 
 export type Db = Pick<Pool, 'connect' | 'query'>;
@@ -54,6 +55,30 @@ export class RetentionGapError extends Error {
 export function ledgerFromCursor(cursor: string): number {
   const toid = BigInt(cursor.split('-')[0]);
   return Number(toid >> 32n);
+}
+
+/** An RPC paging cursor: `<TOID>-<op index>`, both decimal, e.g. `0024284788768636927-4294967295`. */
+const CURSOR_PATTERN = /^\d{1,20}-\d{1,10}$/;
+
+/** True when `cursor` is a well-formed RPC paging cursor pointing at a positive ledger. */
+export function isValidCursor(cursor: string): boolean {
+  if (!CURSOR_PATTERN.test(cursor)) return false;
+  try {
+    return ledgerFromCursor(cursor) > 0;
+  } catch {
+    return false;
+  }
+}
+
+export class CursorInvalidError extends Error {
+  constructor(readonly cursor: string) {
+    super(
+      `Saved cursor ${JSON.stringify(cursor)} is not a valid RPC paging cursor and there is no valid ` +
+        'last_ledger to fall back to. Run `npm run indexer -- reset-cursor <ledger>` to resume ' +
+        'indexing. See docs/operations.md#invalid-cursor.'
+    );
+    this.name = 'CursorInvalidError';
+  }
 }
 
 function scannedLedger(page: GetEventsResult): number {
@@ -211,8 +236,32 @@ async function nextRequest(
   state: Partial<Record<string, string>>
 ): Promise<NextRequest> {
   const { contractId, pageLimit: limit } = deps.config;
-  if (state[STATE.cursor]) {
-    return { params: { contractId, limit, cursor: state[STATE.cursor]! }, fromConfig: false };
+  const cursor = state[STATE.cursor];
+  if (cursor && isValidCursor(cursor)) {
+    return { params: { contractId, limit, cursor }, fromConfig: false };
+  }
+  if (cursor) {
+    // A corrupt cursor would make every getEvents call fail, so recover instead:
+    // resume from the last ledger we scanned (replaying it is safe) or, failing
+    // that, halt and ask an operator to reset the cursor.
+    const lastLedger = Number(state[STATE.lastLedger]);
+    if (!Number.isInteger(lastLedger) || lastLedger <= 0) {
+      throw new CursorInvalidError(cursor);
+    }
+    logger.warn(
+      'Saved cursor is invalid; recovering from last_ledger. Run `npm run indexer -- reset-cursor <ledger>` ' +
+        'if this repeats.',
+      { cursor, resumeAt: lastLedger }
+    );
+    await writeState(deps.db, {
+      [STATE.cursor]: null,
+      [STATE.cursorRecovered]: JSON.stringify({
+        invalidCursor: cursor,
+        resumedAt: lastLedger,
+        at: new Date().toISOString(),
+      }),
+    });
+    return { params: { contractId, limit, startLedger: lastLedger }, fromConfig: false };
   }
 
   const fromState = Number(state[STATE.startLedger]);
@@ -319,6 +368,11 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
       const message = err instanceof Error ? err.message : String(err);
       if (err instanceof RetentionGapError) {
         logger.error('Indexer halted: retention gap', { error: message });
+      } else if (err instanceof CursorInvalidError) {
+        logger.error('Indexer halted: invalid cursor', { error: message });
+        await writeState(deps.db, { [STATE.status]: 'cursor_invalid', [STATE.lastError]: message }).catch(
+          () => undefined
+        );
       } else {
         logger.error('Indexer poll failed', { error: message, failures });
         await writeState(deps.db, { [STATE.status]: 'error', [STATE.lastError]: message }).catch(

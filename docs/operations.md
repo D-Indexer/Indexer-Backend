@@ -38,7 +38,7 @@ removed.
 
 What to alert on:
 
-- `/health` `indexer.stale` is `true`, or `indexer.status` is `retention_gap`
+- `/health` `indexer.stale` is `true`, or `indexer.status` is `retention_gap` or `cursor_invalid`
 - `Indexer poll failed` logged repeatedly (the `failures` count grows)
 - rows in `contract_events` with `status = 'rejected'`
 
@@ -74,6 +74,28 @@ checking with backoff but doesn't move. Choose one:
 
 On an empty database the indexer never halts: an `INDEXER_START_LEDGER` older than the window
 is clamped to the oldest retained ledger with a warning.
+
+### Invalid cursor
+
+The saved cursor is validated on every read. If it is corrupt (not a `<TOID>-<op>` paging
+cursor) the indexer recovers on its own when `last_ledger` is valid: it clears the cursor,
+resumes from `last_ledger` (already-stored events are skipped, so nothing is missed) and
+records `indexer_state.cursor_recovered` (`{ invalidCursor, resumedAt, at }`, also shown as
+`indexer.cursorRecovered` in `/health`).
+
+If `last_ledger` is missing or invalid too, the indexer halts:
+
+```text
+ERROR Indexer halted: invalid cursor {"error":"Saved cursor \"garbage\" is not a valid RPC paging cursor ..."}
+```
+
+`/health` then shows `"indexer": {"status": "cursor_invalid", ...}`. Recover with:
+
+```bash
+npm run indexer -- reset-cursor <ledger to resume from>
+# in the container image:
+docker compose exec indexer node dist/indexer/cli.js reset-cursor <ledger>
+```
 
 ### Re-index from a ledger
 

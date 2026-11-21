@@ -112,7 +112,7 @@ from archive data is not implemented yet.
 | `templates`       | `id`                    | `tmpl_reg`                                                                                     |
 | `portfolios`      | `owner`                 | `port_mint`, `port_upd`, `tmpl_set`                                                            |
 | `admins`          | `address`               | `init`, `adm_add`, `adm_rm`                                                                    |
-| `indexer_state`   | `key`                   | `cursor`, `last_ledger`, `last_success_at`, `status`, `last_error`, `start_ledger`, `last_gap` |
+| `indexer_state`   | `key`                   | `cursor`, `last_ledger`, `last_success_at`, `status`, `last_error`, `start_ledger`, `last_gap`, `cursor_recovered` |
 
 Template ids are `BIGINT` because the contract uses `u32`. There are no foreign keys between
 `folders` and `portfolios`: an indexer that starts partway through history can see a mint

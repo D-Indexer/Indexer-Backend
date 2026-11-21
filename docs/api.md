@@ -71,9 +71,12 @@ change the status code; the indexer process has its own healthcheck
 ```
 
 - `indexer.status`: `ok`, `error` (last poll failed, retrying with backoff),
-  `retention_gap` (halted, [needs an operator](operations.md#retention-gap)) or `not_started`.
+  `retention_gap` (halted, [needs an operator](operations.md#retention-gap)),
+  `cursor_invalid` (halted, [needs an operator](operations.md#invalid-cursor)) or `not_started`.
 - `indexer.stale`: no successful poll within `INDEXER_STALE_AFTER_MS`.
 - `indexer.lastLedger`: the ledger the indexer has scanned up to.
+- `indexer.cursorRecovered`: `null`, or `{ invalidCursor, resumedAt, at }` when the indexer
+  replaced a corrupt saved cursor with a replay from `last_ledger`.
 
 `503` when the database is unreachable:
 

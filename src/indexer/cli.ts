@@ -26,6 +26,7 @@ export async function run(args: string[]): Promise<number> {
         [STATE.startLedger]: String(ledger),
         [STATE.status]: 'ok',
         [STATE.lastError]: null,
+        [STATE.cursorRecovered]: null,
       });
       console.log(`Cursor cleared; the indexer will resume from ledger ${ledger} on its next poll.`);
       return 0;
