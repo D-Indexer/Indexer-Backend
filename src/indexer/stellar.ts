@@ -21,7 +21,10 @@ export type RetentionGapPolicy = 'halt' | 'skip';
 export type Db = Pick<Pool, 'connect' | 'query'>;
 
 export type IndexerConfig = {
-  contractId: string;
+  contractId?: string;
+  contractIds?: string[];
+  network?: string;
+  startLedgers?: Record<string, number>;
   pollIntervalMs: number;
   pageLimit: number;
   /** First ledger to index when there is no saved cursor. Defaults to the RPC's oldest ledger. */
@@ -64,23 +67,33 @@ function scannedLedger(page: GetEventsResult): number {
   }
 }
 
-export async function readState(db: Pick<Pool, 'query'>): Promise<Partial<Record<string, string>>> {
-  const { rows } = await db.query<{ key: string; value: string }>('SELECT key, value FROM indexer_state');
+export async function readState(db: Pick<Pool, 'query'>, network?: string): Promise<Partial<Record<string, string>>> {
+  const { rows } = await db.query<{ key: string; value: string }>(
+    network ? 'SELECT key, value FROM indexer_state WHERE network = $1' : 'SELECT key, value FROM indexer_state',
+    network ? [network] : undefined
+  );
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
 }
 
 export async function writeState(
   db: Pick<Pool, 'query'>,
-  entries: Partial<Record<string, string | null>>
+  entries: Partial<Record<string, string | null>>,
+  network?: string
 ): Promise<void> {
   for (const [key, value] of Object.entries(entries)) {
     if (value === null || value === undefined) {
-      await db.query('DELETE FROM indexer_state WHERE key = $1', [key]);
+      await db.query(
+        network ? 'DELETE FROM indexer_state WHERE network = $1 AND key = $2' : 'DELETE FROM indexer_state WHERE key = $1',
+        network ? [network, key] : [key]
+      );
     } else {
       await db.query(
-        `INSERT INTO indexer_state (key, value, updated_at) VALUES ($1, $2, NOW())
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-        [key, value]
+        network
+          ? `INSERT INTO indexer_state (network, key, value, updated_at) VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (network, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`
+          : `INSERT INTO indexer_state (key, value, updated_at) VALUES ($1, $2, NOW())
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        network ? [network, key, value] : [key, value]
       );
     }
   }
@@ -99,7 +112,8 @@ export function isDeterministicDbError(err: unknown): boolean {
 async function storeEvent(
   client: PoolClient,
   contractId: string,
-  event: RawEvent
+  event: RawEvent,
+  network?: string
 ): Promise<'applied' | 'ignored' | 'rejected' | 'duplicate'> {
   let topic = '';
   let decoded: DecodedEvent | null = null;
@@ -114,26 +128,39 @@ async function storeEvent(
   }
 
   const status = error ? 'rejected' : decoded ? 'applied' : 'ignored';
-  const inserted = await client.query(
-    `INSERT INTO contract_events
-       (id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-     ON CONFLICT (id) DO NOTHING
-     RETURNING id`,
-    [
-      event.id,
-      event.ledger,
-      event.ledgerClosedAt,
-      event.txHash,
-      contractId,
-      topic,
-      event.topic,
-      event.value,
-      decoded ? JSON.stringify(decoded) : null,
-      status,
-      error,
-    ]
-  );
+  const inserted = network
+    ? await client.query(
+        `INSERT INTO contract_events
+           (network, id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (network, id) DO NOTHING
+         RETURNING id`,
+        [
+          network,
+          event.id,
+          event.ledger,
+          event.ledgerClosedAt,
+          event.txHash,
+          contractId,
+          topic,
+          event.topic,
+          event.value,
+          decoded ? JSON.stringify(decoded) : null,
+          status,
+          error,
+        ]
+      )
+    : await client.query(
+        `INSERT INTO contract_events
+           (id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (id) DO NOTHING
+         RETURNING id`,
+        [
+          event.id, event.ledger, event.ledgerClosedAt, event.txHash, contractId,
+          topic, event.topic, event.value, decoded ? JSON.stringify(decoded) : null, status, error,
+        ]
+      );
 
   if (inserted.rowCount === 0) return 'duplicate';
   if (!decoded) {
@@ -146,17 +173,19 @@ async function storeEvent(
   // loss, etc.) aborts the page so it is retried.
   await client.query('SAVEPOINT apply_event');
   try {
-    await applyEvent(client, decoded, new Date(event.ledgerClosedAt));
+    await applyEvent(client, decoded, new Date(event.ledgerClosedAt), network, contractId);
     await client.query('RELEASE SAVEPOINT apply_event');
     return 'applied';
   } catch (err) {
     if (!isDeterministicDbError(err)) throw err;
     await client.query('ROLLBACK TO SAVEPOINT apply_event');
     const message = err instanceof Error ? err.message : String(err);
-    await client.query("UPDATE contract_events SET status = 'rejected', error = $2 WHERE id = $1", [
-      event.id,
-      message,
-    ]);
+    await client.query(
+      network
+        ? "UPDATE contract_events SET status = 'rejected', error = $3 WHERE network = $1 AND id = $2"
+        : "UPDATE contract_events SET status = 'rejected', error = $2 WHERE id = $1",
+      network ? [network, event.id, message] : [event.id, message]
+    );
     logger.warn('Rejected contract event the database refused', { id: event.id, topic, error: message });
     return 'rejected';
   }
@@ -167,29 +196,42 @@ async function storeEvent(
  * Events already stored (same RPC event id) are skipped, so replaying a page
  * after a crash or a manual cursor rewind is safe.
  */
-export async function processPage(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
+export async function processPage(
+  db: Db,
+  contractId: string,
+  page: GetEventsResult,
+  network?: string,
+  contractIds?: string[]
+): Promise<PageResult> {
   const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0 };
   const client = await db.connect();
 
   try {
     await client.query('BEGIN');
     for (const event of page.events) {
-      if (event.contractId !== contractId) continue;
-      const outcome = await storeEvent(client, contractId, event);
+      const allowed = contractIds && contractIds.length > 0 ? contractIds : [contractId];
+      if (!allowed.includes(event.contractId)) continue;
+      const outcome = await storeEvent(client, event.contractId, event, network);
       if (outcome === 'duplicate') result.duplicates++;
       else result[outcome]++;
     }
     // The paging cursor encodes how far the RPC scanned (the chain tip for a
     // partial page), which is further than the last event's ledger.
     const lastLedger = scannedLedger(page);
-    await writeState(client, {
-      [STATE.cursor]: page.cursor,
+    const stateEntries: Partial<Record<string, string | null>> = {
       [STATE.startLedger]: null,
       [STATE.lastLedger]: String(lastLedger),
       [STATE.lastSuccessAt]: new Date().toISOString(),
       [STATE.status]: 'ok',
       [STATE.lastError]: null,
-    });
+    };
+    if (contractIds && contractIds.length > 1) {
+      for (const id of contractIds) stateEntries[`cursor:${id}`] = page.cursor;
+      stateEntries[STATE.cursor] = null;
+    } else {
+      stateEntries[STATE.cursor] = page.cursor;
+    }
+    await writeState(client, stateEntries, network);
     await client.query('COMMIT');
     return result;
   } catch (err) {
@@ -210,15 +252,25 @@ async function nextRequest(
   deps: IndexerDependencies,
   state: Partial<Record<string, string>>
 ): Promise<NextRequest> {
-  const { contractId, pageLimit: limit } = deps.config;
+  const { contractId, contractIds, startLedgers, pageLimit: limit } = deps.config;
+  const ids = contractIds?.length ? contractIds : (contractId ? [contractId] : []);
+  const filter = ids.length > 1 ? { contractIds: ids } : { contractId: ids[0] };
+  const firstStartLedger = ids.map((id) => startLedgers?.[id]).find((value) => value && value > 0);
+  if (ids.length > 1) {
+    const contractCursor = ids.map((id) => state[`cursor:${id}`]).find(Boolean);
+    if (contractCursor) {
+      return { params: { ...filter, limit, cursor: contractCursor }, fromConfig: false };
+    }
+  }
   if (state[STATE.cursor]) {
-    return { params: { contractId, limit, cursor: state[STATE.cursor]! }, fromConfig: false };
+    return { params: { ...filter, limit, cursor: state[STATE.cursor]! }, fromConfig: false };
   }
 
   const fromState = Number(state[STATE.startLedger]);
-  if (fromState > 0) return { params: { contractId, limit, startLedger: fromState }, fromConfig: false };
-  if (deps.config.startLedger) {
-    return { params: { contractId, limit, startLedger: deps.config.startLedger }, fromConfig: true };
+  if (fromState > 0) return { params: { ...filter, limit, startLedger: fromState }, fromConfig: false };
+  if (deps.config.startLedger || firstStartLedger) {
+    const startLedger = firstStartLedger ?? deps.config.startLedger!;
+    return { params: { ...filter, limit, startLedger }, fromConfig: true };
   }
 
   const { oldestLedger } = await deps.rpc.getHealth();
@@ -227,7 +279,7 @@ async function nextRequest(
       'Events before it are not indexed.',
     { startLedger: oldestLedger }
   );
-  return { params: { contractId, limit, startLedger: oldestLedger }, fromConfig: true };
+  return { params: { ...filter, limit, startLedger: oldestLedger }, fromConfig: true };
 }
 
 function requestedLedger(params: GetEventsParams): number {
@@ -239,7 +291,7 @@ function requestedLedger(params: GetEventsParams): number {
  * caller can keep paging while it is full.
  */
 export async function pollOnce(deps: IndexerDependencies): Promise<{ events: number; result: PageResult }> {
-  const state = await readState(deps.db);
+  const state = await readState(deps.db, deps.config.network);
   const { params, fromConfig } = await nextRequest(deps, state);
 
   let page: GetEventsResult;
@@ -254,7 +306,7 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
     // On an empty database nothing indexed is being lost, so INDEXER_START_LEDGER
     // being older than the window just means "as far back as possible".
     if (deps.config.onRetentionGap === 'halt' && !fromConfig) {
-      await writeState(deps.db, { [STATE.status]: 'retention_gap', [STATE.lastError]: gap.message });
+      await writeState(deps.db, { [STATE.status]: 'retention_gap', [STATE.lastError]: gap.message }, deps.config.network);
       throw gap;
     }
 
@@ -272,15 +324,20 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
         resumedAt: resumeAt,
         at: new Date().toISOString(),
       }),
-    });
+    }, deps.config.network);
     page = await deps.rpc.getEvents({
-      contractId: params.contractId,
+      ...(params.contractIds ? { contractIds: params.contractIds } : { contractId: params.contractId }),
       limit: params.limit,
       startLedger: resumeAt,
     });
   }
 
-  const result = await processPage(deps.db, deps.config.contractId, page);
+  const ids = deps.config.contractIds?.length
+    ? deps.config.contractIds
+    : deps.config.contractId
+      ? [deps.config.contractId]
+      : [];
+  const result = await processPage(deps.db, ids[0] ?? '', page, deps.config.network, ids);
   if (page.events.length > 0) {
     logger.info('Indexed events', { ...result, lastLedger: page.events[page.events.length - 1].ledger });
   }
@@ -321,7 +378,7 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
         logger.error('Indexer halted: retention gap', { error: message });
       } else {
         logger.error('Indexer poll failed', { error: message, failures });
-        await writeState(deps.db, { [STATE.status]: 'error', [STATE.lastError]: message }).catch(
+        await writeState(deps.db, { [STATE.status]: 'error', [STATE.lastError]: message }, deps.config.network).catch(
           () => undefined
         );
       }

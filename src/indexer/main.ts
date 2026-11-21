@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { getEnv } from '../config/env';
+import { getEnv, parseFolderContractConfig, networkId } from '../config/env';
 import pool from '../db/client';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
@@ -12,13 +12,18 @@ async function main(): Promise<void> {
   await migrate(pool);
 
   const rpc = createRpcClient({ url: env.STELLAR_RPC_URL, timeoutMs: env.STELLAR_RPC_TIMEOUT_MS });
+  const contracts = parseFolderContractConfig(env);
+  const network = networkId(env.STELLAR_NETWORK_PASSPHRASE);
   logger.info('Connecting indexer', { rpc: redactUrl(env.STELLAR_RPC_URL) });
 
   const indexer = createIndexer({
     db: pool,
     rpc,
     config: {
-      contractId: env.FOLDER_CONTRACT_ID,
+      contractId: contracts.contractIds[0],
+      contractIds: contracts.contractIds,
+      startLedgers: contracts.startLedgers,
+      network,
       pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
       pageLimit: env.INDEXER_PAGE_LIMIT,
       startLedger: env.INDEXER_START_LEDGER,
