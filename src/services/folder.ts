@@ -26,6 +26,19 @@ export async function getFolderByAddress(owner: string): Promise<Folder | null> 
   return rows[0] ? mapFolder(rows[0]) : null;
 }
 
+/** Resolve many owners with one query; missing owners map to null. */
+export async function getFoldersByAddresses(owners: string[]): Promise<Record<string, Folder | null>> {
+  const result: Record<string, Folder | null> = {};
+  for (const owner of owners) result[owner] = null;
+  if (owners.length === 0) return result;
+
+  const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE owner = ANY($1::text[])`, [
+    owners,
+  ]);
+  for (const row of rows) result[row.owner] = mapFolder(row);
+  return result;
+}
+
 export async function getFolderByName(name: string): Promise<Folder | null> {
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE name = $1`, [name]);
   return rows[0] ? mapFolder(rows[0]) : null;

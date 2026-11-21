@@ -3,6 +3,32 @@ import { z } from 'zod';
 /** Account (G...) or contract (C...) strkey: a contract Address can own a folder too. */
 export const stellarAddressSchema = z.string().regex(/^[GC][A-Z2-7]{55}$/, 'Invalid Stellar address');
 
+export const MAX_LOOKUP_ADDRESSES = 100;
+
+/**
+ * Body for the batch lookup endpoints: 1–100 addresses, de-duplicated. Invalid
+ * entries are reported individually so clients can fix them in one round trip.
+ */
+export const addressLookupSchema = z.object({
+  addresses: z
+    .array(z.unknown(), { invalid_type_error: 'addresses must be an array' })
+    .min(1, 'addresses must contain at least 1 address')
+    .max(MAX_LOOKUP_ADDRESSES, `addresses must contain at most ${MAX_LOOKUP_ADDRESSES} addresses`)
+    .superRefine((values, ctx) => {
+      values.forEach((value, index) => {
+        const parsed = stellarAddressSchema.safeParse(value);
+        if (!parsed.success) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index],
+            message: parsed.error.errors[0].message,
+          });
+        }
+      });
+    })
+    .transform((values) => Array.from(new Set(values as string[]))),
+});
+
 export const folderNameSchema = z
   .string()
   .trim()

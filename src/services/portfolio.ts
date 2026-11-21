@@ -29,6 +29,20 @@ export async function getPortfolio(owner: string): Promise<Portfolio | null> {
   return rows[0] ? mapPortfolio(rows[0]) : null;
 }
 
+/** Resolve many owners with one query; missing owners map to null. */
+export async function getPortfoliosByAddresses(owners: string[]): Promise<Record<string, Portfolio | null>> {
+  const result: Record<string, Portfolio | null> = {};
+  for (const owner of owners) result[owner] = null;
+  if (owners.length === 0) return result;
+
+  const { rows } = await pool.query<PortfolioRow>(
+    'SELECT owner, template_id, ipfs_cid, minted_at, updated_at FROM portfolios WHERE owner = ANY($1::text[])',
+    [owners]
+  );
+  for (const row of rows) result[row.owner] = mapPortfolio(row);
+  return result;
+}
+
 /**
  * Build the ERC-721-style metadata document for a minted portfolio. The token
  * id is the owner address (the contract keys portfolios by owner). Returns null

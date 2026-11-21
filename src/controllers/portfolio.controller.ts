@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import * as portfolioService from '../services/portfolio';
 import { asyncHandler } from '../middleware/asyncHandler';
-import { stellarAddressSchema, tokenIdSchema } from '../validation/schemas';
+import { addressLookupSchema, stellarAddressSchema, tokenIdSchema } from '../validation/schemas';
 import { badRequest, notFound } from '../http/errors';
 
 export const getByAddress = asyncHandler(async (req: Request, res: Response) => {
@@ -11,6 +11,20 @@ export const getByAddress = asyncHandler(async (req: Request, res: Response) => 
   const portfolio = await portfolioService.getPortfolio(parsed.data);
   if (!portfolio) throw notFound('Portfolio not found');
   res.json(portfolio);
+});
+
+export const lookup = asyncHandler(async (req: Request, res: Response) => {
+  const parsed = addressLookupSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const details = parsed.error.errors.map((issue) => ({
+      index: typeof issue.path[0] === 'number' ? issue.path[0] : null,
+      address: typeof issue.path[0] === 'number' ? (req.body?.addresses?.[issue.path[0]] ?? null) : null,
+      message: issue.message,
+    }));
+    throw badRequest(parsed.error.errors[0].message, details);
+  }
+
+  res.json(await portfolioService.getPortfoliosByAddresses(parsed.data.addresses));
 });
 
 export const getMetadata = asyncHandler(async (req: Request, res: Response) => {

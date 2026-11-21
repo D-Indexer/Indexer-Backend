@@ -17,6 +17,7 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
 
   res.status(statusCode).json({
     error: message,
+    ...(err instanceof HttpError && err.details !== undefined ? { details: err.details } : {}),
     requestId: _req.id,
   });
 }

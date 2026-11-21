@@ -9,7 +9,9 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/health`](#get-health)                         | API + database health, indexer status |
 | `GET`  | [`/folders/:address`](#get-foldersaddress)       | Folder claimed by an address          |
 | `GET`  | [`/folders/name/:name`](#get-foldersnamename)    | Folder by name                        |
+| `POST` | [`/folders/lookup`](#post-folderslookup)         | Batch folder lookup by address        |
 | `GET`  | [`/portfolios/:address`](#get-portfoliosaddress) | Portfolio NFT minted by an address    |
+| `POST` | [`/portfolios/lookup`](#post-portfolioslookup)   | Batch portfolio lookup by address     |
 | `GET`  | [`/nft/:tokenId/metadata`](#get-nfttokenidmetadata) | ERC-721-style metadata for a portfolio NFT |
 | `GET`  | [`/templates`](#get-templates)                   | All registered templates              |
 | `GET`  | [`/templates/:id`](#get-templatesid)             | One template                          |
@@ -144,6 +146,68 @@ curl localhost:3000/portfolios/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX
 ```
 
 Errors: `400` invalid address, `404` `Portfolio not found`.
+
+## `POST /folders/lookup`
+
+Resolve up to 100 folder owners in one request. The body takes `addresses`: an array of
+1–100 Stellar addresses (`G...` or `C...`). Duplicates are removed before the lookup, and
+all owners are resolved with a single SQL query. The response is a map keyed by address;
+owners without a folder map to `null`.
+
+```bash
+curl -X POST localhost:3000/folders/lookup \
+  -H 'content-type: application/json' \
+  -d '{"addresses":["GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM","GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"]}'
+```
+
+```json
+{
+  "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM": {
+    "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+    "name": "smoke-1794262900.folder",
+    "templateId": 1,
+    "claimedAt": "2026-11-09T22:22:27.000Z",
+    "updatedAt": "2026-11-09T22:23:07.000Z"
+  },
+  "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5": null
+}
+```
+
+Errors: `400` when `addresses` is missing, empty, longer than 100, or contains invalid
+entries. Every invalid entry is reported individually in `details`:
+
+```json
+{
+  "error": "Invalid Stellar address",
+  "details": [{ "index": 1, "address": "not-an-address", "message": "Invalid Stellar address" }],
+  "requestId": "…"
+}
+```
+
+## `POST /portfolios/lookup`
+
+Same contract as [`POST /folders/lookup`](#post-folderslookup), returning portfolios keyed
+by owner address with `null` for owners without a minted portfolio.
+
+```bash
+curl -X POST localhost:3000/portfolios/lookup \
+  -H 'content-type: application/json' \
+  -d '{"addresses":["GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM"]}'
+```
+
+```json
+{
+  "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM": {
+    "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+    "templateId": 1,
+    "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
+    "mintedAt": "2026-11-09T22:23:07.000Z",
+    "updatedAt": "2026-11-09T22:23:52.000Z"
+  }
+}
+```
+
+Errors: `400` as above.
 
 ## `GET /templates`
 
