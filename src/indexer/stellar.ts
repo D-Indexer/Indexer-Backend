@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { decodeEvent, decodeTopic, DecodedEvent, EventDecodeError } from './decode';
-import { applyEvent } from './handlers';
+import { applyEvent, cacheTagsFor } from './handlers';
 import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
 import { logger } from '../utils/logger';
 
@@ -32,9 +32,33 @@ export type IndexerConfig = {
   maxPagesPerTick?: number;
 };
 
-export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerConfig };
+/**
+ * Purges CDN cache entries by surrogate key after a page commits. Implementations
+ * must be best-effort: the indexer logs and swallows their failures.
+ */
+export interface CachePurger {
+  purge(keys: string[]): Promise<void>;
+}
 
-export type PageResult = { applied: number; ignored: number; rejected: number; duplicates: number };
+/** Default purger: does nothing (no CDN configured). */
+export const noopCachePurger: CachePurger = { purge: async () => undefined };
+
+export type IndexerDependencies = {
+  db: Db;
+  rpc: EventSource;
+  config: IndexerConfig;
+  /** Defaults to noopCachePurger. */
+  purger?: CachePurger;
+};
+
+export type PageResult = {
+  applied: number;
+  ignored: number;
+  rejected: number;
+  duplicates: number;
+  /** Surrogate keys touched by applied events, purged after commit. */
+  cacheTags: string[];
+};
 
 export class RetentionGapError extends Error {
   constructor(
@@ -100,7 +124,7 @@ async function storeEvent(
   client: PoolClient,
   contractId: string,
   event: RawEvent
-): Promise<'applied' | 'ignored' | 'rejected' | 'duplicate'> {
+): Promise<{ outcome: 'applied' | 'ignored' | 'rejected' | 'duplicate'; tags: string[] }> {
   let topic = '';
   let decoded: DecodedEvent | null = null;
   let error: string | null = null;
@@ -135,10 +159,10 @@ async function storeEvent(
     ]
   );
 
-  if (inserted.rowCount === 0) return 'duplicate';
+  if (inserted.rowCount === 0) return { outcome: 'duplicate', tags: [] };
   if (!decoded) {
     if (error) logger.warn('Rejected malformed contract event', { id: event.id, topic, error });
-    return status as 'ignored' | 'rejected';
+    return { outcome: status as 'ignored' | 'rejected', tags: [] };
   }
 
   // A deterministic DB error means the event contradicts the read model. Record
@@ -148,7 +172,7 @@ async function storeEvent(
   try {
     await applyEvent(client, decoded, new Date(event.ledgerClosedAt));
     await client.query('RELEASE SAVEPOINT apply_event');
-    return 'applied';
+    return { outcome: 'applied', tags: cacheTagsFor(decoded) };
   } catch (err) {
     if (!isDeterministicDbError(err)) throw err;
     await client.query('ROLLBACK TO SAVEPOINT apply_event');
@@ -158,7 +182,7 @@ async function storeEvent(
       message,
     ]);
     logger.warn('Rejected contract event the database refused', { id: event.id, topic, error: message });
-    return 'rejected';
+    return { outcome: 'rejected', tags: [] };
   }
 }
 
@@ -168,16 +192,18 @@ async function storeEvent(
  * after a crash or a manual cursor rewind is safe.
  */
 export async function processPage(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
-  const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0 };
+  const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0, cacheTags: [] };
+  const tags = new Set<string>();
   const client = await db.connect();
 
   try {
     await client.query('BEGIN');
     for (const event of page.events) {
       if (event.contractId !== contractId) continue;
-      const outcome = await storeEvent(client, contractId, event);
+      const { outcome, tags: eventTags } = await storeEvent(client, contractId, event);
       if (outcome === 'duplicate') result.duplicates++;
       else result[outcome]++;
+      if (outcome === 'applied') for (const tag of eventTags) tags.add(tag);
     }
     // The paging cursor encodes how far the RPC scanned (the chain tip for a
     // partial page), which is further than the last event's ledger.
@@ -191,6 +217,7 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
       [STATE.lastError]: null,
     });
     await client.query('COMMIT');
+    result.cacheTags = [...tags];
     return result;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -232,6 +259,21 @@ async function nextRequest(
 
 function requestedLedger(params: GetEventsParams): number {
   return params.cursor !== undefined ? ledgerFromCursor(params.cursor) : params.startLedger!;
+}
+
+/**
+ * Purge the given surrogate keys, best-effort: failures are logged and never
+ * propagate, so a broken CDN can't stall the cursor or mark the page failed.
+ */
+export async function purgeCache(purger: CachePurger, keys: string[]): Promise<void> {
+  try {
+    await purger.purge(keys);
+  } catch (err) {
+    logger.warn('Cache purge failed', {
+      keys,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -281,8 +323,17 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
   }
 
   const result = await processPage(deps.db, deps.config.contractId, page);
+  if (result.cacheTags.length > 0) {
+    await purgeCache(deps.purger ?? noopCachePurger, result.cacheTags);
+  }
   if (page.events.length > 0) {
-    logger.info('Indexed events', { ...result, lastLedger: page.events[page.events.length - 1].ledger });
+    logger.info('Indexed events', {
+      applied: result.applied,
+      ignored: result.ignored,
+      rejected: result.rejected,
+      duplicates: result.duplicates,
+      lastLedger: page.events[page.events.length - 1].ledger,
+    });
   }
   return { events: page.events.length, result };
 }

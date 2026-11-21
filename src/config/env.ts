@@ -37,6 +37,11 @@ const envSchema = z
     INDEXER_ON_RETENTION_GAP: z.enum(['halt', 'skip']).default('halt'),
     INDEXER_MAX_BACKOFF_MS: z.coerce.number().int().positive().default(60000),
     INDEXER_STALE_AFTER_MS: z.coerce.number().int().positive().default(120000),
+    /** CDN purge webhook; unset disables purging (noop purger). */
+    CACHE_PURGE_URL: z.union([z.literal('').transform(() => undefined), z.string().url()]).optional(),
+    CACHE_PURGE_TOKEN: z.string().optional(),
+    CACHE_PURGE_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+    CACHE_PURGE_RETRIES: z.coerce.number().int().min(0).max(10).default(2),
     DB_MAX_CONNECTIONS: z.coerce.number().int().positive().default(10),
     DB_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),

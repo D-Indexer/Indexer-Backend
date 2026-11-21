@@ -3,6 +3,7 @@ import * as folderService from '../services/folder';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { folderNameSchema, stellarAddressSchema } from '../validation/schemas';
 import { badRequest, notFound } from '../http/errors';
+import { cacheTags } from '../middleware/cacheTags';
 
 export const getByAddress = asyncHandler(async (req: Request, res: Response) => {
   const parsed = stellarAddressSchema.safeParse(req.params.address);
@@ -10,6 +11,8 @@ export const getByAddress = asyncHandler(async (req: Request, res: Response) => 
 
   const folder = await folderService.getFolderByAddress(parsed.data);
   if (!folder) throw notFound('Folder not found');
+  res.setHeader('Surrogate-Key', `folder:${parsed.data}`);
+  res.setHeader('Cache-Tag', `folder:${parsed.data}`);
   res.json(folder);
 });
 
@@ -19,5 +22,7 @@ export const getByName = asyncHandler(async (req: Request, res: Response) => {
 
   const folder = await folderService.getFolderByName(parsed.data);
   if (!folder) throw notFound('Folder not found');
+  res.setHeader('Surrogate-Key', `folder-name:${parsed.data}`);
+  res.setHeader('Cache-Tag', `folder-name:${parsed.data}`);
   res.json(folder);
 });

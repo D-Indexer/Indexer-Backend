@@ -5,6 +5,7 @@ import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
 import { createRpcClient, redactUrl } from './rpc';
 import { createIndexer } from './stellar';
+import { createHttpCachePurger } from './purge';
 
 /** Indexer process entrypoint: `npm run start:indexer` (or `dev:indexer`). */
 async function main(): Promise<void> {
@@ -25,6 +26,14 @@ async function main(): Promise<void> {
       onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
       maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
     },
+    purger: env.CACHE_PURGE_URL
+      ? createHttpCachePurger({
+          url: env.CACHE_PURGE_URL,
+          token: env.CACHE_PURGE_TOKEN,
+          timeoutMs: env.CACHE_PURGE_TIMEOUT_MS,
+          retries: env.CACHE_PURGE_RETRIES,
+        })
+      : undefined,
   });
 
   const shutdown = async (signal: string) => {
