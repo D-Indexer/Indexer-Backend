@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { getEnv } from '../config/env';
 import pool from '../db/client';
-import { readState, STATE, writeState } from './stellar';
+import { readStaleness, readState, STATE, writeState } from './stellar';
 
 const USAGE = `Usage:
   npm run indexer -- status                 Print indexer state as JSON
@@ -32,10 +32,9 @@ export async function run(args: string[]): Promise<number> {
     }
     case 'healthcheck': {
       const state = await readState(pool);
-      const last = Date.parse(state[STATE.lastSuccessAt] ?? '');
-      const fresh = Number.isFinite(last) && Date.now() - last < getEnv().INDEXER_STALE_AFTER_MS;
-      if (!fresh) console.error(`indexer unhealthy: ${JSON.stringify(state)}`);
-      return fresh ? 0 : 1;
+      const { stale } = await readStaleness(pool, getEnv().INDEXER_STALE_AFTER_MS);
+      if (stale) console.error(`indexer unhealthy: ${JSON.stringify(state)}`);
+      return stale ? 1 : 0;
     }
     default:
       console.error(USAGE);

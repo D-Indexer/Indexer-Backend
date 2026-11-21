@@ -62,6 +62,7 @@ change the status code; the indexer process has its own healthcheck
   "indexer": {
     "status": "ok",
     "stale": false,
+    "lagSeconds": 12.4,
     "lastLedger": 5654521,
     "lastSuccessAt": "2026-11-10T07:37:30.225Z",
     "lastError": null
@@ -73,6 +74,9 @@ change the status code; the indexer process has its own healthcheck
 - `indexer.status`: `ok`, `error` (last poll failed, retrying with backoff),
   `retention_gap` (halted, [needs an operator](operations.md#retention-gap)) or `not_started`.
 - `indexer.stale`: no successful poll within `INDEXER_STALE_AFTER_MS`.
+- `indexer.lagSeconds`: seconds since the last successful poll, computed by the
+  database (`NOW() - updated_at`), so a skewed API host clock cannot change it.
+  `null` when the indexer has never succeeded.
 - `indexer.lastLedger`: the ledger the indexer has scanned up to.
 
 `503` when the database is unreachable:
@@ -84,6 +88,7 @@ change the status code; the indexer process has its own healthcheck
   "indexer": {
     "status": "not_started",
     "stale": true,
+    "lagSeconds": null,
     "lastLedger": null,
     "lastSuccessAt": null,
     "lastError": null

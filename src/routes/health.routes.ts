@@ -2,7 +2,7 @@ import { Router } from 'express';
 import pool from '../db/client';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { getEnv } from '../config/env';
-import { readState, STATE } from '../indexer/stellar';
+import { readStaleness, readState, STATE } from '../indexer/stellar';
 import { isShuttingDown } from '../shutdown';
 
 const router = Router();
@@ -34,7 +34,7 @@ router.get(
       res.status(503).json({
         status: 'shutting_down',
         db: 'unknown',
-        indexer: { status: 'unknown', stale: true, lastLedger: null, lastSuccessAt: null, lastError: null },
+        indexer: { status: 'unknown', stale: true, lagSeconds: null, lastLedger: null, lastSuccessAt: null, lastError: null },
         requestId: req.id,
       });
       return;
@@ -50,8 +50,18 @@ router.get(
     }
 
     const lastSuccessAt = state[STATE.lastSuccessAt] ?? null;
-    const lastSuccessMs = lastSuccessAt ? Date.parse(lastSuccessAt) : NaN;
-    const stale = !Number.isFinite(lastSuccessMs) || Date.now() - lastSuccessMs > env.INDEXER_STALE_AFTER_MS;
+    let lagSeconds: number | null = null;
+    let stale = true;
+    if (dbOk) {
+      try {
+        ({ lagSeconds, stale } = await withTimeout(
+          readStaleness(pool, env.INDEXER_STALE_AFTER_MS),
+          env.HEALTHCHECK_DATABASE_TIMEOUT_MS
+        ));
+      } catch {
+        stale = true;
+      }
+    }
 
     res.status(dbOk ? 200 : 503).json({
       status: dbOk ? 'ok' : 'degraded',
@@ -59,6 +69,7 @@ router.get(
       indexer: {
         status: state[STATE.status] ?? 'not_started',
         stale,
+        lagSeconds,
         lastLedger: state[STATE.lastLedger] ? Number(state[STATE.lastLedger]) : null,
         lastSuccessAt,
         lastError: state[STATE.lastError] ?? null,
