@@ -53,7 +53,7 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `INDEXER_MAX_BACKOFF_MS`          | `60000`                     | Cap for exponential backoff after failed polls                                             |
 | `INDEXER_STALE_AFTER_MS`          | `120000`                    | Indexer counts as unhealthy after this long without a successful poll                      |
 | `IPFS_TIMEOUT_MS`                 | `30000`                     | Timeout for the Kubo `add` call                                                            |
-| `IPFS_VERIFY_CID`                 | `true`                      | Verify locally computed CIDv1 for single-block uploads against Kubo before returning it |
+| `IPFS_VERIFY_CID`                 | `true`                      | Verify locally computed CIDv1 for single-block uploads against Kubo before returning it    |
 | `DB_MAX_CONNECTIONS`              | `10`                        | Pool size, per process                                                                     |
 | `DB_IDLE_TIMEOUT_MS`              | `30000`                     | Pool idle timeout                                                                          |
 | `DB_CONNECTION_TIMEOUT_MS`        | `5000`                      | Pool connection timeout                                                                    |

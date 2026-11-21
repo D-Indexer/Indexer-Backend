@@ -1,19 +1,22 @@
 import { reconcileCid } from '../ipfs/reconcile';
 
 describe('IPFS reconciler', () => {
-  it.each([
-    ['pinned', { Keys: { QmPinned: {} } }, 'pinned'],
-  ])('%s CID needs no repinning', async (_name, body, expected) => {
-    const db = { query: jest.fn().mockResolvedValue({ rows: [] }) };
-    const fetchMock = jest.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => body,
-    } as Response);
+  it.each([['pinned', { Keys: { QmPinned: {} } }, 'pinned']])(
+    '%s CID needs no repinning',
+    async (_name, body, expected) => {
+      const db = { query: jest.fn().mockResolvedValue({ rows: [] }) };
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => body,
+      } as Response);
 
-    await expect(reconcileCid(db, 'QmPinned', fetchMock as unknown as typeof fetch)).resolves.toBe(expected);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
+      await expect(reconcileCid(db, 'QmPinned', fetchMock as unknown as typeof fetch)).resolves.toBe(
+        expected
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  );
 
   it('repins a missing CID', async () => {
     const db = { query: jest.fn().mockResolvedValue({ rows: [] }) };

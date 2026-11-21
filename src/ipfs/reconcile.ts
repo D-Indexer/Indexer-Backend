@@ -52,7 +52,12 @@ export async function reconcileCid(
     );
     return 'pinned';
   } catch (err) {
-    const message = err instanceof Error ? err.name === 'TimeoutError' ? 'IPFS node timed out' : err.message : String(err);
+    const message =
+      err instanceof Error
+        ? err.name === 'TimeoutError'
+          ? 'IPFS node timed out'
+          : err.message
+        : String(err);
     await db.query(
       `INSERT INTO ipfs_cid_status (cid, status, last_checked_at, last_error, attempts, next_check_at)
        VALUES ($1, 'unavailable', NOW(), $2, 1,
