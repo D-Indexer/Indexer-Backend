@@ -147,6 +147,9 @@ the deployment ledger), truncate the tables above, and restart the indexer.
   pinning-provider interface is a tracked issue.
 - Check a node: `docker compose exec ipfs ipfs id`. List pins:
   `docker compose exec ipfs ipfs pin ls --type=recursive`.
+- Run `npm run ipfs -- reconcile` to immediately check and repair all portfolio/template CIDs.
+- Run `npm run ipfs -- gc --older-than 7d --dry-run` before unpinning unreferenced uploads;
+  omit `--dry-run` to apply the pin removals. CIDs referenced on-chain are never GC'd.
 
 ## Shutdown
 
