@@ -17,7 +17,13 @@ export const STATE = {
   wasmUpgrade: 'wasm_upgrade',
 } as const;
 
-export type IndexerStatus = 'ok' | 'error' | 'retention_gap' | 'wasm_upgrade' | 'rejection_rate';
+export type IndexerStatus =
+  | 'ok'
+  | 'error'
+  | 'fatal_db_error'
+  | 'retention_gap'
+  | 'wasm_upgrade'
+  | 'rejection_rate';
 export type RetentionGapPolicy = 'halt' | 'skip';
 
 export type Db = Pick<Pool, 'connect' | 'query'>;
@@ -127,14 +133,118 @@ export async function writeState(
   }
 }
 
+export type DbErrorClass = 'deterministic' | 'transient' | 'fatal';
+
+/**
+ * SQLSTATE table. Anything not listed is treated as `transient`: an unknown
+ * failure is retried rather than halting the indexer.
+ */
+const DB_ERROR_CLASSES: Record<string, DbErrorClass> = {
+  // Data exceptions: the event contradicts the read model. Retrying is futile.
+  '22001': 'deterministic', // string_data_right_truncation
+  '22003': 'deterministic', // numeric_value_out_of_range
+  '22007': 'deterministic', // invalid_datetime_format
+  '22008': 'deterministic', // datetime_field_overflow
+  '22012': 'deterministic', // division_by_zero
+  '22021': 'deterministic', // character_not_in_repertoire
+  '22P02': 'deterministic', // invalid_text_representation
+  '22P05': 'deterministic', // untranslatable_character
+  // Integrity constraint violations: same event, same failure.
+  '23502': 'deterministic', // not_null_violation
+  '23503': 'deterministic', // foreign_key_violation
+  '23505': 'deterministic', // unique_violation
+  '23514': 'deterministic', // check_violation
+  '23P01': 'deterministic', // exclusion_violation
+  // Transient: retry the page immediately.
+  '40001': 'transient', // serialization_failure
+  '40P01': 'transient', // deadlock_detected
+  '57P01': 'transient', // admin_shutdown
+  '57P02': 'transient', // crash_shutdown
+  '57P03': 'transient', // cannot_connect_now
+  '53300': 'transient', // too_many_connections
+  // Fatal: retrying cannot help; an operator must intervene.
+  '28P01': 'fatal', // invalid_password
+  '28000': 'fatal', // invalid_authorization_specification
+  '3D000': 'fatal', // invalid_catalog_name
+  '42P01': 'fatal', // undefined_table
+  '42703': 'fatal', // undefined_column
+  '42501': 'fatal', // insufficient_privilege
+};
+
+/** SQLSTATE classes that are always transient (connection exceptions). */
+const TRANSIENT_CLASSES = ['08'];
+
+/**
+ * Classify a Postgres error by SQLSTATE. `deterministic` errors are the event's
+ * fault (reject it), `transient` ones are retried, `fatal` ones halt indexing.
+ */
+export function classifyDbError(err: unknown): DbErrorClass {
+  const code = (err as { code?: unknown })?.code;
+  if (typeof code !== 'string') return 'transient';
+  const known = DB_ERROR_CLASSES[code];
+  if (known) return known;
+  if (TRANSIENT_CLASSES.some((prefix) => code.startsWith(prefix))) return 'transient';
+  return 'transient';
+}
+
 /**
  * Postgres errors that are deterministic for a given event: data exceptions
  * (class 22, e.g. out of range) and constraint violations (class 23).
  * Retrying would fail forever, so the event is rejected instead.
  */
 export function isDeterministicDbError(err: unknown): boolean {
-  const code = (err as { code?: unknown })?.code;
-  return typeof code === 'string' && (code.startsWith('22') || code.startsWith('23'));
+  return classifyDbError(err) === 'deterministic';
+}
+
+/** Thrown when the database reports an error that retrying cannot fix. */
+export class FatalDbError extends Error {
+  constructor(
+    readonly code: string,
+    readonly cause: unknown
+  ) {
+    super(
+      `Fatal database error ${code}: ${cause instanceof Error ? cause.message : String(cause)}. ` +
+        'Indexing is halted; see docs/operations.md#fatal-database-error.'
+    );
+    this.name = 'FatalDbError';
+  }
+}
+
+/** Immediate retries for transient database errors before falling back to tick backoff. */
+export const DB_RETRY_ATTEMPTS = 3;
+export const DB_RETRY_BASE_MS = 25;
+
+/** Small jitter so concurrent indexers don't retry in lockstep. */
+function retryJitter(attempt: number): number {
+  return Math.floor(Math.random() * DB_RETRY_BASE_MS * attempt);
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Run `fn`, retrying transient database errors up to `DB_RETRY_ATTEMPTS` times
+ * with small jitter. Fatal errors are wrapped in a FatalDbError; deterministic
+ * and unknown errors are rethrown unchanged.
+ */
+export async function withDbRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const kind = classifyDbError(err);
+      if (kind === 'fatal') {
+        throw new FatalDbError((err as { code: string }).code, err);
+      }
+      if (kind !== 'transient' || attempt >= DB_RETRY_ATTEMPTS) throw err;
+      const delay = retryJitter(attempt + 1);
+      logger.warn('Transient database error; retrying page', {
+        code: (err as { code?: string }).code,
+        attempt: attempt + 1,
+        delayMs: delay,
+      });
+      if (delay > 0) await sleep(delay);
+    }
+  }
 }
 
 async function storeEvent(
@@ -209,6 +319,10 @@ async function storeEvent(
  * after a crash or a manual cursor rewind is safe.
  */
 export async function processPage(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
+  return withDbRetry(() => processPageOnce(db, contractId, page));
+}
+
+async function processPageOnce(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
   const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0 };
   const client = await db.connect();
 
@@ -411,7 +525,7 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
 
   const tick = async () => {
     try {
-      await checkWasmHash(deps);
+      await withDbRetry(() => checkWasmHash(deps));
       for (let page = 0; page < maxPages && !stopped; page++) {
         const { events } = await pollOnce(deps);
         if (events < deps.config.pageLimit) break; // caught up
@@ -420,6 +534,14 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
     } catch (err) {
       failures++;
       const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof FatalDbError) {
+        stopped = true;
+        logger.error('Indexer halted: fatal database error', { error: message, code: err.code });
+        await writeState(deps.db, { [STATE.status]: 'fatal_db_error', [STATE.lastError]: message }).catch(
+          () => undefined
+        );
+        return;
+      }
       if (err instanceof RetentionGapError) {
         logger.error('Indexer halted: retention gap', { error: message });
       } else if (err instanceof WasmUpgradeError) {
@@ -444,7 +566,6 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
       inFlight = tick().then(() => schedule(backoffDelay(deps.config, failures)));
     }, delay);
   };
-
   logger.info('Indexer started', {
     contractId: deps.config.contractId,
     pollIntervalMs: deps.config.pollIntervalMs,
