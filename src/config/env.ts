@@ -17,8 +17,14 @@ const envSchema = z
     DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
     STELLAR_RPC_URL: z
       .string({ required_error: `STELLAR_RPC_URL is required (testnet: ${TESTNET_RPC_URL})` })
-      .url('STELLAR_RPC_URL must be a valid URL'),
+      .url('STELLAR_RPC_URL must be a valid URL')
+      .optional(),
+    /** Comma-separated RPC endpoints, tried in order. Takes precedence over STELLAR_RPC_URL. */
+    STELLAR_RPC_URLS: z.string().optional(),
     STELLAR_RPC_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+    /** Consecutive failures before an endpoint is skipped for the cool-down. */
+    STELLAR_RPC_FAILURE_THRESHOLD: z.coerce.number().int().positive().default(3),
+    STELLAR_RPC_COOLDOWN_MS: z.coerce.number().int().positive().default(60000),
     STELLAR_NETWORK_PASSPHRASE: z.string().min(1).default(TESTNET_PASSPHRASE),
     FOLDER_CONTRACT_ID: z
       .string({ required_error: `FOLDER_CONTRACT_ID is required (testnet: ${TESTNET_CONTRACT_ID})` })
@@ -44,6 +50,23 @@ const envSchema = z
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   })
   .superRefine((env, ctx) => {
+    const urls = parseRpcUrls(env.STELLAR_RPC_URLS);
+    if (urls.length === 0 && !env.STELLAR_RPC_URL) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['STELLAR_RPC_URL'],
+        message: `STELLAR_RPC_URL is required (testnet: ${TESTNET_RPC_URL})`,
+      });
+    }
+    for (const url of urls) {
+      if (!z.string().url().safeParse(url).success) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['STELLAR_RPC_URLS'],
+          message: `STELLAR_RPC_URLS contains an invalid URL: ${url}`,
+        });
+      }
+    }
     if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -54,6 +77,23 @@ const envSchema = z
   });
 
 export type AppEnv = z.infer<typeof envSchema>;
+
+/** Split a comma-separated endpoint list, dropping blanks and duplicates. */
+export function parseRpcUrls(value: string | undefined): string[] {
+  if (!value) return [];
+  const urls = value
+    .split(',')
+    .map((url) => url.trim())
+    .filter((url) => url.length > 0);
+  return [...new Set(urls)];
+}
+
+/** All configured RPC endpoints, primary first. */
+export function rpcUrls(env: Pick<AppEnv, 'STELLAR_RPC_URL' | 'STELLAR_RPC_URLS'>): string[] {
+  const urls = parseRpcUrls(env.STELLAR_RPC_URLS);
+  if (urls.length > 0) return urls;
+  return env.STELLAR_RPC_URL ? [env.STELLAR_RPC_URL] : [];
+}
 
 let cachedEnv: AppEnv | null = null;
 

@@ -6,6 +6,8 @@
  * want the raw base64 XDR to store alongside each event.
  */
 
+import { logger } from '../utils/logger';
+
 /** Event exactly as returned by the RPC `getEvents` method. */
 export type RawEvent = {
   type: string;
@@ -40,6 +42,8 @@ export type HealthResult = {
 export interface EventSource {
   getEvents(params: GetEventsParams): Promise<GetEventsResult>;
   getHealth(): Promise<HealthResult>;
+  /** Redacted URL of the endpoint currently serving requests, when known. */
+  readonly activeEndpoint?: string;
 }
 
 export class RpcError extends Error {
@@ -147,6 +151,9 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
   }
 
   return {
+    get activeEndpoint() {
+      return safeUrl;
+    },
     getEvents(params) {
       const pagination =
         params.cursor !== undefined
@@ -160,6 +167,128 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     },
     getHealth() {
       return call<HealthResult>('getHealth');
+    },
+  };
+}
+
+export type FailoverOptions = {
+  /** Endpoint URLs, primary first. */
+  urls: string[];
+  timeoutMs: number;
+  /** Consecutive failures before an endpoint is skipped for the cool-down. */
+  failureThreshold?: number;
+  /** How long a failed endpoint is skipped before it is retried. */
+  cooldownMs?: number;
+  /** Ledger the indexer has already scanned; endpoints behind it are skipped. */
+  cursorLedger?: () => number | undefined;
+  now?: () => number;
+  createClient?: (url: string) => EventSource;
+};
+
+type EndpointState = {
+  url: string;
+  client: EventSource;
+  failures: number;
+  /** Timestamp until which the endpoint is skipped after hitting the threshold. */
+  cooldownUntil: number;
+  /** Latest ledger reported by the endpoint's last health check, if any. */
+  latestLedger?: number;
+};
+
+/**
+ * EventSource that spreads requests over several RPC endpoints.
+ *
+ * An endpoint is skipped after `failureThreshold` consecutive failures until
+ * `cooldownMs` elapses, and endpoints whose `latestLedger` is behind the saved
+ * cursor are skipped so a lagging replica cannot stall indexing.
+ */
+export function createFailoverEventSource(options: FailoverOptions): EventSource {
+  const threshold = options.failureThreshold ?? 3;
+  const cooldownMs = options.cooldownMs ?? 60000;
+  const now = options.now ?? Date.now;
+  const createClient =
+    options.createClient ?? ((url: string) => createRpcClient({ url, timeoutMs: options.timeoutMs }));
+  const endpoints: EndpointState[] = options.urls.map((url) => ({
+    url,
+    client: createClient(url),
+    failures: 0,
+    cooldownUntil: 0,
+  }));
+  let active = 0;
+
+  function available(endpoint: EndpointState): boolean {
+    if (endpoint.cooldownUntil > now()) return false;
+    const cursor = options.cursorLedger?.();
+    if (cursor !== undefined && endpoint.latestLedger !== undefined && endpoint.latestLedger < cursor) {
+      return false;
+    }
+    return true;
+  }
+
+  /** Endpoints to try, starting at the active one and wrapping around. */
+  function candidates(): EndpointState[] {
+    const ordered = [...endpoints.slice(active), ...endpoints.slice(0, active)];
+    const usable = ordered.filter(available);
+    // Everything is cooling down or behind the cursor: try them all rather than stall.
+    return usable.length > 0 ? usable : ordered;
+  }
+
+  function succeeded(endpoint: EndpointState): void {
+    endpoint.failures = 0;
+    endpoint.cooldownUntil = 0;
+    active = endpoints.indexOf(endpoint);
+  }
+
+  function failed(endpoint: EndpointState): void {
+    endpoint.failures++;
+    if (endpoint.failures >= threshold) {
+      endpoint.cooldownUntil = now() + cooldownMs;
+      logger.warn('RPC endpoint failed; cooling down', {
+        endpoint: redactUrl(endpoint.url),
+        failures: endpoint.failures,
+        cooldownMs,
+      });
+    }
+  }
+
+  async function attempt<T>(method: string, run: (client: EventSource) => Promise<T>): Promise<T> {
+    const tried = candidates();
+    let lastError: unknown;
+    for (const endpoint of tried) {
+      try {
+        const result = await run(endpoint.client);
+        succeeded(endpoint);
+        return result;
+      } catch (err) {
+        lastError = err;
+        // A ledger-range error is a valid answer from a healthy endpoint.
+        if (err instanceof LedgerRangeError) {
+          succeeded(endpoint);
+          throw err;
+        }
+        failed(endpoint);
+        logger.warn('RPC endpoint request failed', {
+          method,
+          endpoint: redactUrl(endpoint.url),
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    throw lastError;
+  }
+
+  return {
+    get activeEndpoint() {
+      return redactUrl(endpoints[active].url);
+    },
+    getEvents(params) {
+      return attempt('getEvents', (client) => client.getEvents(params));
+    },
+    async getHealth() {
+      const health = await attempt('getHealth', (client) => client.getHealth());
+      const endpoint = endpoints[active];
+      if (endpoint) endpoint.latestLedger = health.latestLedger;
+      return health;
     },
   };
 }

@@ -1,4 +1,4 @@
-import { loadEnv, TESTNET_CONTRACT_ID } from '../config/env';
+import { loadEnv, rpcUrls, TESTNET_CONTRACT_ID } from '../config/env';
 
 const validEnv = {
   NODE_ENV: 'test',
@@ -24,6 +24,21 @@ describe('environment configuration', () => {
 
   it('rejects invalid urls', () => {
     expect(() => loadEnv({ ...validEnv, STELLAR_RPC_URL: 'not-a-url' })).toThrow(/STELLAR_RPC_URL/);
+  });
+
+  it('accepts a comma-separated STELLAR_RPC_URLS list', () => {
+    const env = loadEnv({
+      ...validEnv,
+      STELLAR_RPC_URLS: 'https://a.example.org, https://b.example.org',
+    });
+    expect(rpcUrls(env)).toEqual(['https://a.example.org', 'https://b.example.org']);
+    expect(rpcUrls(loadEnv(validEnv))).toEqual(['https://soroban-testnet.stellar.org']);
+  });
+
+  it('rejects an invalid URL inside STELLAR_RPC_URLS', () => {
+    expect(() => loadEnv({ ...validEnv, STELLAR_RPC_URLS: 'https://a.example.org,nope' })).toThrow(
+      /STELLAR_RPC_URLS/
+    );
   });
 
   it.each(['FOLDER_CONTRACT_ID', 'STELLAR_RPC_URL'])('fails fast with a hint when %s is missing', (key) => {

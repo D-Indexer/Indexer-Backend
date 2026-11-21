@@ -28,9 +28,16 @@ horizontally.
   "cursor": "0024284788768636927-4294967295",
   "last_ledger": "5654242",
   "last_success_at": "2026-11-10T07:37:30.225Z",
-  "status": "ok"
+  "status": "ok",
+  "active_endpoint": "https://soroban-testnet.stellar.org"
 }
 ```
+
+`active_endpoint` is the redacted RPC endpoint currently serving requests. With
+`STELLAR_RPC_URLS` set, the indexer fails over to the next endpoint after
+`STELLAR_RPC_FAILURE_THRESHOLD` consecutive failures, returns to the primary once
+`STELLAR_RPC_COOLDOWN_MS` has elapsed and it is healthy again, and skips endpoints
+whose `latestLedger` is behind the saved cursor.
 
 Logs are single lines (`<ISO time> <LEVEL> <message> <json context>`) on stdout/stderr.
 `LOG_LEVEL=debug` adds more detail. RPC URLs in logs have credentials and query strings

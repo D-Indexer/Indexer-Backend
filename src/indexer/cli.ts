@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { getEnv } from '../config/env';
 import pool from '../db/client';
 import { readState, STATE, writeState } from './stellar';
+import { redactUrl } from './rpc';
 
 const USAGE = `Usage:
   npm run indexer -- status                 Print indexer state as JSON
@@ -12,7 +13,15 @@ export async function run(args: string[]): Promise<number> {
   const [command, arg] = args;
   switch (command) {
     case 'status': {
-      console.log(JSON.stringify(await readState(pool), null, 2));
+      const state = await readState(pool);
+      const activeEndpoint = state[STATE.activeEndpoint];
+      console.log(
+        JSON.stringify(
+          activeEndpoint ? { ...state, [STATE.activeEndpoint]: redactUrl(activeEndpoint) } : state,
+          null,
+          2
+        )
+      );
       return 0;
     }
     case 'reset-cursor': {

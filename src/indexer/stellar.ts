@@ -13,6 +13,7 @@ export const STATE = {
   status: 'status',
   lastError: 'last_error',
   lastGap: 'last_gap',
+  activeEndpoint: 'active_endpoint',
 } as const;
 
 export type IndexerStatus = 'ok' | 'error' | 'retention_gap';
@@ -281,6 +282,9 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
   }
 
   const result = await processPage(deps.db, deps.config.contractId, page);
+  if (deps.rpc.activeEndpoint) {
+    await writeState(deps.db, { [STATE.activeEndpoint]: deps.rpc.activeEndpoint });
+  }
   if (page.events.length > 0) {
     logger.info('Indexed events', { ...result, lastLedger: page.events[page.events.length - 1].ledger });
   }

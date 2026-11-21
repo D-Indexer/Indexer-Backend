@@ -30,6 +30,7 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | -------------------- | -------------------------------- | ---------------------------------------------------------------------- |
 | `DATABASE_URL`       | non-empty                        | PostgreSQL connection string                                           |
 | `STELLAR_RPC_URL`    | URL                              | Soroban RPC endpoint. Query strings (API keys) are redacted from logs. |
+| `STELLAR_RPC_URLS`   | comma-separated URLs (optional)  | Multiple RPC endpoints with health-based failover; overrides `STELLAR_RPC_URL`. |
 | `FOLDER_CONTRACT_ID` | contract strkey (`C…`, 56 chars) | Contract whose events are indexed                                      |
 | `IPFS_API_URL`       | URL                              | Kubo RPC API used by `POST /upload`                                    |
 | `IPFS_GATEWAY`       | URL                              | Public gateway base URL                                                |
@@ -46,6 +47,8 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `LOG_LEVEL`                       | `info`                      | `debug`, `info`, `warn`, `error` or `silent`                                               |
 | `STELLAR_NETWORK_PASSPHRASE`      | testnet passphrase          | Network passphrase (not used by the read-only indexer yet)                                 |
 | `STELLAR_RPC_TIMEOUT_MS`          | `10000`                     | Per-request RPC timeout; failed requests are retried 3× with backoff                       |
+| `STELLAR_RPC_FAILURE_THRESHOLD`   | `3`                         | Consecutive failures before an endpoint is skipped (failover)                              |
+| `STELLAR_RPC_COOLDOWN_MS`         | `60000`                     | How long a failed endpoint is skipped before it is retried                                 |
 | `INDEXER_POLL_INTERVAL_MS`        | `5000`                      | Delay between polls once caught up                                                         |
 | `INDEXER_PAGE_LIMIT`              | `200`                       | Events per `getEvents` page (1–10000)                                                      |
 | `INDEXER_START_LEDGER`            | unset                       | First ledger on an empty database. Unset = oldest ledger the RPC retains.                  |
