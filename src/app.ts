@@ -5,6 +5,7 @@ import templateRoutes from './routes/template.routes';
 import uploadRoutes from './routes/upload.routes';
 import portfolioRoutes from './routes/portfolio.routes';
 import healthRoutes from './routes/health.routes';
+import eventRoutes from './routes/event.routes';
 import { errorHandler } from './middleware/errorHandler';
 import { multerErrorHandler } from './middleware/multerErrorHandler';
 import { notFoundHandler } from './middleware/notFound';
@@ -49,6 +50,7 @@ export function createApp(env: AppEnv) {
   app.use('/portfolios', portfolioRoutes);
   app.use('/upload', uploadRoutes);
   app.use('/health', healthRoutes);
+  app.use('/events', eventRoutes);
 
   app.use(notFoundHandler);
   app.use(multerErrorHandler);

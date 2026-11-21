@@ -24,6 +24,15 @@ CREATE INDEX IF NOT EXISTS idx_contract_events_ledger ON contract_events (ledger
 CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
   ON contract_events (indexed_at) WHERE status = 'rejected';
 
+-- GET /events: keyset pagination on (ledger, id) and one index per filter.
+CREATE INDEX IF NOT EXISTS idx_contract_events_ledger_id ON contract_events (ledger, id);
+CREATE INDEX IF NOT EXISTS idx_contract_events_topic_ledger_id
+  ON contract_events (topic, ledger, id);
+CREATE INDEX IF NOT EXISTS idx_contract_events_status_ledger_id
+  ON contract_events (status, ledger, id);
+CREATE INDEX IF NOT EXISTS idx_contract_events_owner_ledger_id
+  ON contract_events ((data->>'owner'), ledger, id);
+
 -- folder_cl (owner <-> folder_name); template_id tracks tmpl_set / port_mint.
 CREATE TABLE IF NOT EXISTS folders (
   owner        TEXT PRIMARY KEY,

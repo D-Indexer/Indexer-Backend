@@ -12,6 +12,8 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/portfolios/:address`](#get-portfoliosaddress) | Portfolio NFT minted by an address    |
 | `GET`  | [`/templates`](#get-templates)                   | All registered templates              |
 | `GET`  | [`/templates/:id`](#get-templatesid)             | One template                          |
+| `GET`  | [`/events`](#get-events)                         | Indexed contract events, paginated    |
+| `GET`  | [`/events/:id`](#get-eventsid)                   | One indexed contract event            |
 | `POST` | [`/upload`](#post-upload)                        | Add and pin a file on IPFS            |
 
 ## Errors
@@ -164,6 +166,68 @@ All registered templates (`tmpl_reg`), ordered by id. Not paginated yet.
 One template, same shape as a list item.
 
 Errors: `400` invalid id, `404` `Template not found`.
+
+## `GET /events`
+
+Indexed contract events (`contract_events`), oldest first, keyset-paginated on
+`(ledger, id)`. Every event appears exactly once while paging, even if new events are
+indexed between requests: pass `nextCursor` back as `cursor` until it is `null`.
+
+| Query        | Type    | Notes                                                                 |
+| ------------ | ------- | --------------------------------------------------------------------- |
+| `topic`      | string  | `init`, `adm_add`, `adm_rm`, `folder_cl`, `tmpl_reg`, `tmpl_set`, `port_mint`, `port_upd` |
+| `owner`      | string  | Stellar address; matches the decoded `owner` field                    |
+| `status`     | string  | `applied`, `ignored` or `rejected`                                    |
+| `fromLedger` | integer | Inclusive lower bound                                                 |
+| `toLedger`   | integer | Inclusive upper bound; must be `>= fromLedger`                        |
+| `limit`      | integer | 1–100, default 50                                                     |
+| `cursor`     | string  | `nextCursor` from the previous page (`<ledger>:<id>`)                 |
+
+```bash
+curl 'localhost:3000/events?topic=port_mint&limit=2'
+```
+
+```json
+{
+  "events": [
+    {
+      "id": "0000000000000000000",
+      "ledger": 5654521,
+      "ledgerClosedAt": "2026-11-09T22:23:07.000Z",
+      "txHash": "…",
+      "contractId": "C…",
+      "topic": "port_mint",
+      "topicXdr": ["AAAADwAAAAlwb3J0X21pbnQ="],
+      "valueXdr": "AAAAEQAAAAEAAAAD…",
+      "data": {
+        "topic": "port_mint",
+        "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+        "templateId": 1,
+        "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu"
+      },
+      "status": "applied",
+      "error": null,
+      "indexedAt": "2026-11-09T22:23:08.120Z"
+    }
+  ],
+  "nextCursor": "5654521:0000000000000000000"
+}
+```
+
+`data` is the decoded event, or `null` for `ignored` / `rejected` events (`error` then
+explains a rejection). Each filter is served by an index in `database/schema.sql`
+(`idx_contract_events_ledger_id`, `…_topic_ledger_id`, `…_status_ledger_id`,
+`…_owner_ledger_id`).
+
+Errors: `400` invalid filter (`Unsupported topic`, `Unsupported status`,
+`Invalid Stellar address`, `Ledger must be a number`, `Limit must be between 1 and 100`,
+`Invalid cursor`, `fromLedger must be less than or equal to toLedger`).
+
+## `GET /events/:id`
+
+One event by its RPC id, same shape as a list item.
+
+Errors: `400` empty id, `404` `Event not found`.
 
 ## `POST /upload`
 
