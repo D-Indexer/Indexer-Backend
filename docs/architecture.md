@@ -107,7 +107,7 @@ from archive data is not implemented yet.
 
 | Table             | Key                     | Source                                                                                         |
 | ----------------- | ----------------------- | ---------------------------------------------------------------------------------------------- |
-| `contract_events` | RPC event id            | every event: ledger, close time, tx hash, raw topic/value XDR, decoded data, status, error     |
+| `contract_events` | RPC event id            | every event: ledger, close time, tx hash, raw topic/value XDR, decoded data, status, error, TOID (`toid`, `tx_order`, `op_order`, `event_index`) |
 | `folders`         | `owner` (unique `name`) | `folder_cl`, `tmpl_set`, `port_mint`                                                           |
 | `templates`       | `id`                    | `tmpl_reg`                                                                                     |
 | `portfolios`      | `owner`                 | `port_mint`, `port_upd`, `tmpl_set`                                                            |
@@ -117,6 +117,11 @@ from archive data is not implemented yet.
 Template ids are `BIGINT` because the contract uses `u32`. There are no foreign keys between
 `folders` and `portfolios`: an indexer that starts partway through history can see a mint
 whose claim is outside the window.
+
+`contract_events` also stores the RPC event id decomposed into `toid`, `tx_order`, `op_order`
+and `event_index`. `ORDER BY toid, event_index` (backed by
+`idx_contract_events_toid_event_index`) is the canonical event order and matches the order
+`getEvents` delivers events in.
 
 ## Design decisions
 

@@ -57,6 +57,22 @@ describeDb('indexer against Postgres', () => {
     expect((await readState(pool)).cursor).toBe('cursor-1');
   });
 
+  it('stores the decomposed TOID and orders events by it', async () => {
+    await processPage(pool, TESTNET_CONTRACT, page());
+
+    const { rows } = await pool.query(
+      'SELECT id, toid, tx_order, op_order, event_index FROM contract_events ORDER BY toid, event_index'
+    );
+    expect(rows.map((r) => r.id)).toEqual(testnetEvents.map((e) => e.id));
+    for (const row of rows) {
+      const [toid, eventIndex] = row.id.split('-');
+      expect(String(row.toid)).toBe(toid);
+      expect(row.event_index).toBe(Number(eventIndex));
+      expect(row.tx_order).toBe(Number((BigInt(toid) >> 12n) & 0xfffffn));
+      expect(row.op_order).toBe(Number(BigInt(toid) & 0xfffn));
+    }
+  });
+
   it('is idempotent when the same page is processed twice', async () => {
     await processPage(pool, TESTNET_CONTRACT, page());
     const before = await pool.query('SELECT * FROM portfolios ORDER BY owner');

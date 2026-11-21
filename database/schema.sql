@@ -17,10 +17,28 @@ CREATE TABLE IF NOT EXISTS contract_events (
   data              JSONB,
   status            TEXT NOT NULL CHECK (status IN ('applied', 'ignored', 'rejected')),
   error             TEXT,
-  indexed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  indexed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Decomposed TOID (see src/indexer/stellar.ts parseEventId). `toid` is the
+  -- numeric part of the RPC event id; the rest are its bit fields.
+  toid              BIGINT,
+  tx_order          INTEGER,
+  op_order          INTEGER,
+  event_index       INTEGER
 );
 
+-- Backfill the TOID columns for rows written before they existed.
+UPDATE contract_events
+   SET toid        = split_part(id, '-', 1)::BIGINT,
+       tx_order    = ((split_part(id, '-', 1)::BIGINT >> 12) & 1048575)::INTEGER,
+       op_order    = (split_part(id, '-', 1)::BIGINT & 4095)::INTEGER,
+       event_index = split_part(id, '-', 2)::INTEGER
+ WHERE toid IS NULL
+   AND id ~ '^[0-9]+-[0-9]+$';
+
 CREATE INDEX IF NOT EXISTS idx_contract_events_ledger ON contract_events (ledger);
+-- Canonical event ordering: matches RPC getEvents delivery order.
+CREATE INDEX IF NOT EXISTS idx_contract_events_toid_event_index
+  ON contract_events (toid, event_index);
 CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
   ON contract_events (indexed_at) WHERE status = 'rejected';
 

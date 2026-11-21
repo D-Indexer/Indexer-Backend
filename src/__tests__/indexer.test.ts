@@ -109,6 +109,18 @@ describe('processPage', () => {
     expect(sqls(calls)).toContain('COMMIT');
   });
 
+  it('stores the decomposed TOID columns from the event id', async () => {
+    const { db, calls } = fakeDb();
+    const event = makeEvent('port_upd', [addr(OWNER), str('bafy')], {
+      id: '0024256944495710208-0000000003',
+    });
+
+    await processPage(db, TESTNET_CONTRACT, page([event]));
+
+    const insert = calls.find((c) => c.sql.includes('INSERT INTO contract_events'))!;
+    expect(insert.params?.slice(11)).toEqual(['24256944495710208', 13, 0, 3]);
+  });
+
   it('marks unknown topics as ignored', async () => {
     const { db } = fakeDb();
     const result = await processPage(db, TESTNET_CONTRACT, page([makeEvent('future_evt', [u32(1)])]));

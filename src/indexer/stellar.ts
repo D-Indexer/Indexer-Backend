@@ -97,6 +97,30 @@ export function isDeterministicDbError(err: unknown): boolean {
   return typeof code === 'string' && (code.startsWith('22') || code.startsWith('23'));
 }
 
+/**
+ * Decompose an RPC event id (a TOID: `ledger << 32 | txOrder << 12 | opOrder`,
+ * followed by `-<eventIndex>`) into its ordering columns. Returns nulls when the
+ * id doesn't have the expected shape, so the row is still stored.
+ */
+export function parseEventId(id: string): {
+  toid: string | null;
+  txOrder: number | null;
+  opOrder: number | null;
+  eventIndex: number | null;
+} {
+  const match = /^(\d+)-(\d+)$/.exec(id);
+  if (!match) return { toid: null, txOrder: null, opOrder: null, eventIndex: null };
+  const toid = BigInt(match[1]);
+  const eventIndex = Number(match[2]);
+  if (!Number.isSafeInteger(eventIndex)) return { toid: null, txOrder: null, opOrder: null, eventIndex: null };
+  return {
+    toid: toid.toString(),
+    txOrder: Number((toid >> 12n) & 0xfffffn),
+    opOrder: Number(toid & 0xfffn),
+    eventIndex,
+  };
+}
+
 async function storeEvent(
   client: PoolClient,
   contractId: string,
@@ -115,10 +139,12 @@ async function storeEvent(
   }
 
   const status = error ? 'rejected' : decoded ? 'applied' : 'ignored';
+  const { toid, txOrder, opOrder, eventIndex } = parseEventId(event.id);
   const inserted = await client.query(
     `INSERT INTO contract_events
-       (id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       (id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error,
+        toid, tx_order, op_order, event_index)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      ON CONFLICT (id) DO NOTHING
      RETURNING id`,
     [
@@ -133,6 +159,10 @@ async function storeEvent(
       decoded ? JSON.stringify(decoded) : null,
       status,
       error,
+      toid,
+      txOrder,
+      opOrder,
+      eventIndex,
     ]
   );
 
