@@ -7,6 +7,7 @@
  */
 
 import { Address, xdr } from '@stellar/stellar-sdk';
+import { logger } from '../utils/logger';
 
 /** Event exactly as returned by the RPC `getEvents` method. */
 export type RawEvent = {
@@ -127,10 +128,28 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
       throw new RpcError(`${method} to ${safeUrl} returned HTTP ${response.status}`, undefined, retryable);
     }
 
-    const body = (await response.json()) as {
+    let raw = '';
+    let body: {
       result?: T;
       error?: { code: number; message: string };
     };
+    try {
+      raw = await response.text();
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      const contentType = response.headers.get('content-type') ?? 'unknown';
+      logger.warn('RPC returned a non-JSON body', {
+        method,
+        url: safeUrl,
+        contentType,
+        body: raw.slice(0, 200),
+      });
+      throw new RpcError(`${method} to ${safeUrl} returned a non-JSON body`, undefined, true);
+    }
+
+    if (body === null || typeof body !== 'object') {
+      throw new RpcError(`${method} to ${safeUrl} returned a non-JSON body`, undefined, true);
+    }
 
     if (body.error) {
       const range = RANGE_RE.exec(body.error.message);

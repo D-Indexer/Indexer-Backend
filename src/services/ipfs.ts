@@ -1,5 +1,6 @@
 import { getEnv } from '../config/env';
 import { HttpError } from '../http/errors';
+import { logger } from '../utils/logger';
 
 const env = getEnv();
 
@@ -33,7 +34,19 @@ export async function pinFile(buffer: Buffer, filename: string): Promise<string>
     throw new HttpError(502, `IPFS add failed with status ${addResponse.status}`, true);
   }
 
-  const addResult = (await addResponse.json()) as { Hash?: string };
+  let raw = '';
+  let addResult: { Hash?: string };
+  try {
+    raw = await addResponse.text();
+    addResult = JSON.parse(raw) as { Hash?: string };
+  } catch {
+    logger.warn('IPFS returned a non-JSON body', {
+      url: addUrl.origin + addUrl.pathname,
+      contentType: addResponse.headers.get('content-type') ?? 'unknown',
+      body: raw.slice(0, 200),
+    });
+    throw new HttpError(502, 'IPFS returned an invalid response', true);
+  }
   if (!addResult.Hash) {
     throw new HttpError(502, 'IPFS add response did not include a CID', true);
   }
