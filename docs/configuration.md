@@ -44,7 +44,10 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `CORS_ORIGIN`                     | any origin (non-production) | Comma-separated allow-list, or `*` for any origin. An unparseable list denies all origins. |
 | `REQUEST_BODY_LIMIT`              | `1mb`                       | JSON body limit                                                                            |
 | `LOG_LEVEL`                       | `info`                      | `debug`, `info`, `warn`, `error` or `silent`                                               |
-| `STELLAR_NETWORK_PASSPHRASE`      | testnet passphrase          | Network passphrase (not used by the read-only indexer yet)                                 |
+| `STELLAR_NETWORK_PASSPHRASE`      | testnet passphrase          | Network passphrase; SHA-256 is used as the database network key                           |
+| `FOLDER_CONTRACT_IDS`             | unset                       | Ordered comma-separated contracts, optionally `C...:ledger`                              |
+| `FOLDER_CONTRACT_START_LEDGERS`   | unset                       | Per-contract start ledgers, `C...=ledger,C...=ledger`                                    |
+| `API_NETWORK_DEFAULT`             | network passphrase          | Default API network passphrase or 64-character network id                               |
 | `STELLAR_RPC_TIMEOUT_MS`          | `10000`                     | Per-request RPC timeout; failed requests are retried 3× with backoff                       |
 | `INDEXER_POLL_INTERVAL_MS`        | `5000`                      | Delay between polls once caught up                                                         |
 | `INDEXER_PAGE_LIMIT`              | `200`                       | Events per `getEvents` page (1–10000)                                                      |

@@ -120,6 +120,17 @@ whose claim is outside the window.
 
 ## Design decisions
 
+- **Network isolation.** Each process derives a SHA-256 network id from
+  `STELLAR_NETWORK_PASSPHRASE`. Database primary keys for events and read-model rows include
+  that network id. API selection uses `X-Stellar-Network`, then a `testnet` subdomain/path
+  prefix, then `API_NETWORK_DEFAULT`; every read is filtered by the selected network.
+- **Multiple contracts.** `FOLDER_CONTRACT_IDS` is an ordered, comma-separated contract list.
+  `FOLDER_CONTRACT_IDS=C1:ledger,C2:ledger` and `FOLDER_CONTRACT_START_LEDGERS=C1=ledger,C2=ledger`
+  provide per-contract starting ledgers. The RPC receives all contracts in one filter and
+  uses one shared paging cursor. `contract_id` is stored on events and read-model rows;
+  for conflicting redeploy state, events are applied in RPC ledger order, so the latest
+  ledger-close event wins.
+
 - **The ledger is the source of truth.** Postgres is a rebuildable read model. Every
   applied event is kept in `contract_events` with its raw XDR.
 - **Raw RPC, SDK for XDR.** The SDK's `getEvents` replaces `contractId` and `topic` with

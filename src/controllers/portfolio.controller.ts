@@ -8,7 +8,9 @@ export const getByAddress = asyncHandler(async (req: Request, res: Response) => 
   const parsed = stellarAddressSchema.safeParse(req.params.address);
   if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
 
-  const portfolio = await portfolioService.getPortfolio(parsed.data);
+  const portfolio = res.locals?.network
+    ? await portfolioService.getPortfolio(parsed.data, res.locals.network)
+    : await portfolioService.getPortfolio(parsed.data);
   if (!portfolio) throw notFound('Portfolio not found');
   res.json(portfolio);
 });

@@ -31,7 +31,7 @@ router.get(
     let dbOk = false;
     let state: Partial<Record<string, string>> = {};
     try {
-      state = await withTimeout(readState(pool), env.HEALTHCHECK_DATABASE_TIMEOUT_MS);
+      state = await withTimeout(readState(pool, res.locals?.network), env.HEALTHCHECK_DATABASE_TIMEOUT_MS);
       dbOk = true;
     } catch {
       dbOk = false;
