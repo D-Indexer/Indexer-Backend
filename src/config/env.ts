@@ -38,9 +38,12 @@ const envSchema = z
     INDEXER_ON_RETENTION_GAP: z.enum(['halt', 'skip']).default('halt'),
     INDEXER_MAX_BACKOFF_MS: z.coerce.number().int().positive().default(60000),
     INDEXER_STALE_AFTER_MS: z.coerce.number().int().positive().default(120000),
+    INDEXER_TICK_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     DB_MAX_CONNECTIONS: z.coerce.number().int().positive().default(10),
     DB_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+    DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
+    DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: z.coerce.number().int().positive().default(20000),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   })

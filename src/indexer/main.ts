@@ -28,6 +28,8 @@ async function main(): Promise<void> {
       startLedger: env.INDEXER_START_LEDGER,
       onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
       maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
+      tickTimeoutMs: env.INDEXER_TICK_TIMEOUT_MS,
+      shutdownTimeoutMs: env.SHUTDOWN_TIMEOUT_MS,
     },
   });
 

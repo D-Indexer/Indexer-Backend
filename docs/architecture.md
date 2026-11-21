@@ -134,3 +134,6 @@ whose claim is outside the window.
 - **Graceful shutdown.** On SIGTERM the indexer waits for the in-flight page before closing
   the pool, and the API stops accepting connections first. Both stop after
   `SHUTDOWN_TIMEOUT_MS`.
+- **Bounded ticks.** Each indexer tick runs under `INDEXER_TICK_TIMEOUT_MS`; on expiry the
+  client is released, status becomes `error` and the next tick backs off. Indexer connections
+  set Postgres `statement_timeout` and `idle_in_transaction_session_timeout`.

@@ -21,6 +21,22 @@ describe('environment configuration', () => {
     expect(env.INDEXER_MAX_PAGES_PER_TICK).toBe(50);
     expect(env.INDEXER_ON_RETENTION_GAP).toBe('halt');
     expect(env.INDEXER_START_LEDGER).toBeUndefined();
+    expect(env.INDEXER_TICK_TIMEOUT_MS).toBe(30000);
+    expect(env.DB_STATEMENT_TIMEOUT_MS).toBe(15000);
+    expect(env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS).toBe(20000);
+  });
+
+  it('validates the indexer tick and Postgres statement timeouts', () => {
+    expect(loadEnv({ ...validEnv, INDEXER_TICK_TIMEOUT_MS: '5000' }).INDEXER_TICK_TIMEOUT_MS).toBe(5000);
+    expect(() => loadEnv({ ...validEnv, INDEXER_TICK_TIMEOUT_MS: '0' })).toThrow(
+      /INDEXER_TICK_TIMEOUT_MS/
+    );
+    expect(() => loadEnv({ ...validEnv, DB_STATEMENT_TIMEOUT_MS: '-1' })).toThrow(
+      /DB_STATEMENT_TIMEOUT_MS/
+    );
+    expect(() => loadEnv({ ...validEnv, DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: '0' })).toThrow(
+      /DB_IDLE_IN_TRANSACTION_TIMEOUT_MS/
+    );
   });
 
   it('validates INDEXER_MAX_PAGES_PER_TICK', () => {

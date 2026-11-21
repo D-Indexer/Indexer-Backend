@@ -53,10 +53,13 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `INDEXER_ON_RETENTION_GAP`        | `halt`                      | `halt` or `skip`. See [operations](operations.md#retention-gap).                           |
 | `INDEXER_MAX_BACKOFF_MS`          | `60000`                     | Cap for exponential backoff after failed polls                                             |
 | `INDEXER_STALE_AFTER_MS`          | `120000`                    | Indexer counts as unhealthy after this long without a successful poll                      |
+| `INDEXER_TICK_TIMEOUT_MS`         | `30000`                     | Hard deadline for one indexer tick; on expiry the tick fails and the indexer backs off      |
 | `IPFS_TIMEOUT_MS`                 | `30000`                     | Timeout for the Kubo `add` call                                                            |
 | `DB_MAX_CONNECTIONS`              | `10`                        | Pool size, per process                                                                     |
 | `DB_IDLE_TIMEOUT_MS`              | `30000`                     | Pool idle timeout                                                                          |
 | `DB_CONNECTION_TIMEOUT_MS`        | `5000`                      | Pool connection timeout                                                                    |
+| `DB_STATEMENT_TIMEOUT_MS`         | `15000`                     | Postgres `statement_timeout` for indexer connections                                       |
+| `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | `20000`                   | Postgres `idle_in_transaction_session_timeout` for indexer connections                     |
 | `HEALTHCHECK_DATABASE_TIMEOUT_MS` | `2000`                      | DB timeout for `GET /health`                                                               |
 | `SHUTDOWN_TIMEOUT_MS`             | `10000`                     | Graceful shutdown limit                                                                    |
 

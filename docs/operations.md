@@ -154,3 +154,11 @@ Both processes handle SIGTERM/SIGINT. The API stops accepting connections and cl
 pool. The indexer aborts its `AbortSignal`, which cancels in-flight RPC calls and retry
 sleeps, so it exits promptly without committing a partial page. Either exits non-zero after
 `SHUTDOWN_TIMEOUT_MS`. An interrupted page is rolled back and re-read on the next start.
+
+Each indexer tick also has a hard deadline (`INDEXER_TICK_TIMEOUT_MS`). A tick that overruns
+it is abandoned: the DB client is released, `indexer_state.status` is set to `error` with the
+timeout message, and the next tick is scheduled with exponential backoff. Indexer connections
+also carry Postgres `statement_timeout` (`DB_STATEMENT_TIMEOUT_MS`) and
+`idle_in_transaction_session_timeout` (`DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`), so a statement
+blocked on a lock fails on its own. `stop()` waits at most `SHUTDOWN_TIMEOUT_MS` for a stuck
+tick before exiting.

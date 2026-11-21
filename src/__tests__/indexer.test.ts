@@ -273,4 +273,52 @@ describe('indexer loop', () => {
 
     expect(rpc.getEvents).toHaveBeenCalledTimes(2);
   });
+
+  it('fails a tick that exceeds its deadline, marks status error and recovers', async () => {
+    const { db, calls } = fakeDb();
+    let release: (() => void) | undefined;
+    const stuck = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const rpc = fakeRpc({
+      getEvents: jest
+        .fn()
+        .mockImplementationOnce(async () => {
+          await stuck;
+          return page([]);
+        })
+        .mockResolvedValue(page([])),
+    });
+
+    const indexer = createIndexer({
+      db,
+      rpc,
+      config: { ...config, tickTimeoutMs: 20, shutdownTimeoutMs: 200 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const errorWrite = calls.find((c) => c.params?.[0] === 'status' && c.params?.[1] === 'error');
+    expect(errorWrite).toBeDefined();
+
+    release!();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(rpc.getEvents.mock.calls.length).toBeGreaterThan(1);
+    await indexer.stop();
+  });
+
+  it('stop() returns within shutdownTimeoutMs during a stuck tick', async () => {
+    const { db } = fakeDb();
+    const rpc = fakeRpc({ getEvents: jest.fn(() => new Promise<GetEventsResult>(() => undefined)) });
+
+    const indexer = createIndexer({
+      db,
+      rpc,
+      config: { ...config, tickTimeoutMs: 60000, shutdownTimeoutMs: 20 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const started = Date.now();
+    await indexer.stop();
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
 });

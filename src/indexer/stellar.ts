@@ -45,6 +45,10 @@ export type IndexerConfig = {
   catchUpIntervalMs?: number;
   /** Ledger close time assumed when the RPC reports no `ledgerClosedAt`. */
   ledgerCloseTimeMs?: number;
+  /** Hard deadline for one tick. On expiry the tick fails and the indexer backs off. */
+  tickTimeoutMs?: number;
+  /** How long `stop()` waits for a stuck tick before giving up on it. */
+  shutdownTimeoutMs?: number;
 };
 
 export type IndexerDependencies = {
@@ -214,6 +218,9 @@ async function storeEvent(
 export async function processPage(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
   const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0 };
   const client = await db.connect();
+  // Set once the connection is unusable (e.g. a statement was cancelled by the
+  // tick deadline): the client is destroyed instead of returned to the pool.
+  let broken = false;
 
   try {
     await client.query('BEGIN');
@@ -237,10 +244,11 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
     await client.query('COMMIT');
     return result;
   } catch (err) {
+    broken = true;
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;
   } finally {
-    client.release();
+    client.release(broken);
   }
 }
 
@@ -359,15 +367,71 @@ export function backoffDelay(
   return Math.min(config.pollIntervalMs * 2 ** failures, config.maxBackoffMs);
 }
 
+/** Thrown when a tick exceeds `INDEXER_TICK_TIMEOUT_MS`. */
+export class TickTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Indexer tick exceeded its ${timeoutMs} ms deadline`);
+    this.name = 'TickTimeoutError';
+  }
+}
+
+/** Default tick deadline when `tickTimeoutMs` is not configured. */
+export const DEFAULT_TICK_TIMEOUT_MS = 30000;
+
+/**
+ * Run `work` with a hard deadline. On expiry the returned promise rejects with
+ * a `TickTimeoutError` and `onTimeout` runs (to release the DB client); the
+ * abandoned work keeps running in the background and its result is ignored.
+ */
+function withDeadline<T>(
+  work: () => Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => void
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        onTimeout();
+      } catch {
+        // releasing is best effort
+      }
+      reject(new TickTimeoutError(timeoutMs));
+    }, timeoutMs);
+    timer.unref?.();
+
+    work().then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 export function createIndexer(deps: IndexerDependencies): RunningIndexer {
   const maxPages = deps.config.maxPagesPerTick ?? 50;
+  const tickTimeoutMs = deps.config.tickTimeoutMs ?? DEFAULT_TICK_TIMEOUT_MS;
+  const shutdownTimeoutMs = deps.config.shutdownTimeoutMs ?? tickTimeoutMs;
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
   let failures = 0;
   let inFlight: Promise<void> = Promise.resolve();
   let lag: ChainLag | null = null;
+  /** Set when a tick was abandoned at its deadline; the next tick waits for it. */
+  let abandoned: Promise<unknown> | null = null;
 
-  const tick = async () => {
+  const runTick = async () => {
     try {
       for (let page = 0; page < maxPages && !stopped; page++) {
         const polled = await pollOnce(deps);
@@ -387,6 +451,35 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
           () => undefined
         );
       }
+    }
+  };
+
+  const tick = async () => {
+    // A previous tick overran its deadline and may still hold a connection;
+    // wait for it so ticks never overlap.
+    if (abandoned) {
+      await abandoned.catch(() => undefined);
+      abandoned = null;
+    }
+    if (stopped) return;
+
+    const work = runTick();
+    try {
+      await withDeadline(
+        () => work,
+        tickTimeoutMs,
+        () => {
+          abandoned = work;
+        }
+      );
+    } catch (err) {
+      if (!(err instanceof TickTimeoutError)) throw err;
+      failures++;
+      logger.error('Indexer tick timed out', { timeoutMs: tickTimeoutMs, failures });
+      await writeState(deps.db, {
+        [STATE.status]: 'error',
+        [STATE.lastError]: err.message,
+      }).catch(() => undefined);
     }
   };
 
@@ -418,7 +511,22 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
       stopped = true;
       if (timer) clearTimeout(timer);
       deps.signal?.removeEventListener('abort', onAbort);
-      await inFlight;
+      // A stuck tick must not block shutdown: wait at most shutdownTimeoutMs.
+      let deadline: NodeJS.Timeout | undefined;
+      const timedOut = await Promise.race([
+        inFlight.then(() => false),
+        new Promise<boolean>((resolve) => {
+          deadline = setTimeout(() => resolve(true), shutdownTimeoutMs);
+          deadline.unref?.();
+        }),
+      ]);
+      if (deadline) clearTimeout(deadline);
+      if (timedOut) {
+        logger.warn('Indexer stop timed out; abandoning in-flight tick', {
+          timeoutMs: shutdownTimeoutMs,
+        });
+        return;
+      }
       logger.info('Indexer stopped');
     },
   };
