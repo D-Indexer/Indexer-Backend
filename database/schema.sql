@@ -61,6 +61,24 @@ CREATE TABLE IF NOT EXISTS ipfs_cid_status (
   next_check_at    TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS uploads (
+  cid              TEXT PRIMARY KEY,
+  size             INTEGER NOT NULL,
+  mime             TEXT NOT NULL,
+  sha256           TEXT NOT NULL,
+  client_ip_hash   TEXT NOT NULL,
+  request_id       TEXT NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  referenced_at    TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS ipfs_gc_actions (
+  cid          TEXT PRIMARY KEY,
+  action       TEXT NOT NULL CHECK (action IN ('unpinned', 'dry-run')),
+  reason       TEXT,
+  acted_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 
 -- init / adm_add / adm_rm
 CREATE TABLE IF NOT EXISTS admins (

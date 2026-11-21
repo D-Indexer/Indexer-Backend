@@ -76,6 +76,10 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
         event.templateId,
         at,
       ]);
+      await db.query(
+        'UPDATE uploads SET referenced_at = COALESCE(referenced_at, NOW()) WHERE cid = $1',
+        [event.ipfsCid]
+      );
       return;
 
     case 'port_upd':
@@ -84,6 +88,10 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
         event.ipfsCid,
         at,
       ]);
+      await db.query(
+        'UPDATE uploads SET referenced_at = COALESCE(referenced_at, NOW()) WHERE cid = $1',
+        [event.ipfsCid]
+      );
       return;
   }
 }
