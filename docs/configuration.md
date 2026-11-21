@@ -42,6 +42,7 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `NODE_ENV`                        | `development`               | `development`, `test` or `production`                                                      |
 | `PORT`                            | `3000`                      | API port                                                                                   |
 | `CORS_ORIGIN`                     | any origin (non-production) | Comma-separated allow-list, or `*` for any origin. An unparseable list denies all origins. |
+| `TRUST_PROXY`                     | `false`                     | Express `trust proxy`: `false`, a hop count, or comma-separated CIDRs. See below.          |
 | `REQUEST_BODY_LIMIT`              | `1mb`                       | JSON body limit                                                                            |
 | `LOG_LEVEL`                       | `info`                      | `debug`, `info`, `warn`, `error` or `silent`                                               |
 | `STELLAR_NETWORK_PASSPHRASE`      | testnet passphrase          | Network passphrase (not used by the read-only indexer yet)                                 |
@@ -58,6 +59,23 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `DB_CONNECTION_TIMEOUT_MS`        | `5000`                      | Pool connection timeout                                                                    |
 | `HEALTHCHECK_DATABASE_TIMEOUT_MS` | `2000`                      | DB timeout for `GET /health`                                                               |
 | `SHUTDOWN_TIMEOUT_MS`             | `10000`                     | Graceful shutdown limit                                                                    |
+
+## Trust proxy
+
+`TRUST_PROXY` is passed to `app.set('trust proxy', …)` and controls how `req.ip`
+and `req.protocol` are derived from `X-Forwarded-For` / `X-Forwarded-Proto`.
+
+| Value                | Meaning                                                                       |
+| -------------------- | ----------------------------------------------------------------------------- |
+| `false` (default)    | Trust nothing. `req.ip` is the socket address; spoofed headers are ignored.   |
+| `1`, `2`, …          | Trust that many proxy hops from the socket (e.g. `1` for one load balancer).  |
+| `10.0.0.0/8,::1/128` | Trust only requests whose socket address matches one of the listed CIDRs.     |
+
+With `TRUST_PROXY=1`, `req.ip` is the left-most untrusted address in
+`X-Forwarded-For`. Leave it `false` when the API is directly reachable, otherwise
+clients can spoof their address. In production an unset `TRUST_PROXY` logs a
+warning at startup. Every request is logged with `requestId`, method, path,
+status, duration and `ip`.
 
 ## Test-only
 

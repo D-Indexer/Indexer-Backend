@@ -1,9 +1,52 @@
 import { StrKey } from '@stellar/stellar-sdk';
 import { z } from 'zod';
+import { logger } from '../utils/logger';
 
 const optionalPositiveInt = z
   .union([z.literal('').transform(() => undefined), z.coerce.number().int().positive()])
   .optional();
+
+const IPV4_CIDR = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
+const IPV6_CIDR = /^[0-9a-fA-F:]+\/\d{1,3}$/;
+
+/**
+ * TRUST_PROXY: `false` (default), a hop count, or a comma-separated CIDR list.
+ * Anything else is rejected so a typo cannot silently trust spoofed headers.
+ */
+const trustProxySchema = z
+  .string()
+  .optional()
+  .transform((value, ctx) => {
+    const raw = value?.trim();
+    if (!raw || raw.toLowerCase() === 'false') return false as const;
+    if (raw.toLowerCase() === 'true') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'TRUST_PROXY must be false, a hop count, or a comma-separated CIDR list',
+      });
+      return z.NEVER;
+    }
+    if (/^\d+$/.test(raw)) {
+      const hops = Number(raw);
+      if (hops < 1) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'TRUST_PROXY hop count must be >= 1' });
+        return z.NEVER;
+      }
+      return hops;
+    }
+    const cidrs = raw
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    if (cidrs.length === 0 || !cidrs.every((cidr) => IPV4_CIDR.test(cidr) || IPV6_CIDR.test(cidr))) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'TRUST_PROXY must be false, a hop count, or a comma-separated CIDR list',
+      });
+      return z.NEVER;
+    }
+    return cidrs;
+  });
 
 /** Deployed Folder contract on Stellar testnet (Indexer-Contract deployments/testnet.json). */
 export const TESTNET_CONTRACT_ID = 'CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV';
@@ -30,6 +73,7 @@ const envSchema = z
     IPFS_GATEWAY: z.string().url('IPFS_GATEWAY must be a valid URL'),
     IPFS_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     CORS_ORIGIN: z.string().optional(),
+    TRUST_PROXY: trustProxySchema,
     REQUEST_BODY_LIMIT: z.string().default('1mb'),
     INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
     INDEXER_PAGE_LIMIT: z.coerce.number().int().min(1).max(10000).default(200),
@@ -54,6 +98,18 @@ const envSchema = z
   });
 
 export type AppEnv = z.infer<typeof envSchema>;
+
+/** Express `trust proxy` setting derived from TRUST_PROXY. */
+export type TrustProxy = AppEnv['TRUST_PROXY'];
+
+/** Warn (once) when production runs without TRUST_PROXY, so client IPs may be wrong. */
+export function warnIfTrustProxyUnset(env: Pick<AppEnv, 'NODE_ENV' | 'TRUST_PROXY'>): void {
+  if (env.NODE_ENV === 'production' && env.TRUST_PROXY === false) {
+    logger.warn(
+      'TRUST_PROXY is unset in production; req.ip will be the load balancer address. Set TRUST_PROXY to the hop count or trusted CIDRs.'
+    );
+  }
+}
 
 let cachedEnv: AppEnv | null = null;
 
