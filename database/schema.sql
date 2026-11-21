@@ -15,14 +15,27 @@ CREATE TABLE IF NOT EXISTS contract_events (
   topic_xdr         TEXT[] NOT NULL,
   value_xdr         TEXT NOT NULL,
   data              JSONB,
+  -- Owner the event belongs to (folder_cl / tmpl_set / port_mint / port_upd),
+  -- NULL for admin events and undecodable ones. Backs the per-owner activity feed.
+  owner             TEXT,
+  -- Owner the event belongs to (folder_cl / tmpl_set / port_mint / port_upd),
+  -- NULL for admin events and undecodable ones. Backs the per-owner activity feed.
+  owner             TEXT,
   status            TEXT NOT NULL CHECK (status IN ('applied', 'ignored', 'rejected')),
   error             TEXT,
   indexed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-CREATE INDEX IF NOT EXISTS idx_contract_events_ledger ON contract_events (ledger);
 CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
   ON contract_events (indexed_at) WHERE status = 'rejected';
+-- Per-owner activity feed: keyset pagination on (ledger, id) descending.
+CREATE INDEX IF NOT EXISTS idx_contract_events_owner_activity
+  ON contract_events (owner, ledger DESC, id DESC) WHERE status = 'applied';
+
+-- Existing deployments: add the owner column and backfill it from the decoded
+-- event data (idempotent, so it is safe on every start).
+ALTER TABLE contract_events ADD COLUMN IF NOT EXISTS owner TEXT;
+UPDATE contract_events SET owner = data->>'owner'
+  WHERE owner IS NULL AND data ? 'owner';
 
 -- GET /events: keyset pagination on (ledger, id) and one index per filter.
 CREATE INDEX IF NOT EXISTS idx_contract_events_ledger_id ON contract_events (ledger, id);
