@@ -20,6 +20,13 @@ describe('environment configuration', () => {
     expect(env.INDEXER_POLL_INTERVAL_MS).toBe(5000);
     expect(env.INDEXER_ON_RETENTION_GAP).toBe('halt');
     expect(env.INDEXER_START_LEDGER).toBeUndefined();
+    expect(env.INDEXER_ENRICH_TRANSACTIONS).toBe(true);
+    expect(env.INDEXER_ENRICH_BATCH_SIZE).toBe(50);
+  });
+
+  it('parses INDEXER_ENRICH_TRANSACTIONS=false', () => {
+    const env = loadEnv({ ...validEnv, INDEXER_ENRICH_TRANSACTIONS: 'false' });
+    expect(env.INDEXER_ENRICH_TRANSACTIONS).toBe(false);
   });
 
   it('rejects invalid urls', () => {

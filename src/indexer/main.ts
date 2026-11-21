@@ -53,6 +53,8 @@ async function main(): Promise<void> {
       startLedger: env.INDEXER_START_LEDGER,
       onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
       maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
+      enrichTransactions: env.INDEXER_ENRICH_TRANSACTIONS,
+      enrichBatchSize: env.INDEXER_ENRICH_BATCH_SIZE,
     },
   });
 

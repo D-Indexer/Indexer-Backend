@@ -39,9 +39,21 @@ export type HealthResult = {
   ledgerRetentionWindow?: number;
 };
 
+/** Result of the RPC `getTransaction` method, trimmed to the fields the indexer uses. */
+export type GetTransactionResult = {
+  status: string;
+  ledger?: number;
+  /** Base64 `TransactionEnvelope` XDR (fee-bump envelopes included). */
+  envelopeXdr?: string;
+  resultXdr?: string;
+  resultMetaXdr?: string;
+};
+
 export interface EventSource {
   getEvents(params: GetEventsParams): Promise<GetEventsResult>;
   getHealth(): Promise<HealthResult>;
+  /** Fetch a transaction by hash. Optional so event-only sources stay valid. */
+  getTransaction?(hash: string): Promise<GetTransactionResult>;
   /** Redacted URL of the endpoint currently serving requests, when known. */
   readonly activeEndpoint?: string;
 }
@@ -171,6 +183,9 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     getHealth() {
       return call<HealthResult>('getHealth');
     },
+    getTransaction(hash) {
+      return call<GetTransactionResult>('getTransaction', { hash });
+    },
   };
 }
 
@@ -295,6 +310,12 @@ export function createFailoverEventSource(options: FailoverOptions): EventSource
       const endpoint = endpoints[active];
       if (endpoint) endpoint.latestLedger = health.latestLedger;
       return health;
+    },
+    getTransaction(hash) {
+      return attempt('getTransaction', (client) => {
+        if (!client.getTransaction) throw new RpcError('getTransaction is not supported', undefined, false);
+        return client.getTransaction(hash);
+      });
     },
   };
 }

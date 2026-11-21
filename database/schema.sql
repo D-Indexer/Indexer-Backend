@@ -75,6 +75,25 @@ CREATE TABLE IF NOT EXISTS admins (
   added_at  TIMESTAMPTZ NOT NULL
 );
 
+-- Enriched transactions: one row per tx_hash seen in contract_events, filled by
+-- the enrichment worker from RPC getTransaction (source account, fee, memo).
+CREATE TABLE IF NOT EXISTS transactions (
+  hash            TEXT PRIMARY KEY,
+  ledger          INTEGER,
+  source_account  TEXT,
+  fee_charged     BIGINT,
+  max_fee         BIGINT,
+  memo_type       TEXT,
+  memo            TEXT,
+  successful      BOOLEAN,
+  fee_bump        BOOLEAN NOT NULL DEFAULT FALSE,
+  muxed_source    TEXT,
+  envelope_xdr    TEXT,
+  enriched_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_transactions_ledger ON transactions (ledger);
+
 -- Indexer cursor and status, written in the same transaction as event data.
 CREATE TABLE IF NOT EXISTS indexer_state (
   key         TEXT PRIMARY KEY,

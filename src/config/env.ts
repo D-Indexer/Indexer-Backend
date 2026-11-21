@@ -47,6 +47,12 @@ const envSchema = z
     INDEXER_START_LEDGER: optionalPositiveInt,
     INDEXER_ON_RETENTION_GAP: z.enum(['halt', 'skip']).default('halt'),
     INDEXER_MAX_BACKOFF_MS: z.coerce.number().int().positive().default(60000),
+    /** Fetch source account, fee and memo for indexed transactions via getTransaction. */
+    INDEXER_ENRICH_TRANSACTIONS: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((value) => value === 'true'),
+    INDEXER_ENRICH_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(50),
     INDEXER_STALE_AFTER_MS: z.coerce.number().int().positive().default(120000),
     DB_MAX_CONNECTIONS: z.coerce.number().int().positive().default(10),
     DB_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),

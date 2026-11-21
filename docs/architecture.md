@@ -79,6 +79,11 @@ To support a new event: add a case to `decode.ts` and `handlers.ts`, a table or 
    index) with `ON CONFLICT DO NOTHING`. Only newly inserted events are applied to the read
    model. The new cursor is written in the same transaction.
 4. **Repeat** while pages are full, then sleep `INDEXER_POLL_INTERVAL_MS`.
+5. **Enrich transactions** (unless `INDEXER_ENRICH_TRANSACTIONS=false`). After each tick,
+   up to `INDEXER_ENRICH_BATCH_SIZE` `tx_hash` values in `contract_events` that have no
+   `transactions` row are fetched with `getTransaction`, decoded with the SDK (fee-bump and
+   muxed sources included) and stored. `indexer_state.enrichment_cursor` tracks the last
+   hash processed. Enrichment failures never affect event indexing.
 
 What this guarantees:
 
@@ -112,7 +117,8 @@ from archive data is not implemented yet.
 | `templates`       | `id`                    | `tmpl_reg`                                                                                     |
 | `portfolios`      | `owner`                 | `port_mint`, `port_upd`, `tmpl_set`                                                            |
 | `admins`          | `address`               | `init`, `adm_add`, `adm_rm`                                                                    |
-| `indexer_state`   | `key`                   | `cursor`, `last_ledger`, `last_success_at`, `status`, `last_error`, `start_ledger`, `last_gap` |
+| `transactions`    | `hash`                  | `getTransaction`: source account, fee, memo, success, fee-bump/muxed source                    |
+| `indexer_state`   | `key`                   | `cursor`, `last_ledger`, `last_success_at`, `status`, `last_error`, `start_ledger`, `last_gap`, `enrichment_cursor` |
 
 Template ids are `BIGINT` because the contract uses `u32`. There are no foreign keys between
 `folders` and `portfolios`: an indexer that starts partway through history can see a mint

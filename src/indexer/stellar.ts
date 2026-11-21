@@ -1,8 +1,21 @@
 import type { Pool, PoolClient } from 'pg';
+import { TransactionBuilder } from '@stellar/stellar-sdk';
 import { decodeEvent, decodeTopic, DecodedEvent, EventDecodeError } from './decode';
 import { applyEvent } from './handlers';
-import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
+import {
+  EventSource,
+  GetEventsParams,
+  GetEventsResult,
+  GetTransactionResult,
+  LedgerRangeError,
+  RawEvent,
+  RpcError,
+} from './rpc';
 import { logger } from '../utils/logger';
+import { TESTNET_PASSPHRASE } from '../config/env';
+
+/** Network passphrase used to parse transaction envelopes. */
+const NETWORK_PASSPHRASE = TESTNET_PASSPHRASE;
 
 /** indexer_state keys. */
 export const STATE = {
@@ -14,6 +27,7 @@ export const STATE = {
   lastError: 'last_error',
   lastGap: 'last_gap',
   activeEndpoint: 'active_endpoint',
+  enrichCursor: 'enrichment_cursor',
 } as const;
 
 export type IndexerStatus = 'ok' | 'error' | 'retention_gap';
@@ -31,6 +45,10 @@ export type IndexerConfig = {
   maxBackoffMs: number;
   /** Max pages fetched back-to-back in one tick while catching up. */
   maxPagesPerTick?: number;
+  /** Fetch source account, fee and memo for indexed transactions. Defaults to true. */
+  enrichTransactions?: boolean;
+  /** Max transactions enriched per tick. Defaults to 50. */
+  enrichBatchSize?: number;
 };
 
 export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerConfig };
@@ -321,10 +339,141 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
   return { events: page.events.length, result };
 }
 
-export type RunningIndexer = {
-  /** Stop polling; resolves once any in-flight poll has finished. */
-  stop: () => Promise<void>;
+/** A transaction row decoded from an RPC getTransaction result. */
+export type EnrichedTransaction = {
+  hash: string;
+  ledger: number | null;
+  sourceAccount: string | null;
+  feeCharged: string | null;
+  maxFee: string | null;
+  memoType: string | null;
+  memo: string | null;
+  successful: boolean | null;
+  feeBump: boolean;
+  muxedSource: string | null;
+  envelopeXdr: string | null;
 };
+
+/**
+ * Decode a getTransaction result into the columns of the `transactions` table.
+ * Handles fee-bump envelopes (the inner transaction is the one that ran) and
+ * muxed sources (the underlying G... account is stored, the M... address kept
+ * alongside). Throws when the envelope XDR can't be parsed.
+ */
+export function decodeTransaction(hash: string, tx: GetTransactionResult): EnrichedTransaction {
+  const base: EnrichedTransaction = {
+    hash,
+    ledger: tx.ledger ?? null,
+    sourceAccount: null,
+    feeCharged: null,
+    maxFee: null,
+    memoType: null,
+    memo: null,
+    successful: tx.status === 'SUCCESS' ? true : tx.status === 'FAILED' ? false : null,
+    feeBump: false,
+    muxedSource: null,
+    envelopeXdr: tx.envelopeXdr ?? null,
+  };
+  if (!tx.envelopeXdr) return base;
+
+  const envelope = TransactionBuilder.fromXDR(tx.envelopeXdr, NETWORK_PASSPHRASE);
+  const feeBump = 'innerTransaction' in envelope;
+  const inner = feeBump ? envelope.innerTransaction : envelope;
+  const source = inner.source;
+  const muxed = source && typeof source === 'object' && 'accountId' in source ? source : null;
+
+  return {
+    ...base,
+    sourceAccount: muxed ? muxed.accountId() : (source ?? null),
+    feeCharged: feeBump ? envelope.fee().toString() : null,
+    maxFee: inner.fee ? inner.fee.toString() : null,
+    memoType: inner.memo?.type ?? null,
+    memo: inner.memo?.value != null ? String(inner.memo.value) : null,
+    feeBump,
+    muxedSource: muxed ? muxed.address() : null,
+  };
+}
+
+/**
+ * Enrich up to `enrichBatchSize` transactions whose hash appears in
+ * contract_events but has no `transactions` row yet. The enrichment cursor is
+ * the last tx_hash processed, so a restart resumes where it stopped.
+ */
+export async function enrichOnce(deps: IndexerDependencies): Promise<number> {
+  const { db, rpc } = deps;
+  if (!rpc.getTransaction) return 0;
+  const limit = deps.config.enrichBatchSize ?? 50;
+  const state = await readState(db);
+  const cursor = state[STATE.enrichCursor] ?? '';
+
+  const { rows } = await db.query<{ tx_hash: string }>(
+    `SELECT DISTINCT e.tx_hash
+       FROM contract_events e
+       LEFT JOIN transactions t ON t.hash = e.tx_hash
+      WHERE t.hash IS NULL AND e.tx_hash > $1
+      ORDER BY e.tx_hash
+      LIMIT $2`,
+    [cursor, limit]
+  );
+  if (rows.length === 0) return 0;
+
+  let enriched = 0;
+  for (const { tx_hash: hash } of rows) {
+    try {
+      const tx = await rpc.getTransaction(hash);
+      const row = decodeTransaction(hash, tx);
+      await db.query(
+        `INSERT INTO transactions
+           (hash, ledger, source_account, fee_charged, max_fee, memo_type, memo, successful,
+            fee_bump, muxed_source, envelope_xdr, enriched_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+         ON CONFLICT (hash) DO UPDATE SET
+           ledger = EXCLUDED.ledger,
+           source_account = EXCLUDED.source_account,
+           fee_charged = EXCLUDED.fee_charged,
+           max_fee = EXCLUDED.max_fee,
+           memo_type = EXCLUDED.memo_type,
+           memo = EXCLUDED.memo,
+           successful = EXCLUDED.successful,
+           fee_bump = EXCLUDED.fee_bump,
+           muxed_source = EXCLUDED.muxed_source,
+           envelope_xdr = EXCLUDED.envelope_xdr,
+           enriched_at = NOW()`,
+        [
+          row.hash,
+          row.ledger,
+          row.sourceAccount,
+          row.feeCharged,
+          row.maxFee,
+          row.memoType,
+          row.memo,
+          row.successful,
+          row.feeBump,
+          row.muxedSource,
+          row.envelopeXdr,
+        ]
+      );
+      enriched++;
+    } catch (err) {
+      // A transaction outside the RPC's retention window can never be fetched;
+      // record it as unknown so it is not retried forever.
+      if (!(err instanceof RpcError) || err.retryable) throw err;
+      logger.warn('Could not enrich transaction', {
+        hash,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await db.query(
+        `INSERT INTO transactions (hash, enriched_at) VALUES ($1, NOW())
+         ON CONFLICT (hash) DO NOTHING`,
+        [hash]
+      );
+    }
+    await writeState(db, { [STATE.enrichCursor]: hash });
+  }
+
+  logger.info('Enriched transactions', { enriched, scanned: rows.length });
+  return enriched;
+}
 
 export function backoffDelay(
   config: Pick<IndexerConfig, 'pollIntervalMs' | 'maxBackoffMs'>,
@@ -358,6 +507,16 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
         await writeState(deps.db, { [STATE.status]: 'error', [STATE.lastError]: message }).catch(
           () => undefined
         );
+      }
+    }
+    // Enrichment is best-effort: a failure here never affects event indexing.
+    if (deps.config.enrichTransactions !== false && !stopped) {
+      try {
+        await enrichOnce(deps);
+      } catch (err) {
+        logger.warn('Transaction enrichment failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
   };
