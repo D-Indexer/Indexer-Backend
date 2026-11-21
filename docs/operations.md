@@ -151,6 +151,6 @@ the deployment ledger), truncate the tables above, and restart the indexer.
 ## Shutdown
 
 Both processes handle SIGTERM/SIGINT. The API stops accepting connections and closes the
-pool. The indexer finishes the in-flight page (one transaction) and stops. Either exits
-non-zero after `SHUTDOWN_TIMEOUT_MS`. An interrupted page is rolled back and re-read on the
-next start.
+pool. The indexer aborts its `AbortSignal`, which cancels in-flight RPC calls and retry
+sleeps, so it exits promptly without committing a partial page. Either exits non-zero after
+`SHUTDOWN_TIMEOUT_MS`. An interrupted page is rolled back and re-read on the next start.

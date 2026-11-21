@@ -38,8 +38,40 @@ export type HealthResult = {
 };
 
 export interface EventSource {
-  getEvents(params: GetEventsParams): Promise<GetEventsResult>;
-  getHealth(): Promise<HealthResult>;
+  getEvents(params: GetEventsParams, signal?: AbortSignal): Promise<GetEventsResult>;
+  getHealth(signal?: AbortSignal): Promise<HealthResult>;
+}
+
+/** Thrown when a call is cancelled through its AbortSignal (e.g. indexer shutdown). */
+export class RpcAbortError extends Error {
+  constructor(message = 'RPC call aborted') {
+    super(message);
+    this.name = 'RpcAbortError';
+  }
+}
+
+export function isAbortError(err: unknown): boolean {
+  return err instanceof RpcAbortError || (err as { name?: unknown })?.name === 'AbortError';
+}
+
+/** Reject as soon as `signal` aborts, so retry sleeps and fetches stop promptly. */
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new RpcAbortError());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new RpcAbortError());
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      }
+    );
+  });
 }
 
 export class RpcError extends Error {
@@ -96,16 +128,20 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
   const safeUrl = redactUrl(options.url);
   let nextId = 1;
 
-  async function callOnce<T>(method: string, params?: unknown): Promise<T> {
+  async function callOnce<T>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) throw new RpcAbortError();
     let response: Response;
     try {
       response = await fetchImpl(options.url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
-        signal: AbortSignal.timeout(options.timeoutMs),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs)])
+          : AbortSignal.timeout(options.timeoutMs),
       });
     } catch (err) {
+      if (signal?.aborted) throw new RpcAbortError();
       const reason = err instanceof Error ? err.name : 'unknown';
       throw new RpcError(`${method} to ${safeUrl} failed: ${reason}`, undefined, true);
     }
@@ -115,7 +151,7 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
       throw new RpcError(`${method} to ${safeUrl} returned HTTP ${response.status}`, undefined, retryable);
     }
 
-    const body = (await response.json()) as {
+    const body = (await abortable(response.json(), signal)) as {
       result?: T;
       error?: { code: number; message: string };
     };
@@ -134,32 +170,37 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     return body.result;
   }
 
-  async function call<T>(method: string, params?: unknown): Promise<T> {
+  async function call<T>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
     for (let attempt = 1; ; attempt++) {
       try {
-        return await callOnce<T>(method, params);
+        return await callOnce<T>(method, params, signal);
       } catch (err) {
+        if (signal?.aborted) throw new RpcAbortError();
         if (!(err instanceof RpcError) || !err.retryable || attempt >= maxAttempts) throw err;
         const delay = baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random() / 2);
-        await sleep(delay);
+        await abortable(sleep(delay), signal);
       }
     }
   }
 
   return {
-    getEvents(params) {
+    getEvents(params, signal) {
       const pagination =
         params.cursor !== undefined
           ? { cursor: params.cursor, limit: params.limit }
           : { limit: params.limit };
-      return call<GetEventsResult>('getEvents', {
-        ...(params.startLedger !== undefined ? { startLedger: params.startLedger } : {}),
-        filters: [{ type: 'contract', contractIds: [params.contractId] }],
-        pagination,
-      });
+      return call<GetEventsResult>(
+        'getEvents',
+        {
+          ...(params.startLedger !== undefined ? { startLedger: params.startLedger } : {}),
+          filters: [{ type: 'contract', contractIds: [params.contractId] }],
+          pagination,
+        },
+        signal
+      );
     },
-    getHealth() {
-      return call<HealthResult>('getHealth');
+    getHealth(signal) {
+      return call<HealthResult>('getHealth', undefined, signal);
     },
   };
 }

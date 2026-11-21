@@ -1,7 +1,15 @@
 import type { Pool, PoolClient } from 'pg';
 import { decodeEvent, decodeTopic, DecodedEvent, EventDecodeError } from './decode';
 import { applyEvent } from './handlers';
-import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
+import {
+  EventSource,
+  GetEventsParams,
+  GetEventsResult,
+  LedgerRangeError,
+  RawEvent,
+  RpcAbortError,
+  isAbortError,
+} from './rpc';
 import { logger } from '../utils/logger';
 
 /** indexer_state keys. */
@@ -39,7 +47,13 @@ export type IndexerConfig = {
   ledgerCloseTimeMs?: number;
 };
 
-export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerConfig };
+export type IndexerDependencies = {
+  db: Db;
+  rpc: EventSource;
+  config: IndexerConfig;
+  /** Aborted on shutdown: cancels in-flight RPC calls and retry sleeps. */
+  signal?: AbortSignal;
+};
 
 export type PageResult = { applied: number; ignored: number; rejected: number; duplicates: number };
 
@@ -251,7 +265,7 @@ async function nextRequest(
     return { params: { contractId, limit, startLedger: deps.config.startLedger }, fromConfig: true };
   }
 
-  const { oldestLedger } = await deps.rpc.getHealth();
+  const { oldestLedger } = await deps.rpc.getHealth(deps.signal);
   logger.warn(
     'No saved cursor and INDEXER_START_LEDGER is unset; starting at the oldest ledger the RPC retains. ' +
       'Events before it are not indexed.',
@@ -277,7 +291,7 @@ export async function pollOnce(
 
   let page: GetEventsResult;
   try {
-    page = await deps.rpc.getEvents(params);
+    page = await deps.rpc.getEvents(params, deps.signal);
   } catch (err) {
     if (!(err instanceof LedgerRangeError)) throw err;
     const requested = requestedLedger(params);
@@ -306,12 +320,18 @@ export async function pollOnce(
         at: new Date().toISOString(),
       }),
     });
-    page = await deps.rpc.getEvents({
-      contractId: params.contractId,
-      limit: params.limit,
-      startLedger: resumeAt,
-    });
+    page = await deps.rpc.getEvents(
+      {
+        contractId: params.contractId,
+        limit: params.limit,
+        startLedger: resumeAt,
+      },
+      deps.signal
+    );
   }
+
+  // Shutdown requested while fetching: drop the page instead of committing it.
+  if (deps.signal?.aborted) throw new RpcAbortError();
 
   const result = await processPage(deps.db, deps.config.contractId, page);
   if (page.events.length > 0) {
@@ -356,6 +376,7 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
       }
       failures = 0;
     } catch (err) {
+      if (isAbortError(err) || stopped) return; // shutting down: no error state, no retry
       failures++;
       const message = err instanceof Error ? err.message : String(err);
       if (err instanceof RetentionGapError) {
@@ -378,6 +399,12 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
     }, delay);
   };
 
+  const onAbort = () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
+  deps.signal?.addEventListener('abort', onAbort, { once: true });
+
   logger.info('Indexer started', {
     contractId: deps.config.contractId,
     pollIntervalMs: deps.config.pollIntervalMs,
@@ -390,6 +417,7 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
     stop: async () => {
       stopped = true;
       if (timer) clearTimeout(timer);
+      deps.signal?.removeEventListener('abort', onAbort);
       await inFlight;
       logger.info('Indexer stopped');
     },

@@ -14,9 +14,12 @@ async function main(): Promise<void> {
   const rpc = createRpcClient({ url: env.STELLAR_RPC_URL, timeoutMs: env.STELLAR_RPC_TIMEOUT_MS });
   logger.info('Connecting indexer', { rpc: redactUrl(env.STELLAR_RPC_URL) });
 
+  const controller = new AbortController();
+
   const indexer = createIndexer({
     db: pool,
     rpc,
+    signal: controller.signal,
     config: {
       contractId: env.FOLDER_CONTRACT_ID,
       pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
@@ -32,6 +35,7 @@ async function main(): Promise<void> {
     logger.info('Shutdown requested', { signal });
     const timeout = setTimeout(() => process.exit(1), env.SHUTDOWN_TIMEOUT_MS);
     timeout.unref();
+    controller.abort();
     await indexer.stop();
     await pool.end();
     process.exit(0);
