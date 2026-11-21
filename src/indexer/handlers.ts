@@ -4,31 +4,39 @@ import type { DecodedEvent } from './decode';
 export type Queryable = Pick<PoolClient, 'query'>;
 
 /**
+ * Outcome of applying one event. `orphaned` means the event updates a row that
+ * does not exist yet (the indexer started partway through history, or the
+ * parent event is later in the same page); it is stored and re-applied when the
+ * parent row arrives.
+ */
+export type ApplyOutcome = 'applied' | 'orphaned';
+
+/**
  * Apply one decoded contract event to the read model. Runs inside the page
  * transaction (see processPage); `at` is the ledger close time of the event.
  * Each event id is applied at most once, so handlers don't need to be
  * idempotent on their own, but they are written as upserts anyway so a manual
  * cursor rewind (docs/operations.md) converges to the same state.
  */
-export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): Promise<void> {
+export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): Promise<ApplyOutcome> {
   switch (event.topic) {
     case 'init':
       await db.query(
         'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
         [event.admin, at]
       );
-      return;
+      return 'applied';
 
     case 'adm_add':
       await db.query(
         'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
         [event.newAdmin, at]
       );
-      return;
+      return 'applied';
 
     case 'adm_rm':
       await db.query('DELETE FROM admins WHERE address = $1', [event.target]);
-      return;
+      return 'applied';
 
     case 'folder_cl':
       // A name belongs to exactly one owner: drop it from any previous owner
@@ -50,7 +58,7 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
                updated_at = EXCLUDED.updated_at`,
         [event.owner, event.folderName, at]
       );
-      return;
+      return 'applied';
 
     case 'tmpl_reg':
       await db.query(
@@ -59,21 +67,21 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
            SET metadata_uri = EXCLUDED.metadata_uri, creator = EXCLUDED.creator`,
         [event.templateId, event.metadataUri, event.creator, at]
       );
-      return;
+      return 'applied';
 
-    case 'tmpl_set':
+    case 'tmpl_set': {
       // set_user_template also re-points an already-minted portfolio.
-      await db.query('UPDATE folders SET template_id = $2, updated_at = $3 WHERE owner = $1', [
-        event.owner,
-        event.templateId,
-        at,
-      ]);
-      await db.query('UPDATE portfolios SET template_id = $2, updated_at = $3 WHERE owner = $1', [
-        event.owner,
-        event.templateId,
-        at,
-      ]);
-      return;
+      const folders = await db.query(
+        'UPDATE folders SET template_id = $2, updated_at = $3 WHERE owner = $1',
+        [event.owner, event.templateId, at]
+      );
+      const portfolios = await db.query(
+        'UPDATE portfolios SET template_id = $2, updated_at = $3 WHERE owner = $1',
+        [event.owner, event.templateId, at]
+      );
+      // Orphaned only when the owner has no row at all to update.
+      return (folders.rowCount ?? 0) + (portfolios.rowCount ?? 0) === 0 ? 'orphaned' : 'applied';
+    }
 
     case 'port_mint':
       // mint_portfolio also sets the owner's selected template.
@@ -90,14 +98,48 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
         event.templateId,
         at,
       ]);
-      return;
+      return 'applied';
 
-    case 'port_upd':
-      await db.query('UPDATE portfolios SET ipfs_cid = $2, updated_at = $3 WHERE owner = $1', [
-        event.owner,
-        event.ipfsCid,
-        at,
-      ]);
-      return;
+    case 'port_upd': {
+      const updated = await db.query(
+        'UPDATE portfolios SET ipfs_cid = $2, updated_at = $3 WHERE owner = $1',
+        [event.owner, event.ipfsCid, at]
+      );
+      return (updated.rowCount ?? 0) === 0 ? 'orphaned' : 'applied';
+    }
   }
+}
+
+/**
+ * Re-apply orphaned events for `owner` now that a parent row exists. Only
+ * events newer than the row's `updated_at` are applied, so a stale orphan never
+ * overwrites fresher state. Returns the number of events re-applied.
+ */
+export async function reapplyOrphans(db: Queryable, owner: string): Promise<number> {
+  const { rows } = await db.query<{ id: string; data: DecodedEvent; ledger_closed_at: Date }>(
+    `SELECT id, data, ledger_closed_at FROM contract_events
+      WHERE status = 'orphaned' AND data->>'owner' = $1
+      ORDER BY ledger, id`,
+    [owner]
+  );
+
+  let reapplied = 0;
+  for (const row of rows) {
+    const at = new Date(row.ledger_closed_at);
+    // Skip orphans older than the row they would update: the parent event
+    // already carries newer state.
+    const { rows: current } = await db.query<{ updated_at: Date }>(
+      'SELECT updated_at FROM portfolios WHERE owner = $1',
+      [owner]
+    );
+    if (current.length > 0 && new Date(current[0].updated_at) > at) continue;
+
+    const outcome = await applyEvent(db, row.data, at);
+    if (outcome !== 'applied') continue;
+    await db.query("UPDATE contract_events SET status = 'applied', error = NULL WHERE id = $1", [
+      row.id,
+    ]);
+    reapplied++;
+  }
+  return reapplied;
 }

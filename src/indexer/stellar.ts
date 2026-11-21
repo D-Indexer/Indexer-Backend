@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { decodeEvent, decodeTopic, DecodedEvent, EventDecodeError } from './decode';
-import { applyEvent } from './handlers';
+import { applyEvent, reapplyOrphans } from './handlers';
 import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
 import { logger } from '../utils/logger';
 
@@ -34,7 +34,13 @@ export type IndexerConfig = {
 
 export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerConfig };
 
-export type PageResult = { applied: number; ignored: number; rejected: number; duplicates: number };
+export type PageResult = {
+  applied: number;
+  ignored: number;
+  rejected: number;
+  duplicates: number;
+  orphaned: number;
+};
 
 export class RetentionGapError extends Error {
   constructor(
@@ -54,6 +60,16 @@ export class RetentionGapError extends Error {
 export function ledgerFromCursor(cursor: string): number {
   const toid = BigInt(cursor.split('-')[0]);
   return Number(toid >> 32n);
+}
+
+/** Owner address carried by an event, when it has one. */
+function ownerOf(event: RawEvent): string | null {
+  try {
+    const decoded = decodeEvent(event);
+    return decoded && 'owner' in decoded ? decoded.owner : null;
+  } catch {
+    return null;
+  }
 }
 
 function scannedLedger(page: GetEventsResult): number {
@@ -100,7 +116,7 @@ async function storeEvent(
   client: PoolClient,
   contractId: string,
   event: RawEvent
-): Promise<'applied' | 'ignored' | 'rejected' | 'duplicate'> {
+): Promise<'applied' | 'ignored' | 'rejected' | 'orphaned' | 'duplicate'> {
   let topic = '';
   let decoded: DecodedEvent | null = null;
   let error: string | null = null;
@@ -146,7 +162,13 @@ async function storeEvent(
   // loss, etc.) aborts the page so it is retried.
   await client.query('SAVEPOINT apply_event');
   try {
-    await applyEvent(client, decoded, new Date(event.ledgerClosedAt));
+    const outcome = await applyEvent(client, decoded, new Date(event.ledgerClosedAt));
+    if (outcome === 'orphaned') {
+      await client.query("UPDATE contract_events SET status = 'orphaned' WHERE id = $1", [event.id]);
+      await client.query('RELEASE SAVEPOINT apply_event');
+      logger.warn('Orphaned contract event: no row to update yet', { id: event.id, topic });
+      return 'orphaned';
+    }
     await client.query('RELEASE SAVEPOINT apply_event');
     return 'applied';
   } catch (err) {
@@ -168,7 +190,7 @@ async function storeEvent(
  * after a crash or a manual cursor rewind is safe.
  */
 export async function processPage(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
-  const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0 };
+  const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0, orphaned: 0 };
   const client = await db.connect();
 
   try {
@@ -178,6 +200,11 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
       const outcome = await storeEvent(client, contractId, event);
       if (outcome === 'duplicate') result.duplicates++;
       else result[outcome]++;
+      // A parent row may have just arrived; re-apply its orphaned children.
+      if (outcome === 'applied') {
+        const owner = ownerOf(event);
+        if (owner) result.applied += await reapplyOrphans(client, owner);
+      }
     }
     // The paging cursor encodes how far the RPC scanned (the chain tip for a
     // partial page), which is further than the last event's ledger.

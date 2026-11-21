@@ -41,6 +41,9 @@ What to alert on:
 - `/health` `indexer.stale` is `true`, or `indexer.status` is `retention_gap`
 - `Indexer poll failed` logged repeatedly (the `failures` count grows)
 - rows in `contract_events` with `status = 'rejected'`
+- rows in `contract_events` with `status = 'orphaned'` (an UPDATE-type event whose parent row
+  has not arrived yet; `npm run indexer -- orphans` prints them as JSON). They are re-applied
+  automatically once the parent row is indexed.
 
 ## Indexer recovery
 

@@ -6,7 +6,8 @@ import { readState, STATE, writeState } from './stellar';
 const USAGE = `Usage:
   npm run indexer -- status                 Print indexer state as JSON
   npm run indexer -- reset-cursor <ledger>  Re-index from <ledger> (already-stored events are skipped)
-  npm run indexer -- healthcheck            Exit 1 if the indexer has not succeeded recently`;
+  npm run indexer -- healthcheck            Exit 1 if the indexer has not succeeded recently
+  npm run indexer -- orphans                Print orphaned events as JSON`;
 
 export async function run(args: string[]): Promise<number> {
   const [command, arg] = args;
@@ -36,6 +37,14 @@ export async function run(args: string[]): Promise<number> {
       const fresh = Number.isFinite(last) && Date.now() - last < getEnv().INDEXER_STALE_AFTER_MS;
       if (!fresh) console.error(`indexer unhealthy: ${JSON.stringify(state)}`);
       return fresh ? 0 : 1;
+    }
+    case 'orphans': {
+      const { rows } = await pool.query(
+        `SELECT id, ledger, ledger_closed_at, tx_hash, topic, data, indexed_at
+           FROM contract_events WHERE status = 'orphaned' ORDER BY ledger, id`
+      );
+      console.log(JSON.stringify(rows, null, 2));
+      return 0;
     }
     default:
       console.error(USAGE);

@@ -15,14 +15,21 @@ CREATE TABLE IF NOT EXISTS contract_events (
   topic_xdr         TEXT[] NOT NULL,
   value_xdr         TEXT NOT NULL,
   data              JSONB,
-  status            TEXT NOT NULL CHECK (status IN ('applied', 'ignored', 'rejected')),
+  status            TEXT NOT NULL CHECK (status IN ('applied', 'ignored', 'rejected', 'orphaned')),
   error             TEXT,
   indexed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Older databases were created with a CHECK that predates 'orphaned'.
+ALTER TABLE contract_events DROP CONSTRAINT IF EXISTS contract_events_status_check;
+ALTER TABLE contract_events ADD CONSTRAINT contract_events_status_check
+  CHECK (status IN ('applied', 'ignored', 'rejected', 'orphaned'));
+
 CREATE INDEX IF NOT EXISTS idx_contract_events_ledger ON contract_events (ledger);
 CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
   ON contract_events (indexed_at) WHERE status = 'rejected';
+CREATE INDEX IF NOT EXISTS idx_contract_events_orphaned
+  ON contract_events (indexed_at) WHERE status = 'orphaned';
 
 -- folder_cl (owner <-> folder_name); template_id tracks tmpl_set / port_mint.
 CREATE TABLE IF NOT EXISTS folders (
