@@ -7,9 +7,11 @@ responses from the local stack indexing the testnet contract.
 | ------ | ------------------------------------------------ | ------------------------------------- |
 | `GET`  | [`/`](#get-)                                     | Service banner                        |
 | `GET`  | [`/health`](#get-health)                         | API + database health, indexer status |
+| `GET`  | [`/folders`](#get-folders)                       | Folders ordered by claim time         |
 | `GET`  | [`/folders/:address`](#get-foldersaddress)       | Folder claimed by an address          |
 | `GET`  | [`/folders/name/:name`](#get-foldersnamename)    | Folder by name                        |
 | `POST` | [`/folders/lookup`](#post-folderslookup)         | Batch folder lookup by address        |
+| `GET`  | [`/portfolios`](#get-portfolios)                 | Portfolios ordered by mint/update time |
 | `GET`  | [`/portfolios/:address`](#get-portfoliosaddress) | Portfolio NFT minted by an address    |
 | `POST` | [`/portfolios/lookup`](#post-portfolioslookup)   | Batch portfolio lookup by address     |
 | `GET`  | [`/nft/:tokenId/metadata`](#get-nfttokenidmetadata) | ERC-721-style metadata for a portfolio NFT |
@@ -125,6 +127,58 @@ curl localhost:3000/folders/name/smoke-1794262900.folder
 ```
 
 Errors: `400` invalid name, `404` `Folder not found`.
+
+## `GET /folders`
+
+Keyset-paginated list of folders ordered by `claimed_at` (ascending, ties broken by owner).
+Hidden (moderated) folders are excluded.
+
+Query params:
+
+- `order` — only `claimed_at` (default).
+- `limit` — 1–100, default 20.
+- `cursor` — opaque cursor from the previous page's `nextCursor`.
+
+```bash
+curl 'localhost:3000/folders?limit=2'
+```
+
+```json
+{
+  "items": [
+    {
+      "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+      "name": "smoke-1794262900.folder",
+      "templateId": 1,
+      "claimedAt": "2026-11-09T22:22:27.000Z",
+      "updatedAt": "2026-11-09T22:23:07.000Z"
+    }
+  ],
+  "nextCursor": "djE6Y2xhaW1lZF9hdDoyMDI2LTExLTA5VDIyOjIyOjI3LjAwMFo6R0FQQU1UVFZIQjdSWjVEUUhFSU5aTjNHUVlSQ1hYV05DUU5RU1k1WUFVNktSUVVZWDJRSlQyQ00"
+}
+```
+
+Pass `nextCursor` back as `cursor` to get the next page; `nextCursor` is `null` on the last
+page. Cursors are opaque and versioned: a tampered, malformed, or wrong-`order` cursor
+returns `400 Invalid cursor`. Pagination is stable under concurrent inserts (no duplicates
+or gaps) because the cursor is a strict `(claimed_at, owner)` comparison.
+
+Errors: `400` invalid `order`, `limit`, or `cursor`.
+
+## `GET /portfolios`
+
+Keyset-paginated list of portfolios ordered by `minted_at` (default) or `updated_at`
+(ascending, ties broken by owner). Hidden (moderated) portfolios are excluded.
+
+Query params: `order` (`minted_at` | `updated_at`), `limit` (1–100, default 20), `cursor`.
+Response shape is `{ "items": [...], "nextCursor": "…" | null }` with the same item shape as
+[`GET /portfolios/:address`](#get-portfoliosaddress).
+
+```bash
+curl 'localhost:3000/portfolios?order=updated_at&limit=20'
+```
+
+Errors: `400` invalid `order`, `limit`, or `cursor`.
 
 ## `GET /portfolios/:address`
 

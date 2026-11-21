@@ -1,6 +1,7 @@
 import pool from '../db/client';
 import { getEnv } from '../config/env';
 import { NftMetadata, Portfolio } from '../types';
+import { CursorOrder, ListCursor, encodeCursor } from '../http/cursor';
 import { resolveUrl } from './ipfs';
 
 type PortfolioRow = {
@@ -43,12 +44,60 @@ export async function getPortfoliosByAddresses(owners: string[]): Promise<Record
   return result;
 }
 
+export type PortfolioPage = {
+  items: Portfolio[];
+  /** Cursor for the next page, or null when this is the last page. */
+  nextCursor: string | null;
+};
+
+/**
+ * Keyset page of portfolios ordered by `minted_at` or `updated_at` (ties broken
+ * by owner, so the ordering is total). Hidden portfolios are excluded. The
+ * cursor is a strict `(timestamp, owner) > (cursor.at, cursor.owner)`
+ * comparison, which stays stable when rows are inserted concurrently.
+ */
+export async function listPortfolios(options: {
+  order: CursorOrder;
+  limit: number;
+  cursor?: ListCursor;
+}): Promise<PortfolioPage> {
+  const { order, limit, cursor } = options;
+  const params: unknown[] = [];
+  const where: string[] = ['NOT EXISTS (SELECT 1 FROM hidden_portfolios h WHERE h.owner = p.owner)'];
+
+  if (cursor) {
+    params.push(cursor.at, cursor.owner);
+    where.push(`(p.${order}, p.owner) > ($1::timestamptz, $2)`);
+  }
+  params.push(limit + 1);
+
+  const { rows } = await pool.query<PortfolioRow>(
+    `SELECT p.owner, p.template_id, p.ipfs_cid, p.minted_at, p.updated_at FROM portfolios p
+      WHERE ${where.join(' AND ')}
+      ORDER BY p.${order} ASC, p.owner ASC
+      LIMIT $${params.length}`,
+    params
+  );
+
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  const nextCursor =
+    rows.length > limit && last
+      ? encodeCursor({
+          order,
+          at: (order === 'updated_at' ? last.updated_at : last.minted_at).toISOString(),
+          owner: last.owner,
+        })
+      : null;
+
+  return { items: page.map(mapPortfolio), nextCursor };
+}
+
 /**
  * Build the ERC-721-style metadata document for a minted portfolio. The token
  * id is the owner address (the contract keys portfolios by owner). Returns null
  * when the token is unknown, so callers never serve a partial document.
- */
-export async function getPortfolioMetadata(tokenId: string): Promise<NftMetadata | null> {
+ */export async function getPortfolioMetadata(tokenId: string): Promise<NftMetadata | null> {
   const portfolio = await getPortfolio(tokenId);
   if (!portfolio) return null;
 

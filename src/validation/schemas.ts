@@ -50,6 +50,60 @@ export const templateIdSchema = z
  */
 export const tokenIdSchema = stellarAddressSchema;
 
+export const MAX_LIST_LIMIT = 100;
+export const DEFAULT_LIST_LIMIT = 20;
+
+/** `limit` query param: 1–100, defaults to 20. */
+export const listLimitSchema = z
+  .string()
+  .regex(/^\d+$/, 'limit must be a positive integer')
+  .transform(Number)
+  .refine((n) => n >= 1, 'limit must be at least 1')
+  .refine((n) => n <= MAX_LIST_LIMIT, `limit must be at most ${MAX_LIST_LIMIT}`)
+  .default(String(DEFAULT_LIST_LIMIT));
+
+/** Opaque cursor: base64url of `v1:<order>:<timestamp>:<owner>`. */
+export const listCursorSchema = z.string().min(1, 'cursor must not be empty').max(512, 'cursor is too long');
+
+export const folderListQuerySchema = z.object({
+  order: z.enum(['claimed_at']).default('claimed_at'),
+  limit: listLimitSchema,
+  cursor: listCursorSchema.optional(),
+});
+
+export const portfolioListQuerySchema = z.object({
+  order: z.enum(['minted_at', 'updated_at']).default('minted_at'),
+  limit: listLimitSchema,
+  cursor: listCursorSchema.optional(),
+});
+
+export const MAX_LIST_LIMIT = 100;
+export const DEFAULT_LIST_LIMIT = 20;
+
+/** `limit` query param: 1–100, defaults to 20. */
+export const listLimitSchema = z
+  .string()
+  .regex(/^\d+$/, 'limit must be a positive integer')
+  .transform(Number)
+  .refine((n) => n >= 1, 'limit must be at least 1')
+  .refine((n) => n <= MAX_LIST_LIMIT, `limit must be at most ${MAX_LIST_LIMIT}`)
+  .default(String(DEFAULT_LIST_LIMIT));
+
+/** Opaque cursor: base64url of `v1:<order>:<timestamp>:<owner>`. */
+export const listCursorSchema = z.string().min(1, 'cursor must not be empty').max(512, 'cursor is too long');
+
+export const folderListQuerySchema = z.object({
+  order: z.enum(['claimed_at']).default('claimed_at'),
+  limit: listLimitSchema,
+  cursor: listCursorSchema.optional(),
+});
+
+export const portfolioListQuerySchema = z.object({
+  order: z.enum(['minted_at', 'updated_at']).default('minted_at'),
+  limit: listLimitSchema,
+  cursor: listCursorSchema.optional(),
+});
+
 export const ALLOWED_UPLOAD_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'] as const;
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 

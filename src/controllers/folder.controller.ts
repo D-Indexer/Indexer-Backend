@@ -1,8 +1,22 @@
 import { Request, Response } from 'express';
 import * as folderService from '../services/folder';
 import { asyncHandler } from '../middleware/asyncHandler';
-import { addressLookupSchema, folderNameSchema, stellarAddressSchema } from '../validation/schemas';
+import { addressLookupSchema, folderListQuerySchema, folderNameSchema, stellarAddressSchema } from '../validation/schemas';
 import { badRequest, notFound } from '../http/errors';
+import { decodeCursor } from '../http/cursor';
+
+export const list = asyncHandler(async (req: Request, res: Response) => {
+  const parsed = folderListQuerySchema.safeParse(req.query);
+  if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
+
+  const { order, limit, cursor } = parsed.data;
+  const page = await folderService.listFolders({
+    order,
+    limit,
+    cursor: cursor === undefined ? undefined : decodeCursor(cursor, order),
+  });
+  res.json(page);
+});
 
 export const getByAddress = asyncHandler(async (req: Request, res: Response) => {
   const parsed = stellarAddressSchema.safeParse(req.params.address);
