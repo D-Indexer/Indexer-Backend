@@ -36,6 +36,7 @@ const envSchema = z
     INDEXER_START_LEDGER: optionalPositiveInt,
     INDEXER_ON_RETENTION_GAP: z.enum(['halt', 'skip']).default('halt'),
     INDEXER_MAX_BACKOFF_MS: z.coerce.number().int().positive().default(60000),
+    INDEXER_RPC_VERSION_POLICY: z.enum(['warn', 'refuse']).default('warn'),
     INDEXER_STALE_AFTER_MS: z.coerce.number().int().positive().default(120000),
     DB_MAX_CONNECTIONS: z.coerce.number().int().positive().default(10),
     DB_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),

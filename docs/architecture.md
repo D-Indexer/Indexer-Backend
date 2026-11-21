@@ -33,7 +33,7 @@ the API never talks to the RPC.
 
 | Path                                            | Responsibility                                                                                                    |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `src/indexer/rpc.ts`                            | JSON-RPC client for `getEvents` / `getHealth`: timeouts, retries with backoff, URL redaction                      |
+| `src/indexer/rpc.ts`                            | JSON-RPC client for `getEvents` / `getHealth` / `getVersionInfo`: timeouts, retries with backoff, URL redaction |
 | `src/indexer/decode.ts`                         | Decode raw events (Symbol topic, ScVec data) into typed objects                                                   |
 | `src/indexer/handlers.ts`                       | Apply one decoded event to the read model                                                                         |
 | `src/indexer/stellar.ts`                        | Poll loop, page transactions, cursor, retention-gap handling                                                      |
@@ -102,6 +102,37 @@ saved cursor falls outside that window, for example after the indexer has been d
 week, the events in between are no longer available from `getEvents`. By default the indexer
 halts and reports `retention_gap`; see [operations](operations.md#retention-gap). Backfilling
 from archive data is not implemented yet.
+
+## Soroban RPC compatibility
+
+`src/indexer/rpc.ts` talks to Soroban RPC over JSON-RPC directly. The client is tested
+against **stellar-rpc 21.x through 23.x** (`SUPPORTED_RPC_VERSION_RANGE` in
+`src/indexer/rpc.ts`); the minimum supported version is **21.0.0**. Older releases predate
+the `pagination` object in `getEvents` and the `getVersionInfo` method.
+
+What the client relies on:
+
+- `getEvents` with `filters: [{ type: 'contract', contractIds }]` and
+  `pagination: { cursor, limit }` (or `startLedger`), returning `events`, `cursor`,
+  `latestLedger` and `oldestLedger`. Each event carries `type`, `ledger`, `ledgerClosedAt`,
+  `contractId`, `id`, `txHash`, `topic` and `value`. Extra fields added by newer releases
+  (operation/transaction indices, `inSuccessfulContractCall`, unified event types) are
+  ignored, and removed fields such as `pagingToken` are not read.
+- `getHealth` for `oldestLedger` / `latestLedger`.
+- `getVersionInfo` for the RPC version.
+
+At startup the indexer calls `getVersionInfo` and compares the version with the supported
+range. `INDEXER_RPC_VERSION_POLICY=warn` (default) logs a warning and keeps indexing;
+`refuse` exits instead. An unreadable version is treated as unsupported.
+
+Ledger-range errors are detected by JSON-RPC code `-32600`, not by the error message: the
+client then calls `getHealth` and uses its `oldestLedger` / `latestLedger` as the retained
+window. The message regex is only a fallback, so a reworded range error no longer turns a
+retention gap into an endlessly retried generic error.
+
+When bumping the supported range, check the
+[stellar-rpc changelog](https://github.com/stellar/stellar-rpc/blob/main/CHANGELOG.md) for
+`getEvents` changes, update `SUPPORTED_RPC_VERSION_RANGE`, and run the RPC tests.
 
 ## Data model
 

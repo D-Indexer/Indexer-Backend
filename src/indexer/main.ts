@@ -3,7 +3,7 @@ import { getEnv } from '../config/env';
 import pool from '../db/client';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
-import { createRpcClient, redactUrl } from './rpc';
+import { checkRpcVersion, createRpcClient, redactUrl } from './rpc';
 import { createIndexer } from './stellar';
 
 /** Indexer process entrypoint: `npm run start:indexer` (or `dev:indexer`). */
@@ -13,6 +13,17 @@ async function main(): Promise<void> {
 
   const rpc = createRpcClient({ url: env.STELLAR_RPC_URL, timeoutMs: env.STELLAR_RPC_TIMEOUT_MS });
   logger.info('Connecting indexer', { rpc: redactUrl(env.STELLAR_RPC_URL) });
+
+  const rpcVersion = await checkRpcVersion(rpc, env.INDEXER_RPC_VERSION_POLICY);
+  if (rpcVersion.supported) {
+    logger.info('Soroban RPC version is supported', { version: rpcVersion.version });
+  } else {
+    logger.warn('Soroban RPC version is outside the supported range', {
+      version: rpcVersion.version,
+      policy: rpcVersion.policy,
+      supported: '21.0.0 - 23.99.99',
+    });
+  }
 
   const indexer = createIndexer({
     db: pool,

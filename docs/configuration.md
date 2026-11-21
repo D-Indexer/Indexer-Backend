@@ -51,6 +51,7 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `INDEXER_START_LEDGER`            | unset                       | First ledger on an empty database. Unset = oldest ledger the RPC retains.                  |
 | `INDEXER_ON_RETENTION_GAP`        | `halt`                      | `halt` or `skip`. See [operations](operations.md#retention-gap).                           |
 | `INDEXER_MAX_BACKOFF_MS`          | `60000`                     | Cap for exponential backoff after failed polls                                             |
+| `INDEXER_RPC_VERSION_POLICY`      | `warn`                      | `warn` or `refuse` when the RPC version is outside the supported range                     |
 | `INDEXER_STALE_AFTER_MS`          | `120000`                    | Indexer counts as unhealthy after this long without a successful poll                      |
 | `IPFS_TIMEOUT_MS`                 | `30000`                     | Timeout for the Kubo `add` call                                                            |
 | `DB_MAX_CONNECTIONS`              | `10`                        | Pool size, per process                                                                     |

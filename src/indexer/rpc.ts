@@ -37,9 +37,19 @@ export type HealthResult = {
   ledgerRetentionWindow?: number;
 };
 
+/** Result of the RPC `getVersionInfo` method. */
+export type VersionInfo = {
+  version: string;
+  commitHash?: string;
+  buildTimestamp?: string;
+  captiveCoreVersion?: string;
+  protocolVersion?: number;
+};
+
 export interface EventSource {
   getEvents(params: GetEventsParams): Promise<GetEventsResult>;
   getHealth(): Promise<HealthResult>;
+  getVersionInfo?(): Promise<VersionInfo>;
 }
 
 export class RpcError extends Error {
@@ -66,6 +76,75 @@ export class LedgerRangeError extends RpcError {
 }
 
 const RANGE_RE = /ledger range:\s*(\d+)\s*-\s*(\d+)/;
+
+/**
+ * Soroban RPC versions whose `getEvents` shape this client is tested against.
+ * See docs/architecture.md#soroban-rpc-compatibility.
+ */
+export const SUPPORTED_RPC_VERSION_RANGE = { min: '21.0.0', max: '23.99.99' } as const;
+
+export type RpcVersionPolicy = 'warn' | 'refuse';
+
+export type RpcVersionCheck = {
+  version: string;
+  supported: boolean;
+  policy: RpcVersionPolicy;
+};
+
+function parseVersion(version: string): [number, number, number] | null {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+function compareVersions(a: [number, number, number], b: [number, number, number]): number {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+/** True when `version` falls inside `SUPPORTED_RPC_VERSION_RANGE` (inclusive). */
+export function isSupportedRpcVersion(version: string): boolean {
+  const parsed = parseVersion(version);
+  if (!parsed) return false;
+  return (
+    compareVersions(parsed, parseVersion(SUPPORTED_RPC_VERSION_RANGE.min)!) >= 0 &&
+    compareVersions(parsed, parseVersion(SUPPORTED_RPC_VERSION_RANGE.max)!) <= 0
+  );
+}
+
+/**
+ * Read the RPC version and decide whether it is supported. With policy `refuse`
+ * an unsupported (or unreadable) version throws; with `warn` it only reports.
+ */
+export async function checkRpcVersion(
+  rpc: Pick<EventSource, 'getVersionInfo'>,
+  policy: RpcVersionPolicy
+): Promise<RpcVersionCheck> {
+  let version: string;
+  try {
+    if (!rpc.getVersionInfo) throw new Error('getVersionInfo is not available');
+    version = (await rpc.getVersionInfo()).version;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    if (policy === 'refuse') {
+      throw new RpcError(`Could not read the Soroban RPC version: ${reason}`, undefined, false);
+    }
+    return { version: 'unknown', supported: false, policy };
+  }
+
+  const supported = isSupportedRpcVersion(version);
+  if (!supported && policy === 'refuse') {
+    throw new RpcError(
+      `Soroban RPC version ${version} is outside the supported range ` +
+        `${SUPPORTED_RPC_VERSION_RANGE.min} - ${SUPPORTED_RPC_VERSION_RANGE.max}. ` +
+        'See docs/architecture.md#soroban-rpc-compatibility.',
+      undefined,
+      false
+    );
+  }
+  return { version, supported, policy };
+}
 
 export type RpcClientOptions = {
   url: string;
@@ -125,6 +204,15 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
       if (range) {
         throw new LedgerRangeError(body.error.message, Number(range[1]), Number(range[2]));
       }
+      // -32600 is "invalid request". The RPC uses it for out-of-range ledgers and
+      // cursors, but the message wording has changed between releases, so ask
+      // getHealth for the retained window instead of trusting the text.
+      if (body.error.code === -32600) {
+        const health = await callOnce<HealthResult>('getHealth');
+        if (health.oldestLedger !== undefined && health.latestLedger !== undefined) {
+          throw new LedgerRangeError(body.error.message, health.oldestLedger, health.latestLedger);
+        }
+      }
       // -32603 is the JSON-RPC "internal error" code; treat it as transient.
       throw new RpcError(`${method}: ${body.error.message}`, body.error.code, body.error.code === -32603);
     }
@@ -160,6 +248,9 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     },
     getHealth() {
       return call<HealthResult>('getHealth');
+    },
+    getVersionInfo() {
+      return call<VersionInfo>('getVersionInfo');
     },
   };
 }
