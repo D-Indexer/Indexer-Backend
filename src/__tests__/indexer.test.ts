@@ -56,6 +56,8 @@ function fakeRpc(overrides: Partial<EventSource> = {}): jest.Mocked<EventSource>
   return {
     getEvents: jest.fn().mockResolvedValue(page([])),
     getHealth: jest.fn().mockResolvedValue({ status: 'healthy', latestLedger: 200, oldestLedger: 100 }),
+    getNetwork: jest.fn().mockResolvedValue({ passphrase: 'Test SDF Network ; September 2015' }),
+    getLedgerEntries: jest.fn().mockResolvedValue({ entries: [], latestLedger: 200 }),
     ...overrides,
   } as jest.Mocked<EventSource>;
 }

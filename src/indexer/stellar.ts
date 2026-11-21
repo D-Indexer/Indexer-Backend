@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { Contract, xdr } from '@stellar/stellar-sdk';
 import { decodeEvent, decodeTopic, DecodedEvent, EventDecodeError } from './decode';
 import { applyEvent } from './handlers';
 import {
@@ -21,6 +22,7 @@ export const STATE = {
   status: 'status',
   lastError: 'last_error',
   lastGap: 'last_gap',
+  networkPassphrase: 'network_passphrase',
 } as const;
 
 export type IndexerStatus = 'ok' | 'error' | 'retention_gap';
@@ -49,6 +51,11 @@ export type IndexerConfig = {
   tickTimeoutMs?: number;
   /** How long `stop()` waits for a stuck tick before giving up on it. */
   shutdownTimeoutMs?: number;
+  /**
+   * Network passphrase the RPC must serve. When set, startup rejects an RPC on
+   * another network and a database last used with a different passphrase.
+   */
+  networkPassphrase?: string;
 };
 
 export type IndexerDependencies = {
@@ -132,6 +139,83 @@ export async function writeState(
       );
     }
   }
+}
+
+/** Thrown when the indexer refuses to start because of a network/contract mismatch. */
+export class StartupValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StartupValidationError';
+  }
+}
+
+/** Ledger key for a contract instance, as base64 XDR accepted by `getLedgerEntries`. */
+export function contractInstanceKey(contractId: string): string {
+  return xdr.LedgerKey.contractData(
+    new xdr.LedgerKeyContractData({
+      contract: new Contract(contractId).address().toScAddress(),
+      key: xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: xdr.ContractDataDurability.persistent(),
+    })
+  ).toXDR('base64');
+}
+
+/** WASM hash of a contract instance entry, or null when the entry is not a contract instance. */
+export function wasmHashFromEntry(entryXdr: string): string | null {
+  try {
+    const entry = xdr.LedgerEntryData.fromXDR(entryXdr, 'base64');
+    if (entry.switch().name !== 'contractData') return null;
+    const data = entry.contractData();
+    if (data.key().switch().name !== 'scvLedgerKeyContractInstance') return null;
+    const executable = data.val().instance().executable();
+    if (executable.switch().name !== 'contractExecutableWasm') return null;
+    return executable.wasmHash().toString('hex');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Startup checks: the RPC must serve the configured network, the contract must
+ * exist on it, and the database must not have been used with another network.
+ * Logs the network, protocol version and contract WASM hash on success.
+ */
+export async function validateStartup(deps: IndexerDependencies): Promise<void> {
+  const { contractId, networkPassphrase } = deps.config;
+  const network = await deps.rpc.getNetwork(deps.signal);
+
+  if (networkPassphrase && network.passphrase !== networkPassphrase) {
+    throw new StartupValidationError(
+      `RPC network passphrase "${network.passphrase}" does not match ` +
+        `STELLAR_NETWORK_PASSPHRASE "${networkPassphrase}". Refusing to index.`
+    );
+  }
+
+  const { entries } = await deps.rpc.getLedgerEntries([contractInstanceKey(contractId)], deps.signal);
+  const entry = entries?.[0];
+  if (!entry) {
+    throw new StartupValidationError(
+      `Contract ${contractId} was not found on network "${network.passphrase}". ` +
+        'Check FOLDER_CONTRACT_ID and STELLAR_RPC_URL.'
+    );
+  }
+
+  const state = await readState(deps.db);
+  const stored = state[STATE.networkPassphrase];
+  if (stored && stored !== network.passphrase) {
+    throw new StartupValidationError(
+      `Database was last used with network passphrase "${stored}", but the RPC serves ` +
+        `"${network.passphrase}". Refusing to start; use a database for this network or reset it.`
+    );
+  }
+  if (!stored) await writeState(deps.db, { [STATE.networkPassphrase]: network.passphrase });
+
+  logger.info('Indexer startup checks passed', {
+    network: network.passphrase,
+    protocolVersion: network.protocolVersion ?? null,
+    contractId,
+    wasmHash: entry.xdr ? wasmHashFromEntry(entry.xdr) : null,
+  });
 }
 
 /**

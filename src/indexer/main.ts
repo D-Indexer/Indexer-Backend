@@ -4,7 +4,7 @@ import pool from '../db/client';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
 import { createRpcClient, redactUrl } from './rpc';
-import { createIndexer } from './stellar';
+import { createIndexer, validateStartup } from './stellar';
 
 /** Indexer process entrypoint: `npm run start:indexer` (or `dev:indexer`). */
 async function main(): Promise<void> {
@@ -16,21 +16,26 @@ async function main(): Promise<void> {
 
   const controller = new AbortController();
 
+  const config = {
+    contractId: env.FOLDER_CONTRACT_ID,
+    pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
+    pageLimit: env.INDEXER_PAGE_LIMIT,
+    maxPagesPerTick: env.INDEXER_MAX_PAGES_PER_TICK,
+    startLedger: env.INDEXER_START_LEDGER,
+    onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
+    maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
+    tickTimeoutMs: env.INDEXER_TICK_TIMEOUT_MS,
+    shutdownTimeoutMs: env.SHUTDOWN_TIMEOUT_MS,
+    networkPassphrase: env.STELLAR_NETWORK_PASSPHRASE,
+  };
+
+  await validateStartup({ db: pool, rpc, config, signal: controller.signal });
+
   const indexer = createIndexer({
     db: pool,
     rpc,
     signal: controller.signal,
-    config: {
-      contractId: env.FOLDER_CONTRACT_ID,
-      pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
-      pageLimit: env.INDEXER_PAGE_LIMIT,
-      maxPagesPerTick: env.INDEXER_MAX_PAGES_PER_TICK,
-      startLedger: env.INDEXER_START_LEDGER,
-      onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
-      maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
-      tickTimeoutMs: env.INDEXER_TICK_TIMEOUT_MS,
-      shutdownTimeoutMs: env.SHUTDOWN_TIMEOUT_MS,
-    },
+    config,
   });
 
   const shutdown = async (signal: string) => {

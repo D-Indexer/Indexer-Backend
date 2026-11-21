@@ -37,9 +37,30 @@ export type HealthResult = {
   ledgerRetentionWindow?: number;
 };
 
+/** Result of `getNetwork`: the network the RPC is serving. */
+export type NetworkResult = {
+  passphrase: string;
+  protocolVersion?: number;
+};
+
+/** One entry of a `getLedgerEntries` response. */
+export type LedgerEntryResult = {
+  key: string;
+  xdr?: string;
+  lastModifiedLedgerSeq?: number;
+  liveUntilLedgerSeq?: number;
+};
+
+export type GetLedgerEntriesResult = {
+  entries: LedgerEntryResult[] | null;
+  latestLedger: number;
+};
+
 export interface EventSource {
   getEvents(params: GetEventsParams, signal?: AbortSignal): Promise<GetEventsResult>;
   getHealth(signal?: AbortSignal): Promise<HealthResult>;
+  getNetwork(signal?: AbortSignal): Promise<NetworkResult>;
+  getLedgerEntries(keys: string[], signal?: AbortSignal): Promise<GetLedgerEntriesResult>;
 }
 
 /** Thrown when a call is cancelled through its AbortSignal (e.g. indexer shutdown). */
@@ -201,6 +222,12 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     },
     getHealth(signal) {
       return call<HealthResult>('getHealth', undefined, signal);
+    },
+    getNetwork(signal) {
+      return call<NetworkResult>('getNetwork', undefined, signal);
+    },
+    getLedgerEntries(keys, signal) {
+      return call<GetLedgerEntriesResult>('getLedgerEntries', { keys }, signal);
     },
   };
 }
