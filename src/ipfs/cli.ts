@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import 'dotenv/config';
 import pool from '../db/client';
 import { runGc } from './gc';

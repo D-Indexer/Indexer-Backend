@@ -6,7 +6,7 @@ describe('image sanitization', () => {
     const source = await sharp({
       create: { width: 2, height: 2, channels: 3, background: '#ff0000' },
     })
-      .withMetadata({ exif: Buffer.from('Exif') })
+      .withMetadata({ exif: { IFD0: { Make: 'test-camera' } } })
       .jpeg()
       .toBuffer();
 
