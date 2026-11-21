@@ -43,6 +43,8 @@ const envSchema = z
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+    /** How long a read with `minLedger` waits for the indexer to catch up before answering 425. */
+    API_MIN_LEDGER_WAIT_MS: z.coerce.number().int().min(0).default(3000),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN?.trim()) {

@@ -9,6 +9,7 @@ import { errorHandler } from './middleware/errorHandler';
 import { multerErrorHandler } from './middleware/multerErrorHandler';
 import { notFoundHandler } from './middleware/notFound';
 import { requestId } from './middleware/requestId';
+import { readConsistency } from './middleware/readConsistency';
 import { securityHeaders } from './middleware/securityHeaders';
 import { AppEnv } from './config/env';
 
@@ -44,9 +45,9 @@ export function createApp(env: AppEnv) {
     });
   });
 
-  app.use('/folders', folderRoutes);
-  app.use('/templates', templateRoutes);
-  app.use('/portfolios', portfolioRoutes);
+  app.use('/folders', readConsistency, folderRoutes);
+  app.use('/templates', readConsistency, templateRoutes);
+  app.use('/portfolios', readConsistency, portfolioRoutes);
   app.use('/upload', uploadRoutes);
   app.use('/health', healthRoutes);
 

@@ -26,6 +26,7 @@ Every error has the same shape:
 | ------ | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `400`  | Invalid path parameter or upload                      | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit` |
 | `404`  | Resource not indexed, or unknown route                | `Folder not found`, `Portfolio not found`, `Template not found`, `Route not found` (also includes `path`)                                                                                                                                                                    |
+| `425`  | `minLedger` not indexed yet (see below)               | `Indexer has not reached ledger 5654242 yet (currently at 5654230)`                                                                                                                                                                                                          |
 | `502`  | IPFS node unreachable or returned an error            | `IPFS node unreachable`, `IPFS add failed with status 500`                                                                                                                                                                                                                   |
 | `503`  | `/health` only: database unreachable                  | see below                                                                                                                                                                                                                                                                    |
 | `504`  | IPFS node timed out (`IPFS_TIMEOUT_MS`)               | `IPFS node timed out`                                                                                                                                                                                                                                                        |
@@ -42,6 +43,37 @@ to correlate; anything else is replaced with a UUID.
 - `:address` is a Stellar strkey: `G…` (account) or `C…` (contract), 56 characters.
 - `:name` is 1–64 characters of `A-Z a-z 0-9 . _ -`. On-chain names end in `.folder`.
 - `:id` is a non-negative integer up to `4294967295` (the contract stores `u32`).
+- `minLedger` (query or `X-Min-Ledger` header) is a non-negative integer ledger sequence.
+
+### Read-your-writes (`minLedger`)
+
+The indexer lags the chain by at least one poll interval, so a read right after a
+transaction can miss it. Every read endpoint (`/folders`, `/templates`, `/portfolios`)
+answers with an `X-Indexed-Ledger` header: the highest ledger the indexer has applied
+(cached for ≤ 1 s per process).
+
+Pass the ledger your transaction was included in as `?minLedger=<n>` (or the
+`X-Min-Ledger` header) to get read-your-writes semantics:
+
+1. If the indexer is already at or past `n`, the read is served normally.
+2. Otherwise the API waits up to `API_MIN_LEDGER_WAIT_MS` (default 3000 ms) for the
+   indexer to catch up, then answers `425 Too Early` with `Retry-After: 1` and the
+   current ledger in the body.
+3. `404` therefore means "the indexer is at or past `minLedger` and the resource is
+   still missing" — it does not exist.
+
+```bash
+curl -i "localhost:3000/folders/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM?minLedger=5654242"
+# HTTP/1.1 425 Too Early
+# Retry-After: 1
+# X-Indexed-Ledger: 5654230
+{ "error": "Indexer has not reached ledger 5654242 yet (currently at 5654230)", "requestId": "…" }
+```
+
+Frontend pattern: after submitting a transaction, read the ledger from the
+transaction result (`latestLedger` / `ledger` of the `getTransaction` response), then
+retry the read with `minLedger` set to it. On `425`, wait `Retry-After` seconds and
+retry; on `404`, the resource genuinely does not exist.
 
 ## `GET /`
 

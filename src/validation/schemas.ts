@@ -17,6 +17,14 @@ export const templateIdSchema = z
   .transform(Number)
   .refine((n) => n <= 0xffffffff, 'Template ID must be at most 4294967295');
 
+/** `?minLedger=<n>` / `X-Min-Ledger`: read-your-writes guard, a non-negative ledger sequence. */
+export const minLedgerSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+$/, 'minLedger must be a non-negative integer')
+  .transform(Number)
+  .refine((n) => Number.isSafeInteger(n), 'minLedger is too large');
+
 export const ALLOWED_UPLOAD_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'] as const;
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 

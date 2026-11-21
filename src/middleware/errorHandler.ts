@@ -15,6 +15,10 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     error: err instanceof Error ? err.message : err,
   });
 
+  if (err instanceof HttpError) {
+    for (const [name, value] of Object.entries(err.headers)) res.setHeader(name, value);
+  }
+
   res.status(statusCode).json({
     error: message,
     requestId: _req.id,
