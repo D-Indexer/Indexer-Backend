@@ -87,6 +87,8 @@ const envSchema = z
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
     SHUTDOWN_FORCE_CLOSE_MS: z.coerce.number().int().positive().default(8000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+    HEALTHCHECK_IPFS_TIMEOUT_MS: z.coerce.number().int().positive().default(1000),
+    HEALTHCHECK_CACHE_MS: z.coerce.number().int().nonnegative().default(1000),
   })
   .superRefine((env, ctx) => {
     if (env.SHUTDOWN_FORCE_CLOSE_MS >= env.SHUTDOWN_TIMEOUT_MS) {

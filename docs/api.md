@@ -7,6 +7,8 @@ responses from the local stack indexing the testnet contract.
 | ------ | ------------------------------------------------ | ------------------------------------- |
 | `GET`  | [`/`](#get-)                                     | Service banner                        |
 | `GET`  | [`/health`](#get-health)                         | API + database health, indexer status |
+| `GET`  | [`/health/live`](#get-healthlive)                | Liveness probe (no I/O)               |
+| `GET`  | [`/health/ready`](#get-healthready)              | Readiness probe (DB + Kubo)           |
 | `GET`  | [`/folders/:address`](#get-foldersaddress)       | Folder claimed by an address          |
 | `GET`  | [`/folders/name/:name`](#get-foldersnamename)    | Folder by name                        |
 | `GET`  | [`/portfolios/:address`](#get-portfoliosaddress) | Portfolio NFT minted by an address    |
@@ -48,6 +50,38 @@ to correlate; anything else is replaced with a UUID.
 ```json
 { "name": "D-Indexer-Backend", "status": "ok", "docs": "/health" }
 ```
+
+## `GET /health/live`
+
+Liveness probe: `200` whenever the process is up and the event loop answers. It
+performs no I/O, so a database or Kubo outage never makes an orchestrator restart
+a healthy pod. The image's `HEALTHCHECK` uses it.
+
+```json
+{ "status": "ok", "requestId": "03a1e532-cabc-4f9a-bfd7-b7242bb46db2" }
+```
+
+## `GET /health/ready`
+
+Readiness probe: `200` only when the API can serve traffic — not shutting down,
+the database answers within `HEALTHCHECK_DATABASE_TIMEOUT_MS`, and the Kubo node
+answers `/api/v0/version` within `HEALTHCHECK_IPFS_TIMEOUT_MS`. Results are cached
+for `HEALTHCHECK_CACHE_MS` (~1 s) so frequent probes cannot storm dependencies.
+
+```json
+{
+  "status": "ok",
+  "dependencies": {
+    "db": { "status": "ok", "latencyMs": 3 },
+    "ipfs": { "status": "ok", "latencyMs": 11 }
+  },
+  "requestId": "03a1e532-cabc-4f9a-bfd7-b7242bb46db2"
+}
+```
+
+`503` when a dependency is unreachable (`status: "degraded"`, the failing entry
+reports `"status": "unreachable"`), and `503` with `status: "shutting_down"` once
+the process received `SIGTERM`/`SIGINT` (dependencies are reported as `skipped`).
 
 ## `GET /health`
 

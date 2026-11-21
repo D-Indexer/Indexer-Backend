@@ -57,7 +57,9 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `DB_MAX_CONNECTIONS`              | `10`                        | Pool size, per process                                                                     |
 | `DB_IDLE_TIMEOUT_MS`              | `30000`                     | Pool idle timeout                                                                          |
 | `DB_CONNECTION_TIMEOUT_MS`        | `5000`                      | Pool connection timeout                                                                    |
-| `HEALTHCHECK_DATABASE_TIMEOUT_MS` | `2000`                      | DB timeout for `GET /health`                                                               |
+| `HEALTHCHECK_DATABASE_TIMEOUT_MS` | `2000`                      | DB timeout for `GET /health` and `GET /health/ready`                                       |
+| `HEALTHCHECK_IPFS_TIMEOUT_MS`     | `1000`                      | Timeout for the Kubo `/api/v0/version` probe in `GET /health/ready`                        |
+| `HEALTHCHECK_CACHE_MS`            | `1000`                      | Reuse readiness dependency results for this long (0 disables caching)                      |
 | `SHUTDOWN_TIMEOUT_MS`             | `10000`                     | Graceful shutdown limit                                                                    |
 | `SHUTDOWN_FORCE_CLOSE_MS`         | `8000`                      | Force-close remaining connections at this deadline (must be < `SHUTDOWN_TIMEOUT_MS`)       |
 

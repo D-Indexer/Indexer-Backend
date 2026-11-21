@@ -17,7 +17,9 @@ horizontally.
 ## Health
 
 - **API**: `GET /health` returns `200` when Postgres answers, `503` otherwise, and includes
-  the indexer's status ([api.md](api.md#get-health)). The image's `HEALTHCHECK` uses it.
+  the indexer's status ([api.md](api.md#get-health)). The image's `HEALTHCHECK` uses
+  `GET /health/live` (no I/O); orchestrators should use `GET /health/ready` for
+  readiness, which also checks Kubo and fails while shutting down.
 - **Indexer**: `npm run indexer -- healthcheck` (or `node dist/indexer/cli.js healthcheck`
   in the image) exits `1` if the indexer hasn't completed a poll within
   `INDEXER_STALE_AFTER_MS`. docker-compose uses it as the indexer's healthcheck.
