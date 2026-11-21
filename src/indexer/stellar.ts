@@ -13,6 +13,8 @@ export const STATE = {
   status: 'status',
   lastError: 'last_error',
   lastGap: 'last_gap',
+  /** Bumped by every state write; guards cursor writes against a concurrent reset. */
+  version: 'state_version',
 } as const;
 
 export type IndexerStatus = 'ok' | 'error' | 'retention_gap';
@@ -94,12 +96,64 @@ export async function writeState(
       await db.query('DELETE FROM indexer_state WHERE key = $1', [key]);
     } else {
       await db.query(
-        `INSERT INTO indexer_state (key, value, updated_at) VALUES ($1, $2, NOW())
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        `INSERT INTO indexer_state (key, value, version, updated_at) VALUES ($1, $2, 1, NOW())
+         ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value, version = indexer_state.version + 1, updated_at = NOW()`,
         [key, value]
       );
     }
   }
+}
+
+/** Current state version (0 when the indexer has never written state). */
+export function stateVersion(state: Partial<Record<string, string>>): number {
+  return Number(state[STATE.version] ?? 0) || 0;
+}
+
+/**
+ * Write state only if it has not changed since `expectedVersion` was read.
+ * Returns false when another writer (e.g. `reset-cursor`) got there first.
+ */
+export async function writeStateIfUnchanged(
+  db: Pick<Pool, 'query'>,
+  expectedVersion: number,
+  entries: Partial<Record<string, string | null>>
+): Promise<boolean> {
+  const { rows } = await db.query<{ value: string }>(
+    `UPDATE indexer_state
+        SET value = $2, version = version + 1, updated_at = NOW()
+      WHERE key = $1 AND version = $3
+      RETURNING value`,
+    [STATE.version, String(expectedVersion + 1), expectedVersion]
+  );
+  if (rows.length === 0) return false;
+  for (const [key, value] of Object.entries(entries)) {
+    if (value === null || value === undefined) {
+      await db.query('DELETE FROM indexer_state WHERE key = $1', [key]);
+    } else {
+      await db.query(
+        `INSERT INTO indexer_state (key, value, version, updated_at) VALUES ($1, $2, 1, NOW())
+         ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value, version = indexer_state.version + 1, updated_at = NOW()`,
+        [key, value]
+      );
+    }
+  }
+  return true;
+}
+
+/** Record an operator command in `operator_actions`. */
+export async function recordOperatorAction(
+  db: Pick<Pool, 'query'>,
+  action: string,
+  target: string | null,
+  details: Record<string, unknown> = {}
+): Promise<void> {
+  await db.query('INSERT INTO operator_actions (action, target, details) VALUES ($1, $2, $3)', [
+    action,
+    target,
+    JSON.stringify(details),
+  ]);
 }
 
 /**
@@ -195,6 +249,14 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
 
   try {
     await client.query('BEGIN');
+    // Read the state version inside the transaction: if an operator resets the
+    // cursor while this page is in flight, the guard below fails and the page
+    // is discarded instead of overwriting the reset.
+    const { rows } = await client.query<{ value: string }>(
+      'SELECT value FROM indexer_state WHERE key = $1',
+      [STATE.version]
+    );
+    const expectedVersion = Number(rows[0]?.value ?? 0) || 0;
     for (const event of page.events) {
       if (event.contractId !== contractId) continue;
       const outcome = await storeEvent(client, contractId, event);
@@ -209,7 +271,7 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
     // The paging cursor encodes how far the RPC scanned (the chain tip for a
     // partial page), which is further than the last event's ledger.
     const lastLedger = scannedLedger(page);
-    await writeState(client, {
+    const written = await writeStateIfUnchanged(client, expectedVersion, {
       [STATE.cursor]: page.cursor,
       [STATE.startLedger]: null,
       [STATE.lastLedger]: String(lastLedger),
@@ -217,6 +279,15 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
       [STATE.status]: 'ok',
       [STATE.lastError]: null,
     });
+    if (!written) {
+      // A reset-cursor landed while this page was in flight: drop the page so
+      // indexing resumes from the ledger the operator asked for.
+      await client.query('ROLLBACK');
+      logger.warn('Discarded in-flight page: indexer state changed during the poll', {
+        cursor: page.cursor,
+      });
+      return result;
+    }
     await client.query('COMMIT');
     return result;
   } catch (err) {
@@ -311,9 +382,12 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
   if (page.events.length > 0) {
     logger.info('Indexed events', { ...result, lastLedger: page.events[page.events.length - 1].ledger });
   }
-  return { events: page.events.length, result };
+  // A page discarded by a concurrent reset must not be followed by another page
+  // from the stale cursor; report it as caught up so the next tick re-reads state.
+  const state = await readState(deps.db);
+  const discarded = state[STATE.cursor] !== page.cursor && state[STATE.startLedger] !== undefined;
+  return { events: discarded ? 0 : page.events.length, result };
 }
-
 export type RunningIndexer = {
   /** Stop polling; resolves once any in-flight poll has finished. */
   stop: () => Promise<void>;

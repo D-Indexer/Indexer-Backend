@@ -143,8 +143,20 @@ CREATE TABLE IF NOT EXISTS admins (
 );
 
 -- Indexer cursor and status, written in the same transaction as event data.
+-- `version` is bumped by every write; a page only commits its cursor if the
+-- version it read is still current, so a concurrent `reset-cursor` wins.
 CREATE TABLE IF NOT EXISTS indexer_state (
   key         TEXT PRIMARY KEY,
   value       TEXT NOT NULL,
+  version     BIGINT NOT NULL DEFAULT 0,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Audit trail for operator commands (e.g. `reset-cursor`).
+CREATE TABLE IF NOT EXISTS operator_actions (
+  id          BIGSERIAL PRIMARY KEY,
+  action      TEXT NOT NULL,
+  target      TEXT,
+  details     JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
