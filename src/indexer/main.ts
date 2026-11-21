@@ -23,6 +23,7 @@ async function main(): Promise<void> {
       pageLimit: env.INDEXER_PAGE_LIMIT,
       startLedger: env.INDEXER_START_LEDGER,
       onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
+      maxGapResumeAttempts: env.INDEXER_MAX_GAP_RESUME_ATTEMPTS,
       maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
     },
   });

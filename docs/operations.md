@@ -65,6 +65,13 @@ checking with backoff but doesn't move. Choose one:
    ```
    Or set `INDEXER_ON_RETENTION_GAP=skip` and restart. It does the same automatically
    now and in future, recording the gap in `indexer_state.last_gap`.
+
+   The indexer resumes at the RPC's `oldestLedger` itself, not `oldestLedger + 1`:
+   `getEvents` treats `startLedger` as inclusive, so the oldest retained ledger is
+   still indexed. `last_gap` records the exact missing range
+   (`missedFrom`..`missedTo`) and the ledger it actually resumed at (`resumedAt`).
+   If the retention window moves forward while resuming, it retries from the new
+   `oldestLedger`, bounded by `INDEXER_MAX_GAP_RESUME_ATTEMPTS` (default 5).
 2. **Rebuild from an RPC with longer retention.** Point `STELLAR_RPC_URL` at an RPC that
    still has the missing ledgers (self-hosted with a larger retention window, or a provider
    with history), run `reset-cursor` to the first missing ledger, and let it catch up. Then

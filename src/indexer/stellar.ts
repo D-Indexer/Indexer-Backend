@@ -31,6 +31,11 @@ export type IndexerConfig = {
   maxBackoffMs: number;
   /** Max pages fetched back-to-back in one tick while catching up. */
   maxPagesPerTick?: number;
+  /**
+   * Max attempts to resume after a retention gap while the RPC's oldest retained
+   * ledger keeps moving forward. Defaults to 5.
+   */
+  maxGapResumeAttempts?: number;
 };
 
 export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerConfig };
@@ -284,6 +289,56 @@ function requestedLedger(params: GetEventsParams): number {
 }
 
 /**
+ * Resume after a retention gap at the oldest ledger the RPC still retains.
+ *
+ * `oldestLedger` is inclusive: `getEvents` with `startLedger = oldestLedger`
+ * returns events in that ledger, so resuming at `oldestLedger + 1` would drop
+ * them. The window moves forward while we retry, so a resume attempt can itself
+ * fall out of range; retry from the new oldest ledger, bounded by
+ * `maxGapResumeAttempts`.
+ */
+async function resumeAfterGap(
+  deps: IndexerDependencies,
+  params: GetEventsParams,
+  requested: number,
+  oldestLedger: number
+): Promise<GetEventsResult> {
+  const maxAttempts = Math.max(1, deps.config.maxGapResumeAttempts ?? 5);
+  let resumeAt = oldestLedger;
+
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const page = await deps.rpc.getEvents({
+        contractId: params.contractId,
+        limit: params.limit,
+        startLedger: resumeAt,
+      });
+      await writeState(deps.db, {
+        [STATE.lastGap]: JSON.stringify({
+          missedFrom: requested,
+          missedTo: resumeAt - 1,
+          resumedAt: resumeAt,
+          at: new Date().toISOString(),
+        }),
+      });
+      return page;
+    } catch (err) {
+      if (!(err instanceof LedgerRangeError) || resumeAt >= err.oldestLedger) throw err;
+      if (attempt >= maxAttempts) {
+        throw new RetentionGapError(requested, err.oldestLedger);
+      }
+      logger.warn('Retention window moved while resuming; retrying from the new oldest ledger', {
+        attempt,
+        maxAttempts,
+        resumeAt,
+        oldestLedger: err.oldestLedger,
+      });
+      resumeAt = err.oldestLedger;
+    }
+  }
+}
+
+/**
  * Fetch and persist one page. Returns the number of events in the page so the
  * caller can keep paging while it is full.
  */
@@ -307,26 +362,14 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
       throw gap;
     }
 
-    // Resume from the oldest retained ledger and record what was missed.
-    const resumeAt = err.oldestLedger + 1;
+    // Resume from the oldest retained ledger (inclusive) and record what was missed.
     logger.warn(
       fromConfig
         ? 'INDEXER_START_LEDGER is older than the RPC retains; starting at the oldest retained ledger'
         : 'Retention gap: skipping to the oldest retained ledger (INDEXER_ON_RETENTION_GAP=skip)',
-      { missedFrom: requested, resumeAt }
+      { missedFrom: requested, resumeAt: err.oldestLedger }
     );
-    await writeState(deps.db, {
-      [STATE.lastGap]: JSON.stringify({
-        missedFrom: requested,
-        resumedAt: resumeAt,
-        at: new Date().toISOString(),
-      }),
-    });
-    page = await deps.rpc.getEvents({
-      contractId: params.contractId,
-      limit: params.limit,
-      startLedger: resumeAt,
-    });
+    page = await resumeAfterGap(deps, params, requested, err.oldestLedger);
   }
 
   const result = await processPage(deps.db, deps.config.contractId, page);

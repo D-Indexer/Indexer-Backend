@@ -221,10 +221,56 @@ describe('pollOnce', () => {
     expect(rpc.getEvents).toHaveBeenLastCalledWith({
       contractId: TESTNET_CONTRACT,
       limit: 100,
-      startLedger: 101,
+      startLedger: 100,
     });
     const gap = calls.find((c) => c.params?.[0] === 'last_gap');
-    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({ missedFrom: 50, resumedAt: 101 });
+    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({
+      missedFrom: 50,
+      missedTo: 99,
+      resumedAt: 100,
+    });
+  });
+
+  it('retries from the new oldest ledger when the window moves while resuming', async () => {
+    const { db, calls } = fakeDb({ state: { start_ledger: '50' } });
+    const rpc = fakeRpc({
+      getEvents: jest
+        .fn()
+        .mockRejectedValueOnce(new LedgerRangeError('range', 100, 200))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 105, 210))
+        .mockResolvedValueOnce(page([])),
+    });
+
+    await pollOnce({ db, rpc, config: { ...config, onRetentionGap: 'skip' } });
+
+    expect(rpc.getEvents.mock.calls.map(([p]) => p.startLedger)).toEqual([50, 100, 105]);
+    const gap = calls.find((c) => c.params?.[0] === 'last_gap');
+    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({
+      missedFrom: 50,
+      missedTo: 104,
+      resumedAt: 105,
+    });
+  });
+
+  it('gives up after a bounded number of resume attempts', async () => {
+    const { db } = fakeDb({ state: { start_ledger: '50' } });
+    const rpc = fakeRpc({
+      getEvents: jest
+        .fn()
+        .mockRejectedValueOnce(new LedgerRangeError('range', 100, 200))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 101, 201))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 102, 202))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 103, 203)),
+    });
+
+    const err = await pollOnce({
+      db,
+      rpc,
+      config: { ...config, onRetentionGap: 'skip', maxGapResumeAttempts: 2 },
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(RetentionGapError);
+    expect(rpc.getEvents).toHaveBeenCalledTimes(3);
   });
 
   it('clamps an old INDEXER_START_LEDGER on an empty database instead of halting', async () => {
@@ -241,10 +287,14 @@ describe('pollOnce', () => {
     expect(rpc.getEvents).toHaveBeenLastCalledWith({
       contractId: TESTNET_CONTRACT,
       limit: 100,
-      startLedger: 101,
+      startLedger: 100,
     });
     const gap = calls.find((c) => c.params?.[0] === 'last_gap');
-    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({ missedFrom: 5, resumedAt: 101 });
+    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({
+      missedFrom: 5,
+      missedTo: 99,
+      resumedAt: 100,
+    });
   });
 
   it('does not treat a start ledger ahead of the RPC as a retention gap', async () => {
