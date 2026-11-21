@@ -7,6 +7,7 @@
  */
 
 import { Address, xdr } from '@stellar/stellar-sdk';
+import { z } from 'zod';
 import { logger } from '../utils/logger';
 
 /** Event exactly as returned by the RPC `getEvents` method. */
@@ -39,6 +40,95 @@ export type HealthResult = {
   oldestLedger: number;
   ledgerRetentionWindow?: number;
 };
+
+/**
+ * Runtime schemas for RPC responses. The RPC is an untrusted boundary: a
+ * malformed body must fail loudly (and retryably) instead of reaching the
+ * indexer as `undefined` fields.
+ */
+export const rawEventSchema = z.object({
+  type: z.string(),
+  ledger: z.number().int().nonnegative(),
+  ledgerClosedAt: z.string(),
+  contractId: z.string(),
+  id: z.string().min(1),
+  txHash: z.string(),
+  topic: z.array(z.string()),
+  value: z.string(),
+});
+
+export const getEventsResultSchema = z.object({
+  events: z.array(rawEventSchema),
+  cursor: z.string().min(1),
+  latestLedger: z.number().int().nonnegative(),
+  oldestLedger: z.number().int().nonnegative(),
+});
+
+export const healthResultSchema = z.object({
+  status: z.string(),
+  latestLedger: z.number().int().nonnegative(),
+  oldestLedger: z.number().int().nonnegative(),
+  ledgerRetentionWindow: z.number().int().nonnegative().optional(),
+});
+
+/** Format a zod issue as `path: message` for error messages. */
+function describeIssue(issue: z.ZodIssue): string {
+  const path = issue.path.length > 0 ? issue.path.join('.') : '<root>';
+  return `${path}: ${issue.message}`;
+}
+
+/**
+ * Parse `value` with `schema`, throwing a retryable `RpcError` that names the
+ * offending field path when the response is malformed.
+ */
+export function parseRpcResult<T>(method: string, schema: z.ZodType<T>, value: unknown): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    const detail = parsed.error.issues.map(describeIssue).join('; ');
+    throw new RpcError(`${method}: malformed response (${detail})`, undefined, true);
+  }
+  return parsed.data;
+}
+
+/**
+ * Enforce the invariants the indexer relies on for a `getEvents` page: every
+ * event is a contract event for the requested contract, ids strictly increase
+ * (so the cursor can never move backwards), and a cursor is always present.
+ */
+export function assertGetEventsInvariants(
+  result: GetEventsResult,
+  contractId: string
+): GetEventsResult {
+  if (result.cursor.length === 0) {
+    throw new RpcError('getEvents: malformed response (cursor: missing)', undefined, true);
+  }
+  let previous: string | undefined;
+  result.events.forEach((event, index) => {
+    if (event.type !== 'contract') {
+      throw new RpcError(
+        `getEvents: malformed response (events.${index}.type: expected 'contract', got '${event.type}')`,
+        undefined,
+        true
+      );
+    }
+    if (event.contractId !== contractId) {
+      throw new RpcError(
+        `getEvents: malformed response (events.${index}.contractId: expected '${contractId}', got '${event.contractId}')`,
+        undefined,
+        true
+      );
+    }
+    if (previous !== undefined && !(event.id > previous)) {
+      throw new RpcError(
+        `getEvents: malformed response (events.${index}.id: '${event.id}' is not greater than '${previous}')`,
+        undefined,
+        true
+      );
+    }
+    previous = event.id;
+  });
+  return result;
+}
 
 /** Result of `getLedgerEntries` for the contract instance entry. */
 export type ContractInstanceResult = {
@@ -183,14 +273,21 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
         params.cursor !== undefined
           ? { cursor: params.cursor, limit: params.limit }
           : { limit: params.limit };
-      return call<GetEventsResult>('getEvents', {
+      return call<unknown>('getEvents', {
         ...(params.startLedger !== undefined ? { startLedger: params.startLedger } : {}),
         filters: [{ type: 'contract', contractIds: [params.contractId] }],
         pagination,
-      });
+      }).then((result) =>
+        assertGetEventsInvariants(
+          parseRpcResult('getEvents', getEventsResultSchema, result),
+          params.contractId
+        )
+      );
     },
     getHealth() {
-      return call<HealthResult>('getHealth');
+      return call<unknown>('getHealth').then((result) =>
+        parseRpcResult('getHealth', healthResultSchema, result)
+      );
     },
     async getContractInstance(contractId) {
       const key = xdr.LedgerKey.contractData(
