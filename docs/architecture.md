@@ -74,10 +74,12 @@ To support a new event: add a case to `decode.ts` and `handlers.ts`, a table or 
    RPC retains.
 2. **Fetch a page** with `getEvents`, filtered to `FOLDER_CONTRACT_ID`
    (`INDEXER_PAGE_LIMIT` events).
-3. **Write the page in one transaction.** Each event is inserted into `contract_events`
-   keyed by its RPC event id (a TOID encoding ledger, transaction, operation and event
-   index) with `ON CONFLICT DO NOTHING`. Only newly inserted events are applied to the read
-   model. The new cursor is written in the same transaction.
+3. **Write the page in one transaction.** The page's events are inserted into
+   `contract_events` with one set-based `INSERT ... SELECT FROM unnest ... ON CONFLICT DO
+   NOTHING RETURNING id`, keyed by their RPC event id (a TOID encoding ledger, transaction,
+   operation and event index). Only newly inserted events are applied to the read model, in
+   page order, each under its own savepoint. The new cursor is written in the same
+   transaction with a single upsert (plus one `DELETE` for cleared keys).
 4. **Repeat** while pages are full, then sleep `INDEXER_POLL_INTERVAL_MS`.
 
 What this guarantees:

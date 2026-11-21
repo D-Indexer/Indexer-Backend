@@ -77,20 +77,31 @@ export async function readState(db: Pick<Pool, 'query'>): Promise<Partial<Record
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
 }
 
+/**
+ * Write indexer state in two round trips: one upsert for the keys that get a
+ * value, one DELETE for the keys that are cleared.
+ */
 export async function writeState(
   db: Pick<Pool, 'query'>,
   entries: Partial<Record<string, string | null>>
 ): Promise<void> {
+  const upserts: [string, string][] = [];
+  const deletes: string[] = [];
   for (const [key, value] of Object.entries(entries)) {
-    if (value === null || value === undefined) {
-      await db.query('DELETE FROM indexer_state WHERE key = $1', [key]);
-    } else {
-      await db.query(
-        `INSERT INTO indexer_state (key, value, updated_at) VALUES ($1, $2, NOW())
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-        [key, value]
-      );
-    }
+    if (value === null || value === undefined) deletes.push(key);
+    else upserts.push([key, value]);
+  }
+
+  if (upserts.length > 0) {
+    await db.query(
+      `INSERT INTO indexer_state (key, value, updated_at)
+       SELECT key, value, NOW() FROM unnest($1::text[], $2::text[]) AS t(key, value)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [upserts.map(([key]) => key), upserts.map(([, value]) => value)]
+    );
+  }
+  if (deletes.length > 0) {
+    await db.query('DELETE FROM indexer_state WHERE key = ANY($1::text[])', [deletes]);
   }
 }
 
@@ -104,11 +115,16 @@ export function isDeterministicDbError(err: unknown): boolean {
   return typeof code === 'string' && (code.startsWith('22') || code.startsWith('23'));
 }
 
-async function storeEvent(
-  client: PoolClient,
-  contractId: string,
-  event: RawEvent
-): Promise<'applied' | 'ignored' | 'rejected' | 'duplicate'> {
+/** One event of a page, decoded up front so the insert is a single round trip. */
+type PreparedEvent = {
+  event: RawEvent;
+  topic: string;
+  decoded: DecodedEvent | null;
+  error: string | null;
+  status: 'applied' | 'ignored' | 'rejected';
+};
+
+function prepareEvent(event: RawEvent): PreparedEvent {
   let topic = '';
   let decoded: DecodedEvent | null = null;
   let error: string | null = null;
@@ -122,36 +138,62 @@ async function storeEvent(
   }
 
   const status = error ? 'rejected' : decoded ? 'applied' : 'ignored';
-  const inserted = await client.query(
+  return { event, topic, decoded, error, status };
+}
+
+/**
+ * Insert a whole page into contract_events with one statement. Returns the ids
+ * that were actually inserted (in page order); ids already stored are skipped.
+ */
+async function insertEvents(
+  client: PoolClient,
+  contractId: string,
+  prepared: PreparedEvent[]
+): Promise<Set<string>> {
+  if (prepared.length === 0) return new Set();
+  const { rows } = await client.query<{ id: string }>(
     `INSERT INTO contract_events
        (id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     SELECT id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error
+       FROM unnest(
+         $1::text[], $2::int[], $3::timestamptz[], $4::text[], $5::text[], $6::text[],
+         $7::text[][], $8::text[], $9::jsonb[], $10::text[], $11::text[]
+       ) AS t(id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error)
      ON CONFLICT (id) DO NOTHING
      RETURNING id`,
     [
-      event.id,
-      event.ledger,
-      event.ledgerClosedAt,
-      event.txHash,
-      contractId,
-      topic,
-      event.topic,
-      event.value,
-      decoded ? JSON.stringify(decoded) : null,
-      status,
-      error,
+      prepared.map((p) => p.event.id),
+      prepared.map((p) => p.event.ledger),
+      prepared.map((p) => p.event.ledgerClosedAt),
+      prepared.map((p) => p.event.txHash),
+      prepared.map(() => contractId),
+      prepared.map((p) => p.topic),
+      prepared.map((p) => p.event.topic),
+      prepared.map((p) => p.event.value),
+      prepared.map((p) => (p.decoded ? JSON.stringify(p.decoded) : null)),
+      prepared.map((p) => p.status),
+      prepared.map((p) => p.error),
     ]
   );
+  return new Set(rows.map((row) => row.id));
+}
 
-  if (inserted.rowCount === 0) return 'duplicate';
+/**
+ * Apply one newly inserted event to the read model under its own savepoint.
+ * A deterministic DB error means the event contradicts the read model. Record
+ * it and move on rather than blocking the indexer; anything else (connection
+ * loss, etc.) aborts the page so it is retried.
+ */
+async function applyStoredEvent(
+  client: PoolClient,
+  prepared: PreparedEvent
+): Promise<'applied' | 'ignored' | 'rejected'> {
+  const { event, topic, decoded, error, status } = prepared;
   if (!decoded) {
     if (error) logger.warn('Rejected malformed contract event', { id: event.id, topic, error });
     return status as 'ignored' | 'rejected';
   }
 
-  // A deterministic DB error means the event contradicts the read model. Record
-  // it and move on rather than blocking the indexer; anything else (connection
-  // loss, etc.) aborts the page so it is retried.
   await client.query('SAVEPOINT apply_event');
   try {
     await applyEvent(client, decoded, new Date(event.ledgerClosedAt));
@@ -181,11 +223,16 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
 
   try {
     await client.query('BEGIN');
-    for (const event of page.events) {
-      if (event.contractId !== contractId) continue;
-      const outcome = await storeEvent(client, contractId, event);
-      if (outcome === 'duplicate') result.duplicates++;
-      else result[outcome]++;
+    const prepared = page.events
+      .filter((event) => event.contractId === contractId)
+      .map((event) => prepareEvent(event));
+    const inserted = await insertEvents(client, contractId, prepared);
+    for (const item of prepared) {
+      if (!inserted.has(item.event.id)) {
+        result.duplicates++;
+        continue;
+      }
+      result[await applyStoredEvent(client, item)]++;
     }
     // The paging cursor encodes how far the RPC scanned (the chain tip for a
     // partial page), which is further than the last event's ledger.
