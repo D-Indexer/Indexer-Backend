@@ -39,6 +39,15 @@ describe('environment configuration', () => {
     ).toThrow(/contract address/);
   });
 
+  it('parses an ordered multi-contract list and per-contract starts', () => {
+    const env = loadEnv({
+      ...validEnv,
+      FOLDER_CONTRACT_ID: '',
+      FOLDER_CONTRACT_IDS: `${TESTNET_CONTRACT_ID}:5647760`,
+    });
+    expect(env.FOLDER_CONTRACT_IDS).toContain(TESTNET_CONTRACT_ID);
+  });
+
   it('parses indexer tuning', () => {
     const env = loadEnv({ ...validEnv, INDEXER_START_LEDGER: '5647760', INDEXER_ON_RETENTION_GAP: 'skip' });
     expect(env.INDEXER_START_LEDGER).toBe(5647760);

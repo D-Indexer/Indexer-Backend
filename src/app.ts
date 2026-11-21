@@ -11,6 +11,7 @@ import { notFoundHandler } from './middleware/notFound';
 import { requestId } from './middleware/requestId';
 import { securityHeaders } from './middleware/securityHeaders';
 import { AppEnv } from './config/env';
+import { networkMiddleware } from './middleware/network';
 
 /**
  * CORS_ORIGIN: comma-separated allow-list, or `*` for any origin. Unset allows
@@ -35,6 +36,8 @@ export function createApp(env: AppEnv) {
   app.use(securityHeaders);
   app.use(cors({ origin: corsOrigin(env) }));
   app.use(express.json({ limit: env.REQUEST_BODY_LIMIT }));
+  const defaultNetworkPassphrase = env.API_NETWORK_DEFAULT || env.STELLAR_NETWORK_PASSPHRASE;
+  app.use(networkMiddleware(defaultNetworkPassphrase));
 
   app.get('/', (_req, res) => {
     res.json({
@@ -43,6 +46,12 @@ export function createApp(env: AppEnv) {
       docs: '/health',
     });
   });
+
+  app.use('/testnet/folders', folderRoutes);
+  app.use('/testnet/templates', templateRoutes);
+  app.use('/testnet/portfolios', portfolioRoutes);
+  app.use('/testnet/upload', uploadRoutes);
+  app.use('/testnet/health', healthRoutes);
 
   app.use('/folders', folderRoutes);
   app.use('/templates', templateRoutes);

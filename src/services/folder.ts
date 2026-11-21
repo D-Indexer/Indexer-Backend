@@ -21,12 +21,18 @@ function mapFolder(row: FolderRow): Folder {
 
 const COLUMNS = 'owner, name, template_id, claimed_at, updated_at';
 
-export async function getFolderByAddress(owner: string): Promise<Folder | null> {
-  const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE owner = $1`, [owner]);
+export async function getFolderByAddress(owner: string, network?: string): Promise<Folder | null> {
+  const { rows } = await pool.query<FolderRow>(
+    network ? `SELECT ${COLUMNS} FROM folders WHERE network = $1 AND owner = $2` : `SELECT ${COLUMNS} FROM folders WHERE owner = $1`,
+    network ? [network, owner] : [owner]
+  );
   return rows[0] ? mapFolder(rows[0]) : null;
 }
 
-export async function getFolderByName(name: string): Promise<Folder | null> {
-  const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE name = $1`, [name]);
+export async function getFolderByName(name: string, network?: string): Promise<Folder | null> {
+  const { rows } = await pool.query<FolderRow>(
+    network ? `SELECT ${COLUMNS} FROM folders WHERE network = $1 AND name = $2` : `SELECT ${COLUMNS} FROM folders WHERE name = $1`,
+    network ? [network, name] : [name]
+  );
   return rows[0] ? mapFolder(rows[0]) : null;
 }

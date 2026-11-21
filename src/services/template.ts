@@ -19,12 +19,17 @@ function mapTemplate(row: TemplateRow): Template {
 
 const COLUMNS = 'id, metadata_uri, creator, registered_at';
 
-export async function listTemplates(): Promise<Template[]> {
-  const { rows } = await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates ORDER BY id`);
+export async function listTemplates(network?: string): Promise<Template[]> {
+  const { rows } = network
+    ? await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates WHERE network = $1 ORDER BY id`, [network])
+    : await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates ORDER BY id`);
   return rows.map(mapTemplate);
 }
 
-export async function getTemplate(id: number): Promise<Template | null> {
-  const { rows } = await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates WHERE id = $1`, [id]);
+export async function getTemplate(id: number, network?: string): Promise<Template | null> {
+  const { rows } = await pool.query<TemplateRow>(
+    network ? `SELECT ${COLUMNS} FROM templates WHERE network = $1 AND id = $2` : `SELECT ${COLUMNS} FROM templates WHERE id = $1`,
+    network ? [network, id] : [id]
+  );
   return rows[0] ? mapTemplate(rows[0]) : null;
 }
