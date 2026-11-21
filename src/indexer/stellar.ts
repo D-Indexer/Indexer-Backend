@@ -13,9 +13,11 @@ export const STATE = {
   status: 'status',
   lastError: 'last_error',
   lastGap: 'last_gap',
+  wasmHash: 'wasm_hash',
+  wasmUpgrade: 'wasm_upgrade',
 } as const;
 
-export type IndexerStatus = 'ok' | 'error' | 'retention_gap';
+export type IndexerStatus = 'ok' | 'error' | 'retention_gap' | 'wasm_upgrade' | 'rejection_rate';
 export type RetentionGapPolicy = 'halt' | 'skip';
 
 export type Db = Pick<Pool, 'connect' | 'query'>;
@@ -30,11 +32,50 @@ export type IndexerConfig = {
   maxBackoffMs: number;
   /** Max pages fetched back-to-back in one tick while catching up. */
   maxPagesPerTick?: number;
+  /** WASM hashes (hex) the indexer accepts. Empty = accept any hash. */
+  wasmAllowList?: string[];
+  /** What to do when the contract's WASM hash changes: halt indexing or continue. */
+  onWasmUpgrade?: 'halt' | 'continue';
+  /** Halt when more than this fraction (0–1) of a page's known events are rejected. */
+  maxRejectionRate?: number;
+  /** Minimum known events in a page before the rejection-rate breaker can trip. */
+  minRejectionSample?: number;
 };
 
 export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerConfig };
 
 export type PageResult = { applied: number; ignored: number; rejected: number; duplicates: number };
+
+/** Thrown when the contract's WASM hash changed and the policy is to halt. */
+export class WasmUpgradeError extends Error {
+  constructor(
+    readonly previousHash: string | null,
+    readonly currentHash: string,
+    readonly allowListed: boolean
+  ) {
+    super(
+      `Contract WASM hash changed from ${previousHash ?? '(unknown)'} to ${currentHash}` +
+        (allowListed ? '' : ', which is not in INDEXER_WASM_ALLOW_LIST') +
+        '. Indexing is halted; see docs/operations.md#wasm-upgrade.'
+    );
+    this.name = 'WasmUpgradeError';
+  }
+}
+
+/** Thrown when too many known events in one page were rejected. */
+export class RejectionRateError extends Error {
+  constructor(
+    readonly rejected: number,
+    readonly known: number,
+    readonly maxRate: number
+  ) {
+    super(
+      `${rejected} of ${known} known events in the page were rejected ` +
+        `(> ${maxRate}); the cursor was not advanced. See docs/operations.md#rejection-rate.`
+    );
+    this.name = 'RejectionRateError';
+  }
+}
 
 export class RetentionGapError extends Error {
   constructor(
@@ -200,6 +241,66 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
   }
 }
 
+/**
+ * Rejection-rate circuit breaker: a page where more than `maxRejectionRate` of
+ * the known (non-duplicate) events were rejected means the event schema probably
+ * changed, so the page is rolled back and the cursor stays put.
+ */
+export function assertRejectionRate(
+  result: PageResult,
+  config: Pick<IndexerConfig, 'maxRejectionRate' | 'minRejectionSample'>
+): void {
+  const maxRate = config.maxRejectionRate ?? 0.5;
+  if (maxRate >= 1) return;
+  const known = result.applied + result.rejected;
+  if (known < (config.minRejectionSample ?? 1)) return;
+  if (result.rejected / known > maxRate) {
+    throw new RejectionRateError(result.rejected, known, maxRate);
+  }
+}
+
+/**
+ * Compare the contract's current WASM hash with the stored one. A change is
+ * persisted in `indexer_state`; when the policy is `halt` (or the new hash is
+ * not allow-listed) a WasmUpgradeError is thrown so the cursor does not move.
+ */
+export async function checkWasmHash(deps: IndexerDependencies): Promise<void> {
+  const { wasmHash, lastModifiedLedger } = await deps.rpc.getContractInstance(deps.config.contractId);
+  if (!wasmHash) return;
+
+  const state = await readState(deps.db);
+  const previous = state[STATE.wasmHash] ?? null;
+  if (previous === wasmHash) return;
+
+  const allowList = (deps.config.wasmAllowList ?? []).map((hash) => hash.toLowerCase());
+  const allowListed = allowList.length === 0 || allowList.includes(wasmHash.toLowerCase());
+  const policy = deps.config.onWasmUpgrade ?? 'halt';
+  const upgrade = {
+    previousHash: previous,
+    currentHash: wasmHash,
+    allowListed,
+    lastModifiedLedger,
+    at: new Date().toISOString(),
+  };
+
+  await writeState(deps.db, {
+    [STATE.wasmHash]: wasmHash,
+    [STATE.wasmUpgrade]: JSON.stringify(upgrade),
+  });
+
+  if (previous === null) {
+    logger.info('Recorded contract WASM hash', { wasmHash, allowListed });
+    return;
+  }
+
+  logger.warn('Contract WASM hash changed', upgrade);
+  if (policy === 'halt' || !allowListed) {
+    const err = new WasmUpgradeError(previous, wasmHash, allowListed);
+    await writeState(deps.db, { [STATE.status]: 'wasm_upgrade', [STATE.lastError]: err.message });
+    throw err;
+  }
+}
+
 type NextRequest = {
   params: GetEventsParams;
   /** True when the start point came from config on an empty database, not from indexed state. */
@@ -281,6 +382,7 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
   }
 
   const result = await processPage(deps.db, deps.config.contractId, page);
+  assertRejectionRate(result, deps.config);
   if (page.events.length > 0) {
     logger.info('Indexed events', { ...result, lastLedger: page.events[page.events.length - 1].ledger });
   }
@@ -309,6 +411,7 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
 
   const tick = async () => {
     try {
+      await checkWasmHash(deps);
       for (let page = 0; page < maxPages && !stopped; page++) {
         const { events } = await pollOnce(deps);
         if (events < deps.config.pageLimit) break; // caught up
@@ -319,6 +422,13 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
       const message = err instanceof Error ? err.message : String(err);
       if (err instanceof RetentionGapError) {
         logger.error('Indexer halted: retention gap', { error: message });
+      } else if (err instanceof WasmUpgradeError) {
+        logger.error('Indexer halted: contract WASM upgrade', { error: message });
+      } else if (err instanceof RejectionRateError) {
+        logger.error('Indexer halted: rejection rate too high', { error: message });
+        await writeState(deps.db, { [STATE.status]: 'rejection_rate', [STATE.lastError]: message }).catch(
+          () => undefined
+        );
       } else {
         logger.error('Indexer poll failed', { error: message, failures });
         await writeState(deps.db, { [STATE.status]: 'error', [STATE.lastError]: message }).catch(

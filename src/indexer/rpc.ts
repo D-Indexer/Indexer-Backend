@@ -6,6 +6,8 @@
  * want the raw base64 XDR to store alongside each event.
  */
 
+import { Address, xdr } from '@stellar/stellar-sdk';
+
 /** Event exactly as returned by the RPC `getEvents` method. */
 export type RawEvent = {
   type: string;
@@ -37,9 +39,19 @@ export type HealthResult = {
   ledgerRetentionWindow?: number;
 };
 
+/** Result of `getLedgerEntries` for the contract instance entry. */
+export type ContractInstanceResult = {
+  /** Hex-encoded WASM hash the contract instance currently points at, or null when absent. */
+  wasmHash: string | null;
+  /** Ledger the instance entry was last modified in, or null when absent. */
+  lastModifiedLedger: number | null;
+};
+
 export interface EventSource {
   getEvents(params: GetEventsParams): Promise<GetEventsResult>;
   getHealth(): Promise<HealthResult>;
+  /** Read the contract instance entry to detect WASM upgrades. */
+  getContractInstance(contractId: string): Promise<ContractInstanceResult>;
 }
 
 export class RpcError extends Error {
@@ -160,6 +172,31 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     },
     getHealth() {
       return call<HealthResult>('getHealth');
+    },
+    async getContractInstance(contractId) {
+      const key = xdr.LedgerKey.contractData(
+        new xdr.LedgerKeyContractData({
+          contract: Address.fromString(contractId).toScAddress(),
+          key: xdr.ScVal.scvLedgerKeyContractInstance(),
+          durability: xdr.ContractDataDurability.persistent(),
+        })
+      );
+      const result = await call<{
+        entries?: {
+          lastModifiedLedgerSeq?: number;
+          val?: { contractData?: () => { val: () => xdr.ScVal } };
+        }[];
+      }>('getLedgerEntries', { keys: [key.toXDR('base64')] });
+
+      const entry = result.entries?.[0];
+      const instance = entry?.val?.contractData?.().val();
+      if (!instance || instance.switch().name !== 'scvContractInstance') {
+        return { wasmHash: null, lastModifiedLedger: null };
+      }
+      return {
+        wasmHash: instance.instance().executable().wasmHash().toString('hex'),
+        lastModifiedLedger: entry?.lastModifiedLedgerSeq ?? null,
+      };
     },
   };
 }

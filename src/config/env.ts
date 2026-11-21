@@ -37,6 +37,22 @@ const envSchema = z
     INDEXER_ON_RETENTION_GAP: z.enum(['halt', 'skip']).default('halt'),
     INDEXER_MAX_BACKOFF_MS: z.coerce.number().int().positive().default(60000),
     INDEXER_STALE_AFTER_MS: z.coerce.number().int().positive().default(120000),
+    INDEXER_WASM_ALLOW_LIST: z
+      .string()
+      .default('')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((hash) => hash.trim().toLowerCase())
+          .filter((hash) => hash.length > 0)
+      )
+      .refine(
+        (hashes) => hashes.every((hash) => /^[0-9a-f]{64}$/.test(hash)),
+        'INDEXER_WASM_ALLOW_LIST must be a comma-separated list of 64-character hex WASM hashes'
+      ),
+    INDEXER_ON_WASM_UPGRADE: z.enum(['halt', 'continue']).default('halt'),
+    INDEXER_MAX_REJECTION_RATE: z.coerce.number().min(0).max(1).default(0.5),
+    INDEXER_MIN_REJECTION_SAMPLE: z.coerce.number().int().positive().default(1),
     DB_MAX_CONNECTIONS: z.coerce.number().int().positive().default(10),
     DB_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),

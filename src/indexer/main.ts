@@ -24,6 +24,10 @@ async function main(): Promise<void> {
       startLedger: env.INDEXER_START_LEDGER,
       onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
       maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
+      wasmAllowList: env.INDEXER_WASM_ALLOW_LIST,
+      onWasmUpgrade: env.INDEXER_ON_WASM_UPGRADE,
+      maxRejectionRate: env.INDEXER_MAX_REJECTION_RATE,
+      minRejectionSample: env.INDEXER_MIN_REJECTION_SAMPLE,
     },
   });
 

@@ -20,6 +20,15 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
+function parseJson(value: string | undefined): unknown {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * API health: 200 when the database answers. Indexer state is reported for
  * visibility but doesn't affect the status code; the indexer process has its
@@ -50,6 +59,8 @@ router.get(
         lastLedger: state[STATE.lastLedger] ? Number(state[STATE.lastLedger]) : null,
         lastSuccessAt,
         lastError: state[STATE.lastError] ?? null,
+        wasmHash: state[STATE.wasmHash] ?? null,
+        wasmUpgrade: parseJson(state[STATE.wasmUpgrade]),
       },
       requestId: req.id,
     });
