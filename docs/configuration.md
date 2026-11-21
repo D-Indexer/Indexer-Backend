@@ -59,6 +59,7 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `DB_CONNECTION_TIMEOUT_MS`        | `5000`                      | Pool connection timeout                                                                    |
 | `HEALTHCHECK_DATABASE_TIMEOUT_MS` | `2000`                      | DB timeout for `GET /health`                                                               |
 | `SHUTDOWN_TIMEOUT_MS`             | `10000`                     | Graceful shutdown limit                                                                    |
+| `SHUTDOWN_FORCE_CLOSE_MS`         | `8000`                      | Force-close remaining connections at this deadline (must be < `SHUTDOWN_TIMEOUT_MS`)       |
 
 ## Trust proxy
 

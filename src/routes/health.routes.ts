@@ -3,6 +3,7 @@ import pool from '../db/client';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { getEnv } from '../config/env';
 import { readState, STATE } from '../indexer/stellar';
+import { isShuttingDown } from '../shutdown';
 
 const router = Router();
 const env = getEnv();
@@ -28,6 +29,17 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 router.get(
   '/',
   asyncHandler(async (req, res) => {
+    if (isShuttingDown()) {
+      res.setHeader('Connection', 'close');
+      res.status(503).json({
+        status: 'shutting_down',
+        db: 'unknown',
+        indexer: { status: 'unknown', stale: true, lastLedger: null, lastSuccessAt: null, lastError: null },
+        requestId: req.id,
+      });
+      return;
+    }
+
     let dbOk = false;
     let state: Partial<Record<string, string>> = {};
     try {

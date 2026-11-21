@@ -85,9 +85,17 @@ const envSchema = z
     DB_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+    SHUTDOWN_FORCE_CLOSE_MS: z.coerce.number().int().positive().default(8000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   })
   .superRefine((env, ctx) => {
+    if (env.SHUTDOWN_FORCE_CLOSE_MS >= env.SHUTDOWN_TIMEOUT_MS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SHUTDOWN_FORCE_CLOSE_MS'],
+        message: 'SHUTDOWN_FORCE_CLOSE_MS must be shorter than SHUTDOWN_TIMEOUT_MS',
+      });
+    }
     if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

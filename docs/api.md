@@ -92,6 +92,10 @@ change the status code; the indexer process has its own healthcheck
 }
 ```
 
+`503` with `status: "shutting_down"` once the process received `SIGTERM`/`SIGINT`:
+readiness fails immediately so load balancers stop routing new requests, while
+in-flight requests (e.g. an upload) finish before `SHUTDOWN_FORCE_CLOSE_MS`.
+
 ## `GET /folders/:address`
 
 Folder claimed by `address` (contract event `folder_cl`). `templateId` is the owner's
