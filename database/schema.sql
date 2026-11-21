@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS folders (
   updated_at   TIMESTAMPTZ NOT NULL
 );
 
+-- Every folder_cl claim, including names later moved to another owner.
+CREATE TABLE IF NOT EXISTS folder_name_history (
+  name         TEXT NOT NULL,
+  owner        TEXT NOT NULL,
+  claimed_at   TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (name, owner, claimed_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_folder_name_history_name ON folder_name_history (name);
+
 -- tmpl_reg
 CREATE TABLE IF NOT EXISTS templates (
   id             BIGINT PRIMARY KEY,

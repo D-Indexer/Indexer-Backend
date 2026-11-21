@@ -54,7 +54,7 @@ position; trailing fields are ignored because the contract only appends.
 | `init`      | `admin`                                                            | insert into `admins`                                   |
 | `adm_add`   | `admin`, `new_admin`                                               | insert `new_admin` into `admins`                       |
 | `adm_rm`    | `admin`, `target`                                                  | delete `target` from `admins`                          |
-| `folder_cl` | `owner`, `folder_name`                                             | upsert `folders`                                       |
+| `folder_cl` | `owner`, `folder_name`                                             | upsert `folders`; move name from previous owner, log `folder_name_history` |
 | `tmpl_reg`  | `template_id: u32`, `metadata_uri`, `creator` (appended; optional) | upsert `templates`                                     |
 | `tmpl_set`  | `owner`, `template_id: u32`                                        | set `folders.template_id` and `portfolios.template_id` |
 | `port_mint` | `owner`, `template_id: u32`, `ipfs_cid`                            | upsert `portfolios`; set `folders.template_id`         |
@@ -109,6 +109,7 @@ from archive data is not implemented yet.
 | ----------------- | ----------------------- | ---------------------------------------------------------------------------------------------- |
 | `contract_events` | RPC event id            | every event: ledger, close time, tx hash, raw topic/value XDR, decoded data, status, error     |
 | `folders`         | `owner` (unique `name`) | `folder_cl`, `tmpl_set`, `port_mint`                                                           |
+| `folder_name_history` | `(name, owner, claimed_at)` | `folder_cl` (every claim, including names later moved to another owner)                  |
 | `templates`       | `id`                    | `tmpl_reg`                                                                                     |
 | `portfolios`      | `owner`                 | `port_mint`, `port_upd`, `tmpl_set`                                                            |
 | `admins`          | `address`               | `init`, `adm_add`, `adm_rm`                                                                    |

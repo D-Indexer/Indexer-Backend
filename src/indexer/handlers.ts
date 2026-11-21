@@ -31,9 +31,23 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
       return;
 
     case 'folder_cl':
+      // A name belongs to exactly one owner: drop it from any previous owner
+      // (and record the move) before the claiming owner takes it.
+      await db.query(
+        `INSERT INTO folder_name_history (name, owner, claimed_at)
+         SELECT name, owner, claimed_at FROM folders WHERE name = $1 AND owner <> $2
+         ON CONFLICT (name, owner, claimed_at) DO NOTHING`,
+        [event.folderName, event.owner]
+      );
+      await db.query('DELETE FROM folders WHERE name = $1 AND owner <> $2', [
+        event.folderName,
+        event.owner,
+      ]);
       await db.query(
         `INSERT INTO folders (owner, name, claimed_at, updated_at) VALUES ($1, $2, $3, $3)
-         ON CONFLICT (owner) DO UPDATE SET name = EXCLUDED.name, updated_at = EXCLUDED.updated_at`,
+         ON CONFLICT (owner) DO UPDATE
+           SET name = EXCLUDED.name, claimed_at = EXCLUDED.claimed_at,
+               updated_at = EXCLUDED.updated_at`,
         [event.owner, event.folderName, at]
       );
       return;
