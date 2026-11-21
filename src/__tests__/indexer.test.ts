@@ -1,5 +1,6 @@
 import { LedgerRangeError, EventSource, GetEventsResult } from '../indexer/rpc';
 import {
+  adaptiveDelay,
   backoffDelay,
   createIndexer,
   IndexerConfig,
@@ -234,8 +235,26 @@ describe('indexer loop', () => {
     expect(ledgerFromCursor(testnetEvents[0].id)).toBe(testnetEvents[0].ledger);
   });
 
-  it('backs off exponentially up to the cap', () => {
-    const c = { pollIntervalMs: 1000, maxBackoffMs: 10000 };
+  it('adapts the poll delay to chain lag without exceeding the idle interval', () => {
+    const c = { pollIntervalMs: 5000, catchUpIntervalMs: 250, ledgerCloseTimeMs: 5000 };
+    expect(adaptiveDelay(c, null)).toBe(5000);
+    expect(adaptiveDelay(c, { lagLedgers: 0, latestLedger: 100, scannedLedger: 100 })).toBe(5000);
+    expect(adaptiveDelay(c, { lagLedgers: 1, latestLedger: 101, scannedLedger: 100 })).toBe(5000);
+    expect(adaptiveDelay(c, { lagLedgers: 2, latestLedger: 102, scannedLedger: 100 })).toBe(5000);
+    expect(adaptiveDelay(c, { lagLedgers: 3, latestLedger: 103, scannedLedger: 100 })).toBe(5000);
+    expect(adaptiveDelay(c, { lagLedgers: 10, latestLedger: 110, scannedLedger: 100 })).toBe(5000);
+    expect(adaptiveDelay({ ...c, pollIntervalMs: 60000 }, { lagLedgers: 2, latestLedger: 102, scannedLedger: 100 })).toBe(
+      10000
+    );
+    expect(adaptiveDelay({ ...c, pollIntervalMs: 60000 }, { lagLedgers: 100, latestLedger: 200, scannedLedger: 100 })).toBe(
+      60000
+    );
+    expect(adaptiveDelay({ ...c, pollIntervalMs: 60000 }, { lagLedgers: 1, latestLedger: 101, scannedLedger: 100 })).toBe(
+      250
+    );
+  });
+
+  it('backs off exponentially up to the cap', () => {    const c = { pollIntervalMs: 1000, maxBackoffMs: 10000 };
     expect([0, 1, 2, 3, 4, 10].map((n) => backoffDelay(c, n))).toEqual([
       1000, 2000, 4000, 8000, 10000, 10000,
     ]);

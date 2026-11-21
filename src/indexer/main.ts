@@ -21,6 +21,7 @@ async function main(): Promise<void> {
       contractId: env.FOLDER_CONTRACT_ID,
       pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
       pageLimit: env.INDEXER_PAGE_LIMIT,
+      maxPagesPerTick: env.INDEXER_MAX_PAGES_PER_TICK,
       startLedger: env.INDEXER_START_LEDGER,
       onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
       maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,

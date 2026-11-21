@@ -30,11 +30,41 @@ export type IndexerConfig = {
   maxBackoffMs: number;
   /** Max pages fetched back-to-back in one tick while catching up. */
   maxPagesPerTick?: number;
+  /**
+   * Poll interval used while the indexer is behind the chain tip. Defaults to
+   * `pollIntervalMs`; never exceeds it, so idle RPC usage does not increase.
+   */
+  catchUpIntervalMs?: number;
+  /** Ledger close time assumed when the RPC reports no `ledgerClosedAt`. */
+  ledgerCloseTimeMs?: number;
 };
 
 export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerConfig };
 
 export type PageResult = { applied: number; ignored: number; rejected: number; duplicates: number };
+
+/** Stellar closes a ledger roughly every 5 s; used when the RPC omits `ledgerClosedAt`. */
+export const DEFAULT_LEDGER_CLOSE_TIME_MS = 5000;
+
+/** How far behind the chain tip the indexer is, in ledgers. */
+export type ChainLag = { lagLedgers: number; latestLedger: number; scannedLedger: number };
+
+/**
+ * Delay before the next tick, adapted to how far the indexer is behind the
+ * chain tip. Caught up (or ahead) keeps the configured interval; behind, the
+ * delay shrinks in proportion to the lag so events become queryable sooner,
+ * but never below `minIntervalMs` and never above `pollIntervalMs`.
+ */
+export function adaptiveDelay(
+  config: Pick<IndexerConfig, 'pollIntervalMs' | 'catchUpIntervalMs' | 'ledgerCloseTimeMs'>,
+  lag: ChainLag | null
+): number {
+  const max = config.pollIntervalMs;
+  if (!lag || lag.lagLedgers <= 0) return max;
+  const closeTime = config.ledgerCloseTimeMs ?? DEFAULT_LEDGER_CLOSE_TIME_MS;
+  const min = Math.min(config.catchUpIntervalMs ?? max, max);
+  return Math.max(min, Math.min(max, lag.lagLedgers * closeTime));
+}
 
 export class RetentionGapError extends Error {
   constructor(
@@ -236,9 +266,12 @@ function requestedLedger(params: GetEventsParams): number {
 
 /**
  * Fetch and persist one page. Returns the number of events in the page so the
- * caller can keep paging while it is full.
+ * caller can keep paging while it is full, plus how far behind the chain tip
+ * the page left the indexer.
  */
-export async function pollOnce(deps: IndexerDependencies): Promise<{ events: number; result: PageResult }> {
+export async function pollOnce(
+  deps: IndexerDependencies
+): Promise<{ events: number; result: PageResult; lag: ChainLag }> {
   const state = await readState(deps.db);
   const { params, fromConfig } = await nextRequest(deps, state);
 
@@ -284,7 +317,13 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
   if (page.events.length > 0) {
     logger.info('Indexed events', { ...result, lastLedger: page.events[page.events.length - 1].ledger });
   }
-  return { events: page.events.length, result };
+  const scanned = scannedLedger(page);
+  const lag: ChainLag = {
+    lagLedgers: Math.max(0, page.latestLedger - scanned),
+    latestLedger: page.latestLedger,
+    scannedLedger: scanned,
+  };
+  return { events: page.events.length, result, lag };
 }
 
 export type RunningIndexer = {
@@ -306,12 +345,14 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
   let stopped = false;
   let failures = 0;
   let inFlight: Promise<void> = Promise.resolve();
+  let lag: ChainLag | null = null;
 
   const tick = async () => {
     try {
       for (let page = 0; page < maxPages && !stopped; page++) {
-        const { events } = await pollOnce(deps);
-        if (events < deps.config.pageLimit) break; // caught up
+        const polled = await pollOnce(deps);
+        lag = polled.lag;
+        if (polled.events < deps.config.pageLimit) break; // caught up
       }
       failures = 0;
     } catch (err) {
@@ -331,7 +372,9 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
   const schedule = (delay: number) => {
     if (stopped) return;
     timer = setTimeout(() => {
-      inFlight = tick().then(() => schedule(backoffDelay(deps.config, failures)));
+      inFlight = tick().then(() =>
+        schedule(failures === 0 ? adaptiveDelay(deps.config, lag) : backoffDelay(deps.config, failures))
+      );
     }, delay);
   };
 
@@ -339,6 +382,7 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
     contractId: deps.config.contractId,
     pollIntervalMs: deps.config.pollIntervalMs,
     pageLimit: deps.config.pageLimit,
+    maxPagesPerTick: maxPages,
   });
   schedule(0);
 

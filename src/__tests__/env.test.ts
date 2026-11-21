@@ -18,12 +18,22 @@ describe('environment configuration', () => {
     expect(env.PORT).toBe(3000);
     expect(env.NODE_ENV).toBe('test');
     expect(env.INDEXER_POLL_INTERVAL_MS).toBe(5000);
+    expect(env.INDEXER_MAX_PAGES_PER_TICK).toBe(50);
     expect(env.INDEXER_ON_RETENTION_GAP).toBe('halt');
     expect(env.INDEXER_START_LEDGER).toBeUndefined();
   });
 
-  it('rejects invalid urls', () => {
-    expect(() => loadEnv({ ...validEnv, STELLAR_RPC_URL: 'not-a-url' })).toThrow(/STELLAR_RPC_URL/);
+  it('validates INDEXER_MAX_PAGES_PER_TICK', () => {
+    expect(loadEnv({ ...validEnv, INDEXER_MAX_PAGES_PER_TICK: '10' }).INDEXER_MAX_PAGES_PER_TICK).toBe(10);
+    expect(() => loadEnv({ ...validEnv, INDEXER_MAX_PAGES_PER_TICK: '0' })).toThrow(
+      /INDEXER_MAX_PAGES_PER_TICK/
+    );
+    expect(() => loadEnv({ ...validEnv, INDEXER_MAX_PAGES_PER_TICK: '1001' })).toThrow(
+      /INDEXER_MAX_PAGES_PER_TICK/
+    );
+  });
+
+  it('rejects invalid urls', () => {    expect(() => loadEnv({ ...validEnv, STELLAR_RPC_URL: 'not-a-url' })).toThrow(/STELLAR_RPC_URL/);
   });
 
   it.each(['FOLDER_CONTRACT_ID', 'STELLAR_RPC_URL'])('fails fast with a hint when %s is missing', (key) => {

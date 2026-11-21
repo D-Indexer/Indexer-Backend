@@ -78,7 +78,11 @@ To support a new event: add a case to `decode.ts` and `handlers.ts`, a table or 
    keyed by its RPC event id (a TOID encoding ledger, transaction, operation and event
    index) with `ON CONFLICT DO NOTHING`. Only newly inserted events are applied to the read
    model. The new cursor is written in the same transaction.
-4. **Repeat** while pages are full, then sleep `INDEXER_POLL_INTERVAL_MS`.
+4. **Repeat** while pages are full (up to `INDEXER_MAX_PAGES_PER_TICK` pages), then sleep.
+   The sleep adapts to chain lag: `latestLedger` from `getEvents` minus the ledger the
+   cursor scanned gives the lag in ledgers, and the delay is
+   `clamp(lag × ledger close time, catch-up interval, INDEXER_POLL_INTERVAL_MS)`. Caught
+   up, it is exactly `INDEXER_POLL_INTERVAL_MS`, so idle RPC usage is unchanged.
 
 What this guarantees:
 
