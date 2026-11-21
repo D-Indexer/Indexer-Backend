@@ -64,7 +64,7 @@ checking with backoff but doesn't move. Choose one:
    docker compose exec indexer node dist/indexer/cli.js reset-cursor <ledger>
    ```
    Or set `INDEXER_ON_RETENTION_GAP=skip` and restart. It does the same automatically
-   now and in future, recording the gap in `indexer_state.last_gap`.
+   now and in future, recording the gap in `index_gaps` (and `indexer_state.last_gap`).
 
    The indexer resumes at the RPC's `oldestLedger` itself, not `oldestLedger + 1`:
    `getEvents` treats `startLedger` as inclusive, so the oldest retained ledger is
@@ -72,6 +72,26 @@ checking with backoff but doesn't move. Choose one:
    (`missedFrom`..`missedTo`) and the ledger it actually resumed at (`resumedAt`).
    If the retention window moves forward while resuming, it retries from the new
    `oldestLedger`, bounded by `INDEXER_MAX_GAP_RESUME_ATTEMPTS` (default 5).
+
+   Every gap is also a row in `index_gaps` (`reason`, `missed_from`, `missed_to`,
+   `resumed_at`, `detected_at`, nullable `filled_at`), written in the same
+   transaction as the resume. `reason` is `retention` for a skipped cursor,
+   `config` when `INDEXER_START_LEDGER` is older than the window, and `manual`
+   for operator-recorded gaps. Ranges never overlap: a new range that starts at
+   or before the newest row's `missed_to` is merged into it. `last_gap` is always
+   derived from the newest row. List them with:
+
+   ```bash
+   npm run indexer -- gaps          # all gaps, newest first, as JSON
+   npm run indexer -- gaps --open   # only gaps with filled_at IS NULL
+   ```
+
+   Once a range has been backfilled, mark it filled:
+
+   ```bash
+   npm run indexer -- fill-gap <id>
+   # or: UPDATE index_gaps SET filled_at = NOW() WHERE id = <id>;
+   ```
 2. **Rebuild from an RPC with longer retention.** Point `STELLAR_RPC_URL` at an RPC that
    still has the missing ledgers (self-hosted with a larger retention window, or a provider
    with history), run `reset-cursor` to the first missing ledger, and let it catch up. Then

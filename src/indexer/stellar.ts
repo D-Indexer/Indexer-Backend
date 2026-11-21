@@ -116,6 +116,99 @@ export async function writeState(
   }
 }
 
+export type GapReason = 'retention' | 'config' | 'manual';
+
+export type GapRecord = {
+  reason: GapReason;
+  /** First ledger that was not indexed. */
+  missedFrom: number;
+  /** Last ledger that was not indexed (inclusive). */
+  missedTo: number;
+  /** Ledger the indexer resumed at. */
+  resumedAt: number;
+};
+
+export type GapRow = {
+  id: number;
+  reason: GapReason;
+  missed_from: number;
+  missed_to: number;
+  resumed_at: number;
+  filled_at: Date | null;
+  detected_at: Date;
+};
+
+/**
+ * Record a gap in `index_gaps` and refresh `indexer_state.last_gap` from the
+ * newest row, in one transaction. Rows never overlap: a range that starts at or
+ * before the newest row's `missed_to` is merged into it.
+ */
+export async function recordGap(db: Db, gap: GapRecord): Promise<void> {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<GapRow>(
+      'SELECT * FROM index_gaps ORDER BY missed_to DESC, id DESC LIMIT 1 FOR UPDATE'
+    );
+    const newest = rows[0];
+    if (newest && gap.missedFrom <= newest.missed_to) {
+      await client.query(
+        `UPDATE index_gaps
+            SET missed_from = LEAST(missed_from, $2), missed_to = GREATEST(missed_to, $3),
+                resumed_at = GREATEST(resumed_at, $4)
+          WHERE id = $1`,
+        [newest.id, gap.missedFrom, gap.missedTo, gap.resumedAt]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO index_gaps (reason, missed_from, missed_to, resumed_at) VALUES ($1, $2, $3, $4)`,
+        [gap.reason, gap.missedFrom, gap.missedTo, gap.resumedAt]
+      );
+    }
+    const { rows: latest } = await client.query<GapRow>(
+      'SELECT * FROM index_gaps ORDER BY missed_to DESC, id DESC LIMIT 1'
+    );
+    const row = latest[0];
+    await writeState(client, {
+      [STATE.lastGap]: JSON.stringify({
+        id: row.id,
+        reason: row.reason,
+        missedFrom: row.missed_from,
+        missedTo: row.missed_to,
+        resumedAt: row.resumed_at,
+        at: row.detected_at.toISOString(),
+      }),
+    });
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** List recorded gaps, newest first. `openOnly` skips rows with `filled_at` set. */
+export async function listGaps(
+  db: Pick<Pool, 'query'>,
+  options: { openOnly?: boolean } = {}
+): Promise<GapRow[]> {
+  const { rows } = await db.query<GapRow>(
+    `SELECT * FROM index_gaps ${options.openOnly ? 'WHERE filled_at IS NULL' : ''}
+      ORDER BY missed_from DESC, id DESC`
+  );
+  return rows;
+}
+
+/** Mark a gap filled (backfilled). Returns false when no such gap exists. */
+export async function markGapFilled(db: Pick<Pool, 'query'>, id: number): Promise<boolean> {
+  const { rowCount } = await db.query(
+    'UPDATE index_gaps SET filled_at = COALESCE(filled_at, NOW()) WHERE id = $1',
+    [id]
+  );
+  return (rowCount ?? 0) > 0;
+}
+
 /**
  * Postgres errors that are deterministic for a given event: data exceptions
  * (class 22, e.g. out of range) and constraint violations (class 23).
@@ -455,7 +548,8 @@ async function resumeAfterGap(
   deps: IndexerDependencies,
   params: GetEventsParams,
   requested: number,
-  oldestLedger: number
+  oldestLedger: number,
+  reason: GapReason
 ): Promise<GetEventsResult> {
   const maxAttempts = Math.max(1, deps.config.maxGapResumeAttempts ?? 5);
   let resumeAt = oldestLedger;
@@ -467,13 +561,11 @@ async function resumeAfterGap(
         limit: params.limit,
         startLedger: resumeAt,
       });
-      await writeState(deps.db, {
-        [STATE.lastGap]: JSON.stringify({
-          missedFrom: requested,
-          missedTo: resumeAt - 1,
-          resumedAt: resumeAt,
-          at: new Date().toISOString(),
-        }),
+      await recordGap(deps.db, {
+        reason,
+        missedFrom: requested,
+        missedTo: resumeAt - 1,
+        resumedAt: resumeAt,
       });
       return page;
     } catch (err) {
@@ -523,7 +615,13 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
         : 'Retention gap: skipping to the oldest retained ledger (INDEXER_ON_RETENTION_GAP=skip)',
       { missedFrom: requested, resumeAt: err.oldestLedger }
     );
-    page = await resumeAfterGap(deps, params, requested, err.oldestLedger);
+    page = await resumeAfterGap(
+      deps,
+      params,
+      requested,
+      err.oldestLedger,
+      fromConfig ? 'config' : 'retention'
+    );
   }
 
   const result = await processPage(deps.db, deps.config.contractId, page);

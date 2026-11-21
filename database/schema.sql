@@ -69,3 +69,19 @@ CREATE TABLE IF NOT EXISTS indexer_state (
   value       TEXT NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Every retention/config/manual gap: ledgers that were never indexed.
+-- `filled_at` is set by an operator once the range has been backfilled.
+CREATE TABLE IF NOT EXISTS index_gaps (
+  id           BIGSERIAL PRIMARY KEY,
+  reason       TEXT NOT NULL CHECK (reason IN ('retention', 'config', 'manual')),
+  missed_from  INTEGER NOT NULL,
+  missed_to    INTEGER NOT NULL,
+  resumed_at   INTEGER NOT NULL,
+  filled_at    TIMESTAMPTZ,
+  detected_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CHECK (missed_from <= missed_to)
+);
+
+CREATE INDEX IF NOT EXISTS idx_index_gaps_open
+  ON index_gaps (missed_from) WHERE filled_at IS NULL;
