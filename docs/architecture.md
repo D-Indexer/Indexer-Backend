@@ -80,7 +80,10 @@ To support a new event: add a case to `decode.ts` and `handlers.ts`, a table or 
    operation and event index). Only newly inserted events are applied to the read model, in
    page order, each under its own savepoint. The new cursor is written in the same
    transaction with a single upsert (plus one `DELETE` for cleared keys).
-4. **Repeat** while pages are full, then sleep `INDEXER_POLL_INTERVAL_MS`.
+4. **Repeat** while pages are full, then sleep `INDEXER_POLL_INTERVAL_MS`. While catching
+   up, up to `INDEXER_PREFETCH_PAGES` pages are fetched ahead of the page being committed
+   (default 1, 0 disables). Pages are still committed in RPC order, and a failed commit
+   discards every prefetched page.
 
 What this guarantees:
 

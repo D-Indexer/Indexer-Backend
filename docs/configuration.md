@@ -48,6 +48,7 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `STELLAR_RPC_TIMEOUT_MS`          | `10000`                     | Per-request RPC timeout; failed requests are retried 3× with backoff                       |
 | `INDEXER_POLL_INTERVAL_MS`        | `5000`                      | Delay between polls once caught up                                                         |
 | `INDEXER_PAGE_LIMIT`              | `200`                       | Events per `getEvents` page (1–10000)                                                      |
+| `INDEXER_PREFETCH_PAGES`          | `1`                         | Pages fetched ahead of the page being committed while catching up (0–10, 0 disables)       |
 | `INDEXER_START_LEDGER`            | unset                       | First ledger on an empty database. Unset = oldest ledger the RPC retains.                  |
 | `INDEXER_ON_RETENTION_GAP`        | `halt`                      | `halt` or `skip`. See [operations](operations.md#retention-gap).                           |
 | `INDEXER_MAX_BACKOFF_MS`          | `60000`                     | Cap for exponential backoff after failed polls                                             |

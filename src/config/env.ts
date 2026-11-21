@@ -33,6 +33,7 @@ const envSchema = z
     REQUEST_BODY_LIMIT: z.string().default('1mb'),
     INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
     INDEXER_PAGE_LIMIT: z.coerce.number().int().min(1).max(10000).default(200),
+    INDEXER_PREFETCH_PAGES: z.coerce.number().int().min(0).max(10).default(1),
     INDEXER_START_LEDGER: optionalPositiveInt,
     INDEXER_ON_RETENTION_GAP: z.enum(['halt', 'skip']).default('halt'),
     INDEXER_MAX_BACKOFF_MS: z.coerce.number().int().positive().default(60000),

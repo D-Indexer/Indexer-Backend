@@ -20,6 +20,14 @@ describe('environment configuration', () => {
     expect(env.INDEXER_POLL_INTERVAL_MS).toBe(5000);
     expect(env.INDEXER_ON_RETENTION_GAP).toBe('halt');
     expect(env.INDEXER_START_LEDGER).toBeUndefined();
+    expect(env.INDEXER_PREFETCH_PAGES).toBe(1);
+  });
+
+  it('accepts INDEXER_PREFETCH_PAGES=0 to disable prefetching', () => {
+    expect(loadEnv({ ...validEnv, INDEXER_PREFETCH_PAGES: '0' }).INDEXER_PREFETCH_PAGES).toBe(0);
+    expect(() => loadEnv({ ...validEnv, INDEXER_PREFETCH_PAGES: '-1' })).toThrow(
+      /INDEXER_PREFETCH_PAGES/
+    );
   });
 
   it('rejects invalid urls', () => {

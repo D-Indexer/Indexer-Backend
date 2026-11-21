@@ -34,6 +34,11 @@ export type IndexerConfig = {
   maxBackoffMs: number;
   /** Max pages fetched back-to-back in one tick while catching up. */
   maxPagesPerTick?: number;
+  /**
+   * How many pages to fetch ahead of the page being committed while catching
+   * up. Defaults to 1; 0 disables prefetching (strictly sequential).
+   */
+  prefetchPages?: number;
   /** How often a standby retries the advisory lock. Defaults to 5000ms. */
   leaderRetryMs?: number;
   /** Identifies this process in indexer_state leader info. Defaults to host:pid. */
@@ -290,16 +295,13 @@ function requestedLedger(params: GetEventsParams): number {
 }
 
 /**
- * Fetch and persist one page. Returns the number of events in the page so the
- * caller can keep paging while it is full.
+ * Fetch one page, recovering from a retention gap by resuming at the oldest
+ * ledger the RPC still retains.
  */
-export async function pollOnce(deps: IndexerDependencies): Promise<{ events: number; result: PageResult }> {
-  const state = await readState(deps.db);
-  const { params, fromConfig } = await nextRequest(deps, state);
-
-  let page: GetEventsResult;
+async function fetchPage(deps: IndexerDependencies, request: NextRequest): Promise<GetEventsResult> {
+  const { params, fromConfig } = request;
   try {
-    page = await deps.rpc.getEvents(params);
+    return await deps.rpc.getEvents(params);
   } catch (err) {
     if (!(err instanceof LedgerRangeError)) throw err;
     const requested = requestedLedger(params);
@@ -328,18 +330,86 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
         at: new Date().toISOString(),
       }),
     });
-    page = await deps.rpc.getEvents({
+    return deps.rpc.getEvents({
       contractId: params.contractId,
       limit: params.limit,
       startLedger: resumeAt,
     });
   }
+}
+
+/**
+ * Fetch and persist one page. Returns the number of events in the page so the
+ * caller can keep paging while it is full.
+ */
+export async function pollOnce(deps: IndexerDependencies): Promise<{ events: number; result: PageResult }> {
+  const state = await readState(deps.db);
+  const request = await nextRequest(deps, state);
+  const page = await fetchPage(deps, request);
 
   const result = await processPage(deps.db, deps.config.contractId, page);
   if (page.events.length > 0) {
     logger.info('Indexed events', { ...result, lastLedger: page.events[page.events.length - 1].ledger });
   }
   return { events: page.events.length, result };
+}
+
+/**
+ * Catch up by fetching pages ahead of the one being committed. Page N+1 is
+ * requested while page N commits, up to `prefetchPages` pages in flight.
+ * Pages are always committed in RPC order, and a failed commit drops every
+ * prefetched page so nothing later than the failure is ever committed.
+ */
+export async function catchUp(
+  deps: IndexerDependencies,
+  maxPages: number,
+  isStopped: () => boolean = () => false
+): Promise<void> {
+  const depth = Math.max(0, deps.config.prefetchPages ?? 1);
+  if (depth === 0) {
+    for (let page = 0; page < maxPages && !isStopped(); page++) {
+      const { events } = await pollOnce(deps);
+      if (events < deps.config.pageLimit) break; // caught up
+    }
+    return;
+  }
+
+  const state = await readState(deps.db);
+  const first = await nextRequest(deps, state);
+  const queue: Promise<GetEventsResult>[] = [fetchPage(deps, first)];
+  let next: NextRequest | null = null;
+
+  try {
+    for (let page = 0; page < maxPages && !isStopped(); page++) {
+      const current = await queue.shift()!;
+      // Keep the pipeline full: request the page after this one before committing.
+      if (next && queue.length < depth) queue.push(fetchPage(deps, next));
+      next = null;
+
+      const result = await processPage(deps.db, deps.config.contractId, current);
+      if (current.events.length > 0) {
+        logger.info('Indexed events', {
+          ...result,
+          lastLedger: current.events[current.events.length - 1].ledger,
+        });
+      }
+      if (current.events.length < deps.config.pageLimit) break; // caught up
+
+      next = {
+        params: {
+          contractId: deps.config.contractId,
+          limit: deps.config.pageLimit,
+          cursor: current.cursor,
+        },
+        fromConfig: false,
+      };
+      if (queue.length < depth) queue.push(fetchPage(deps, next));
+    }
+  } catch (err) {
+    // Discard prefetched pages: they are re-fetched from the committed cursor.
+    queue.length = 0;
+    throw err;
+  }
 }
 
 export type RunningIndexer = {
@@ -466,10 +536,7 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
     }
 
     try {
-      for (let page = 0; page < maxPages && !stopped; page++) {
-        const { events } = await pollOnce(deps);
-        if (events < deps.config.pageLimit) break; // caught up
-      }
+      await catchUp(deps, maxPages, () => stopped);
       failures = 0;
       await writeState(deps.db, { [STATE.leaderHeartbeatAt]: new Date().toISOString() }).catch(
         () => undefined
@@ -531,10 +598,7 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
 
   const tick = async () => {
     try {
-      for (let page = 0; page < maxPages && !stopped; page++) {
-        const { events } = await pollOnce(deps);
-        if (events < deps.config.pageLimit) break; // caught up
-      }
+      await catchUp(deps, maxPages, () => stopped);
       failures = 0;
     } catch (err) {
       failures++;
@@ -561,6 +625,7 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
     contractId: deps.config.contractId,
     pollIntervalMs: deps.config.pollIntervalMs,
     pageLimit: deps.config.pageLimit,
+    prefetchPages: deps.config.prefetchPages ?? 1,
   });
   schedule(0);
 
