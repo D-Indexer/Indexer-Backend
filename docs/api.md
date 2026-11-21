@@ -75,6 +75,31 @@ transaction result (`latestLedger` / `ledger` of the `getTransaction` response),
 retry the read with `minLedger` set to it. On `425`, wait `Retry-After` seconds and
 retry; on `404`, the resource genuinely does not exist.
 
+## Caching
+
+Read endpoints (`/folders`, `/portfolios`, `/templates`) are cacheable:
+
+- `ETag` — strong validator derived from the resource's `updatedAt` (folders,
+  portfolios) or `registeredAt` (templates) plus a response-shape version. For
+  `/templates` it is computed from the result count and the newest
+  `registeredAt`.
+- `Last-Modified` — the same timestamp.
+- `Cache-Control: public, max-age=<API_CACHE_MAX_AGE_S>, stale-while-revalidate=<API_CACHE_SWR_S>`
+  (defaults `30` / `60`; `API_CACHE_MAX_AGE_S=0` sends `no-store`).
+- `Vary: Origin` — responses depend on the CORS origin.
+
+Send the returned `ETag` back as `If-None-Match` (or the `Last-Modified` value as
+`If-Modified-Since`) to get `304 Not Modified` with no body:
+
+```bash
+curl -i localhost:3000/templates
+# ETag: "3Q2-abc..."
+curl -i -H 'If-None-Match: "3Q2-abc..."' localhost:3000/templates
+# HTTP/1.1 304 Not Modified
+```
+
+`/health` and `/upload` always answer with `Cache-Control: no-store`.
+
 ## `GET /`
 
 ```json

@@ -45,6 +45,10 @@ const envSchema = z
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
     /** How long a read with `minLedger` waits for the indexer to catch up before answering 425. */
     API_MIN_LEDGER_WAIT_MS: z.coerce.number().int().min(0).default(3000),
+    /** `Cache-Control: max-age` for read endpoints (0 disables caching). */
+    API_CACHE_MAX_AGE_S: z.coerce.number().int().min(0).default(30),
+    /** `Cache-Control: stale-while-revalidate` for read endpoints. */
+    API_CACHE_SWR_S: z.coerce.number().int().min(0).default(60),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN?.trim()) {

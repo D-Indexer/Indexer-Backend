@@ -4,12 +4,15 @@ import { asyncHandler } from '../middleware/asyncHandler';
 import { folderNameSchema, stellarAddressSchema } from '../validation/schemas';
 import { badRequest, notFound } from '../http/errors';
 
+import { conditionalGet, resourceEtag } from '../middleware/conditionalGet';
+
 export const getByAddress = asyncHandler(async (req: Request, res: Response) => {
   const parsed = stellarAddressSchema.safeParse(req.params.address);
   if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
 
   const folder = await folderService.getFolderByAddress(parsed.data);
   if (!folder) throw notFound('Folder not found');
+  conditionalGet(resourceEtag(folder.updatedAt), folder.updatedAt, req, res);
   res.json(folder);
 });
 
@@ -19,5 +22,6 @@ export const getByName = asyncHandler(async (req: Request, res: Response) => {
 
   const folder = await folderService.getFolderByName(parsed.data);
   if (!folder) throw notFound('Folder not found');
+  conditionalGet(resourceEtag(folder.updatedAt), folder.updatedAt, req, res);
   res.json(folder);
 });

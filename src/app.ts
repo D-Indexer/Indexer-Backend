@@ -11,6 +11,7 @@ import { notFoundHandler } from './middleware/notFound';
 import { requestId } from './middleware/requestId';
 import { readConsistency } from './middleware/readConsistency';
 import { securityHeaders } from './middleware/securityHeaders';
+import { noStore } from './middleware/conditionalGet';
 import { AppEnv } from './config/env';
 
 /**
@@ -48,8 +49,8 @@ export function createApp(env: AppEnv) {
   app.use('/folders', readConsistency, folderRoutes);
   app.use('/templates', readConsistency, templateRoutes);
   app.use('/portfolios', readConsistency, portfolioRoutes);
-  app.use('/upload', uploadRoutes);
-  app.use('/health', healthRoutes);
+  app.use('/upload', noStore, uploadRoutes);
+  app.use('/health', noStore, healthRoutes);
 
   app.use(notFoundHandler);
   app.use(multerErrorHandler);

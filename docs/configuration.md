@@ -54,6 +54,8 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 | `INDEXER_RPC_VERSION_POLICY`      | `warn`                      | `warn` or `refuse` when the RPC version is outside the supported range                     |
 | `INDEXER_STALE_AFTER_MS`          | `120000`                    | Indexer counts as unhealthy after this long without a successful poll                      |
 | `API_MIN_LEDGER_WAIT_MS`          | `3000`                      | Max wait for `?minLedger` reads before `425 Too Early` (`0` disables waiting)               |
+| `API_CACHE_MAX_AGE_S`             | `30`                        | `Cache-Control: max-age` for read endpoints (`0` disables caching)                         |
+| `API_CACHE_SWR_S`                 | `60`                        | `Cache-Control: stale-while-revalidate` for read endpoints                                 |
 | `IPFS_TIMEOUT_MS`                 | `30000`                     | Timeout for the Kubo `add` call                                                            |
 | `DB_MAX_CONNECTIONS`              | `10`                        | Pool size, per process                                                                     |
 | `DB_IDLE_TIMEOUT_MS`              | `30000`                     | Pool idle timeout                                                                          |
