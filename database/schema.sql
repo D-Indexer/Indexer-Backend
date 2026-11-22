@@ -63,3 +63,16 @@ CREATE TABLE IF NOT EXISTS indexer_state (
   value       TEXT NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Idempotency store for POST /upload. Keys expire after the configured TTL (default 24 h).
+-- Expired rows are cleaned up periodically by the application or a scheduled job.
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  idempotency_key  TEXT PRIMARY KEY,
+  fingerprint      TEXT NOT NULL,
+  status_code      INTEGER NOT NULL,
+  response_body    JSONB NOT NULL,
+  in_progress      BOOLEAN NOT NULL DEFAULT true,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at);

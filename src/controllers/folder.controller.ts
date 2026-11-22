@@ -21,3 +21,9 @@ export const getByName = asyncHandler(async (req: Request, res: Response) => {
   if (!folder) throw notFound('Folder not found');
   res.json(folder);
 });
+
+export const checkNameAvailability = asyncHandler(async (req: Request, res: Response) => {
+  const name = req.params.name ?? '';
+  const result = await folderService.checkNameAvailability(name);
+  res.json(result);
+});

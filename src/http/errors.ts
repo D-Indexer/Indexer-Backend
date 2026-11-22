@@ -17,3 +17,8 @@ export function badRequest(message: string): HttpError {
 export function notFound(message: string): HttpError {
   return new HttpError(404, message);
 }
+
+export function methodNotAllowed(method: string, path: string): HttpError {
+  const err = new HttpError(405, `Method ${method} is not allowed on ${path}`);
+  return err;
+}
