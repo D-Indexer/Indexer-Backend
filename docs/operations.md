@@ -154,3 +154,55 @@ Both processes handle SIGTERM/SIGINT. The API stops accepting connections and cl
 pool. The indexer finishes the in-flight page (one transaction) and stops. Either exits
 non-zero after `SHUTDOWN_TIMEOUT_MS`. An interrupted page is rolled back and re-read on the
 next start.
+
+## Load shedding and timeouts
+
+### HTTP server timeouts (#190)
+
+The API configures four Node.js `http.Server` properties at startup:
+
+| Property               | Env var                          | Default | Purpose                                                                        |
+| ---------------------- | -------------------------------- | ------- | ------------------------------------------------------------------------------ |
+| `headersTimeout`       | `SERVER_HEADERS_TIMEOUT_MS`      | 60 000  | Drops connections that never finish sending headers (slowloris defence)        |
+| `requestTimeout`       | `SERVER_REQUEST_TIMEOUT_MS`      | 300 000 | Aborts stalled upload bodies and releases their memory buffers                 |
+| `keepAliveTimeout`     | `SERVER_KEEP_ALIVE_TIMEOUT_MS`   | 65 000  | Must exceed your load balancer's idle timeout to avoid 502s on reused sockets  |
+| `maxRequestsPerSocket` | `SERVER_MAX_REQUESTS_PER_SOCKET` | 0       | `0` = unlimited; set > 0 to drain connections gradually during rolling deploys |
+
+**Matching your load balancer**: set `SERVER_KEEP_ALIVE_TIMEOUT_MS` to at least
+LB idle timeout + 1 000 ms. AWS ALB default is 60 000 ms, so the 65 000 ms default
+is safe. GCP defaults to 600 000 ms — raise this variable accordingly.
+
+### DB pool load shedding (#187)
+
+When all pool connections are busy, `pg.Pool` queues requests internally. Once
+`waitingCount` exceeds `DB_POOL_SHED_THRESHOLD` (default `2`), new requests receive
+`503 Service Unavailable` with a `Retry-After` header immediately rather than
+waiting up to `DB_CONNECTION_TIMEOUT_MS` and returning a 500.
+
+Pool acquisition timeouts that do slip through are also mapped to 503 (not 500) in the
+error handler, so clients and CDNs can distinguish back-pressure from bugs.
+
+Tune `DB_POOL_SHED_THRESHOLD` relative to `DB_MAX_CONNECTIONS`. A value of `2` works for
+pools of 10; raise it proportionally for larger pools.
+
+### Event-loop lag shedding (#188)
+
+CPU-intensive work (multipart parsing, content sniffing) can delay the event loop and
+make cheap read endpoints appear slow. When the p99 event-loop lag measured over the
+last second exceeds `OVERLOAD_LAG_THRESHOLD_MS` (default `100 ms`), all non-health
+requests return `503` with `Retry-After`.
+
+`GET /health` and `GET /health/live` are always exempt so orchestrators (Kubernetes,
+ECS) never restart a healthy-but-busy pod.
+
+### Per-route deadlines (#188)
+
+Each route family has a hard deadline enforced by the `withDeadline` middleware:
+
+| Route prefix                            | Env var                   | Default | Timeout status |
+| --------------------------------------- | ------------------------- | ------- | -------------- |
+| `/folders`, `/templates`, `/portfolios` | `ROUTE_TIMEOUT_READ_MS`   | 5 000   | 503            |
+| `/upload`                               | `ROUTE_TIMEOUT_UPLOAD_MS` | 60 000  | 504            |
+
+When a deadline fires, the response is ended immediately and an `AbortSignal` is set on
+`req.abortSignal` so downstream `fetch` or database calls can be cancelled.

@@ -37,27 +37,37 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 
 ## Optional
 
-| Variable                          | Default                     | Purpose                                                                                    |
-| --------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------ |
-| `NODE_ENV`                        | `development`               | `development`, `test` or `production`                                                      |
-| `PORT`                            | `3000`                      | API port                                                                                   |
-| `CORS_ORIGIN`                     | any origin (non-production) | Comma-separated allow-list, or `*` for any origin. An unparseable list denies all origins. |
-| `REQUEST_BODY_LIMIT`              | `1mb`                       | JSON body limit                                                                            |
-| `LOG_LEVEL`                       | `info`                      | `debug`, `info`, `warn`, `error` or `silent`                                               |
-| `STELLAR_NETWORK_PASSPHRASE`      | testnet passphrase          | Network passphrase (not used by the read-only indexer yet)                                 |
-| `STELLAR_RPC_TIMEOUT_MS`          | `10000`                     | Per-request RPC timeout; failed requests are retried 3× with backoff                       |
-| `INDEXER_POLL_INTERVAL_MS`        | `5000`                      | Delay between polls once caught up                                                         |
-| `INDEXER_PAGE_LIMIT`              | `200`                       | Events per `getEvents` page (1–10000)                                                      |
-| `INDEXER_START_LEDGER`            | unset                       | First ledger on an empty database. Unset = oldest ledger the RPC retains.                  |
-| `INDEXER_ON_RETENTION_GAP`        | `halt`                      | `halt` or `skip`. See [operations](operations.md#retention-gap).                           |
-| `INDEXER_MAX_BACKOFF_MS`          | `60000`                     | Cap for exponential backoff after failed polls                                             |
-| `INDEXER_STALE_AFTER_MS`          | `120000`                    | Indexer counts as unhealthy after this long without a successful poll                      |
-| `IPFS_TIMEOUT_MS`                 | `30000`                     | Timeout for the Kubo `add` call                                                            |
-| `DB_MAX_CONNECTIONS`              | `10`                        | Pool size, per process                                                                     |
-| `DB_IDLE_TIMEOUT_MS`              | `30000`                     | Pool idle timeout                                                                          |
-| `DB_CONNECTION_TIMEOUT_MS`        | `5000`                      | Pool connection timeout                                                                    |
-| `HEALTHCHECK_DATABASE_TIMEOUT_MS` | `2000`                      | DB timeout for `GET /health`                                                               |
-| `SHUTDOWN_TIMEOUT_MS`             | `10000`                     | Graceful shutdown limit                                                                    |
+| Variable                          | Default                     | Purpose                                                                                                                                                      |
+| --------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `NODE_ENV`                        | `development`               | `development`, `test` or `production`                                                                                                                        |
+| `PORT`                            | `3000`                      | API port                                                                                                                                                     |
+| `CORS_ORIGIN`                     | any origin (non-production) | Comma-separated allow-list, or `*` for any origin. An unparseable list denies all origins.                                                                   |
+| `REQUEST_BODY_LIMIT`              | `1mb`                       | JSON body limit                                                                                                                                              |
+| `LOG_LEVEL`                       | `info`                      | `debug`, `info`, `warn`, `error` or `silent`                                                                                                                 |
+| `STELLAR_NETWORK_PASSPHRASE`      | testnet passphrase          | Network passphrase (not used by the read-only indexer yet)                                                                                                   |
+| `STELLAR_RPC_TIMEOUT_MS`          | `10000`                     | Per-request RPC timeout; failed requests are retried 3× with backoff                                                                                         |
+| `INDEXER_POLL_INTERVAL_MS`        | `5000`                      | Delay between polls once caught up                                                                                                                           |
+| `INDEXER_PAGE_LIMIT`              | `200`                       | Events per `getEvents` page (1–10000)                                                                                                                        |
+| `INDEXER_START_LEDGER`            | unset                       | First ledger on an empty database. Unset = oldest ledger the RPC retains.                                                                                    |
+| `INDEXER_ON_RETENTION_GAP`        | `halt`                      | `halt` or `skip`. See [operations](operations.md#retention-gap).                                                                                             |
+| `INDEXER_MAX_BACKOFF_MS`          | `60000`                     | Cap for exponential backoff after failed polls                                                                                                               |
+| `INDEXER_STALE_AFTER_MS`          | `120000`                    | Indexer counts as unhealthy after this long without a successful poll                                                                                        |
+| `IPFS_TIMEOUT_MS`                 | `30000`                     | Timeout for the Kubo `add` call                                                                                                                              |
+| `DB_MAX_CONNECTIONS`              | `10`                        | Pool size, per process                                                                                                                                       |
+| `DB_IDLE_TIMEOUT_MS`              | `30000`                     | Pool idle timeout                                                                                                                                            |
+| `DB_CONNECTION_TIMEOUT_MS`        | `5000`                      | Pool connection timeout                                                                                                                                      |
+| `HEALTHCHECK_DATABASE_TIMEOUT_MS` | `2000`                      | DB timeout for `GET /health`                                                                                                                                 |
+| `SHUTDOWN_TIMEOUT_MS`             | `10000`                     | Graceful shutdown limit                                                                                                                                      |
+| `SERVER_HEADERS_TIMEOUT_MS`       | `60000`                     | Abort connections that don't complete HTTP headers within this window (slowloris defence)                                                                    |
+| `SERVER_REQUEST_TIMEOUT_MS`       | `300000`                    | Abort stalled request bodies (e.g. frozen uploads) and release their memory buffers                                                                          |
+| `SERVER_KEEP_ALIVE_TIMEOUT_MS`    | `65000`                     | Must exceed the upstream LB idle timeout to prevent 502s on reused sockets. AWS ALB default is 60 s; GCP/Nginx is 75 s — raise this if your LB exceeds 65 s. |
+| `SERVER_MAX_REQUESTS_PER_SOCKET`  | `0`                         | Cap requests per keep-alive socket (`0` = unlimited, the Node.js default)                                                                                    |
+| `DB_POOL_SHED_THRESHOLD`          | `2`                         | Reject new DB-bound requests with 503 when `waitingCount` in the pool exceeds this value                                                                     |
+| `DB_POOL_RETRY_AFTER_S`           | `5`                         | `Retry-After` seconds sent with pool-saturation 503 responses                                                                                                |
+| `OVERLOAD_LAG_THRESHOLD_MS`       | `100`                       | Reject non-health requests with 503 when event-loop p99 lag exceeds this threshold (ms)                                                                      |
+| `OVERLOAD_RETRY_AFTER_S`          | `5`                         | `Retry-After` seconds sent with event-loop-overload 503 responses                                                                                            |
+| `ROUTE_TIMEOUT_READ_MS`           | `5000`                      | Per-request deadline for read routes (`/folders`, `/templates`, `/portfolios`)                                                                               |
+| `ROUTE_TIMEOUT_UPLOAD_MS`         | `60000`                     | Per-request deadline for upload routes (`/upload`); returns 504 on expiry                                                                                    |
 
 ## Test-only
 

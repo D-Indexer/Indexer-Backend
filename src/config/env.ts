@@ -42,6 +42,19 @@ const envSchema = z
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+    // #190 – HTTP server hardening
+    SERVER_HEADERS_TIMEOUT_MS: z.coerce.number().int().positive().default(60000),
+    SERVER_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(300000),
+    SERVER_KEEP_ALIVE_TIMEOUT_MS: z.coerce.number().int().positive().default(65000),
+    SERVER_MAX_REQUESTS_PER_SOCKET: z.coerce.number().int().min(0).default(0),
+    // #187 – DB pool load-shedding
+    DB_POOL_SHED_THRESHOLD: z.coerce.number().int().min(0).default(2),
+    DB_POOL_RETRY_AFTER_S: z.coerce.number().int().positive().default(5),
+    // #188 – Event-loop-lag load shedding
+    OVERLOAD_LAG_THRESHOLD_MS: z.coerce.number().int().positive().default(100),
+    OVERLOAD_RETRY_AFTER_S: z.coerce.number().int().positive().default(5),
+    ROUTE_TIMEOUT_READ_MS: z.coerce.number().int().positive().default(5000),
+    ROUTE_TIMEOUT_UPLOAD_MS: z.coerce.number().int().positive().default(60000),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN?.trim()) {
