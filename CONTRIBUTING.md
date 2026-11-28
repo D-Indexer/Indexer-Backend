@@ -12,10 +12,12 @@ Comment on an issue before starting so work isn't duplicated.
 
 ## Set up
 
-Requirements: Node 20+, Docker.
+Requirements: Node 22+ (Active LTS), Docker. The repo pins the runtime in `.nvmrc`, so
+`nvm use` (or `fnm use`) picks the right version.
 
 ```bash
 git clone https://github.com/D-Indexer/Indexer-Backend.git && cd Indexer-Backend
+nvm use                         # reads .nvmrc (Node 22)
 npm install
 cp .env.example .env            # preset for testnet
 docker compose up -d postgres ipfs
@@ -24,7 +26,23 @@ npm run dev:indexer             # terminal 1: indexes the testnet contract
 npm run dev                     # terminal 2: API on http://localhost:3000
 ```
 
-Or run everything in containers with `docker compose up --build` (see the README).
+Dev servers and CLI scripts run through [`tsx`](https://tsx.is/), which strips types on
+load instead of type-checking them, so startup is fast. Type checking is a separate step
+(`npm run typecheck`). Or run everything in containers with `docker compose up --build`
+(see the README).
+
+### Dev container
+
+Prefer not to install anything locally? Open the repo in GitHub Codespaces or in VS Code
+with the [Dev Containers](https://code.visualstudio.com/docs/devcontainers/containers)
+extension. The configuration in [`.devcontainer/`](.devcontainer) starts a Node 20 workspace
+container alongside Postgres and Kubo (IPFS), and installs the Stellar CLI at the same
+pinned version CI uses (see the nightly workflow). `TEST_DATABASE_URL` and the `.env`
+defaults are preset, and `npm ci` plus `npm run db:migrate` run automatically on creation,
+so `npm run check` (including the Postgres tests) passes with no manual steps.
+
+The services are reachable exactly as in the local setup above: Postgres on
+`localhost:5432` and Kubo on `localhost:5001`.
 
 If something doesn't work, run `npm run doctor` first. It checks the environment, database,
 RPC and Kubo node end to end, prints a table with timings and a hint for each failure, and
@@ -37,12 +55,18 @@ printed and URLs are redacted.
 CI runs these on every pull request. Run them before pushing:
 
 ```bash
-npm run typecheck
+npm run typecheck   # tsc --noEmit
 npm run lint        # ESLint + Prettier check; `npm run format` fixes
 npm test
 ```
 
 `npm run check` runs all three.
+
+`npm run build` bundles the API, indexer and CLI with esbuild into `dist/` (single files
+with source maps, native modules externalised). Production runs those bundles; stack
+traces map back to the TypeScript sources via the emitted `.map` files. `src/db/migrate.ts`
+resolves `SCHEMA_PATH` relative to the bundle, so run migrations from the repo root or the
+container's working directory.
 
 ## Tests
 

@@ -1,40 +1,27 @@
 import 'dotenv/config';
-import { getEnv } from '../config/env';
-import pool from '../db/client';
+import { createContainer } from '../container';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
-import { createRpcClient, redactUrl } from './rpc';
+import { redactUrl } from './rpc';
 import { createIndexer } from './stellar';
 import { createHealthServer } from './httpHealth';
 
 /** Indexer process entrypoint: `npm run start:indexer` (or `dev:indexer`). */
 async function main(): Promise<void> {
-  const env = getEnv();
-  await migrate(pool);
+  const container = createContainer();
+  const { db, env } = container;
 
-  const rpc = createRpcClient({ url: env.STELLAR_RPC_URL, timeoutMs: env.STELLAR_RPC_TIMEOUT_MS });
+  await migrate(db);
+
   logger.info('Connecting indexer', { rpc: redactUrl(env.STELLAR_RPC_URL) });
 
-  const health = createHealthServer({
-    port: env.INDEXER_HTTP_PORT,
-    pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
-    tickWindowMultiplier: env.INDEXER_HEALTH_TICK_WINDOW_MULTIPLIER,
-    staleAfterMs: env.INDEXER_STALE_AFTER_MS,
-  });
+  const indexer = createIndexer(container.deps);
 
-  const indexer = createIndexer({
-    db: pool,
-    rpc,
-    config: {
-      contractId: env.FOLDER_CONTRACT_ID,
-      pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
-      pageLimit: env.INDEXER_PAGE_LIMIT,
-      startLedger: env.INDEXER_START_LEDGER,
-      onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
-      maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
-    },
-    onTick: (state) => health.update(state),
-  });
+  // Start the cache LISTEN connection so this process receives NOTIFY messages
+  // and invalidates its in-process cache. The indexer publishes NOTIFY messages
+  // after applying events (see the publish point in src/indexer/stellar.ts);
+  // if the LISTEN connection is down, cache staleness is bounded by the TTL.
+  await startCacheListener();
 
   health.start();
 
@@ -44,7 +31,7 @@ async function main(): Promise<void> {
     timeout.unref();
     await health.stop();
     await indexer.stop();
-    await pool.end();
+    await db.end();
     process.exit(0);
   };
   process.on('SIGTERM', () => void shutdown('SIGTERM'));

@@ -26,6 +26,16 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      kubo:
+        # Keep in sync with deploy/docker-compose.yml (pinned Kubo version).
+        image: ipfs/kubo:v0.30.0
+        ports:
+          - 5001:5001
+        options: >-
+          --health-cmd "ipfs id"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     steps:
       - name: Checkout
@@ -34,7 +44,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install
@@ -46,16 +56,24 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Check generated config docs
+        run: |
+          npm run docs:config
+          git diff --exit-code -- docs/configuration.md .env.example
+
       - name: Test
         env:
           # Enables the Postgres-backed indexer tests (idempotency, atomic cursor).
           TEST_DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          # Enables the IPFS integration tests that hit the real Kubo node above.
+          IPFS_INTEGRATION: "1"
+          IPFS_API_URL: http://localhost:5001
         run: npm test
 
       - name: Build
         run: npm run build
 
-      - name: Verify compiled entrypoints import
+      - name: Verify bundled CLI entrypoint
         env:
           NODE_ENV: test
           DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
@@ -63,7 +81,87 @@ jobs:
           FOLDER_CONTRACT_ID: CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV
           IPFS_API_URL: http://localhost:5001
           IPFS_GATEWAY: https://ipfs.io/ipfs
-        run: node -e "require('./dist/app'); require('./dist/indexer/stellar'); require('./dist/db/migrate')"
+        run: |
+          node dist/indexer/cli.js --help
+          node dist/indexer/cli.js status
+
+      - name: Verify bundled API entrypoint
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+          FOLDER_CONTRACT_ID: CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV
+          IPFS_API_URL: http://localhost:5001
+          IPFS_GATEWAY: https://ipfs.io/ipfs
+          PORT: "3000"
+        run: |
+          node dist/server.js &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/health > /dev/null; then
+              echo "Healthcheck passed"
+              kill "$SERVER_PID"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Healthcheck failed" >&2
+          kill "$SERVER_PID" || true
+          exit 1
+
+  schema-upgrade:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: folder
+          POSTGRES_PASSWORD: folder
+          POSTGRES_DB: folder_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U folder"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history and tags so the script can find the latest release tag.
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Verify schema upgrades from previous release
+        env:
+          TEST_DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: folder
+          PGPASSWORD: folder
+        run: sh scripts/schema-upgrade-check.sh
+
+  devcontainer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build dev container image
+        run: docker build -f .devcontainer/Dockerfile -t folder-indexer-devcontainer:ci .devcontainer
 
   e2e:
     runs-on: ubuntu-latest
@@ -184,3 +282,67 @@ jobs:
 
       - name: Build image
         run: docker build -f deploy/Dockerfile -t folder-indexer-backend:ci .
+
+      - name: Smoke test graceful shutdown (API and indexer)
+        env:
+          DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+          FOLDER_CONTRACT_ID: CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV
+          IPFS_API_URL: http://localhost:5001
+          IPFS_GATEWAY: https://ipfs.io/ipfs
+        run: |
+          set -euo pipefail
+          for target in api indexer; do
+            if [ "$target" = "api" ]; then
+              cmd="node dist/server.js"
+            else
+              cmd="node dist/indexer/main.js"
+            fi
+            cid=$(docker run -d --name "smoke-$target" \
+              -e DATABASE_URL -e STELLAR_RPC_URL -e FOLDER_CONTRACT_ID \
+              -e IPFS_API_URL -e IPFS_GATEWAY \
+              folder-indexer-backend:ci $cmd)
+            # Give the process time to register signal handlers.
+            sleep 5
+            start=$(date +%s)
+            docker stop --time 30 "$cid" >/dev/null
+            elapsed=$(( $(date +%s) - start ))
+            code=$(docker inspect -f '{{.State.ExitCode}}' "$cid")
+            docker rm "$cid" >/dev/null
+            echo "$target exited with code $code after ${elapsed}s"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::$target did not exit gracefully (code $code)"
+              exit 1
+            fi
+            if [ "$elapsed" -ge 30 ]; then
+              echo "::error::$target did not shut down before the kill timeout"
+              exit 1
+            fi
+          done
+
+      - name: Smoke test no zombie processes
+        env:
+          DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+          FOLDER_CONTRACT_ID: CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV
+          IPFS_API_URL: http://localhost:5001
+          IPFS_GATEWAY: https://ipfs.io/ipfs
+        run: |
+          set -euo pipefail
+          cid=$(docker run -d --name smoke-zombies \
+            -e DATABASE_URL -e STELLAR_RPC_URL -e FOLDER_CONTRACT_ID \
+            -e IPFS_API_URL -e IPFS_GATEWAY \
+            folder-indexer-backend:ci node dist/server.js)
+          sleep 5
+          for i in $(seq 1 10); do
+            docker exec smoke-zombies sh -c 'true' >/dev/null 2>&1 || true
+          done
+          zombies=$(docker exec smoke-zombies sh -c \
+            'ps -eo stat 2>/dev/null | grep -c "^Z" || true' | tr -d '[:space:]')
+          docker stop --time 30 "$cid" >/dev/null
+          docker rm "$cid" >/dev/null
+          echo "zombie process count: ${zombies:-0}"
+          if [ "${zombies:-0}" -ne 0 ]; then
+            echo "::error::zombie processes accumulated (${zombies})"
+            exit 1
+          fi
