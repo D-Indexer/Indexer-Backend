@@ -27,6 +27,23 @@ export interface TemplatePortfolio {
   updatedAt: Date;
 }
 
+/** One indexed contract event (`contract_events`). */
+export interface ContractEvent {
+  id: string;
+  ledger: number;
+  ledgerClosedAt: Date;
+  txHash: string;
+  contractId: string;
+  topic: string;
+  topicXdr: string[];
+  valueXdr: string;
+  /** Decoded event fields, or null for `ignored` / `rejected` events. */
+  data: Record<string, unknown> | null;
+  status: 'applied' | 'ignored' | 'rejected';
+  error: string | null;
+  indexedAt: Date;
+}
+
 /** A minted portfolio NFT (contract events `port_mint` / `port_upd` / `tmpl_set`). */
 export interface Portfolio {
   /** Stable portfolio identifier (NFT token id); primary key. */

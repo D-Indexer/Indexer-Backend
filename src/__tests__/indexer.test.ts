@@ -1,8 +1,11 @@
 import { LedgerRangeError, EventSource, GetEventsResult } from '../indexer/rpc';
 import {
+  adaptiveDelay,
   backoffDelay,
   createIndexer,
+  CursorInvalidError,
   IndexerConfig,
+  isValidCursor,
   ledgerFromCursor,
   pollOnce,
   processPage,
@@ -56,6 +59,8 @@ function fakeRpc(overrides: Partial<EventSource> = {}): jest.Mocked<EventSource>
   return {
     getEvents: jest.fn().mockResolvedValue(page([])),
     getHealth: jest.fn().mockResolvedValue({ status: 'healthy', latestLedger: 200, oldestLedger: 100 }),
+    getNetwork: jest.fn().mockResolvedValue({ passphrase: 'Test SDF Network ; September 2015' }),
+    getLedgerEntries: jest.fn().mockResolvedValue({ entries: [], latestLedger: 200 }),
     ...overrides,
   } as jest.Mocked<EventSource>;
 }
@@ -108,6 +113,18 @@ describe('processPage', () => {
     expect(insert.params?.[9]).toBe('rejected');
     expect(insert.params?.[10]).toMatch(/missing field 1/);
     expect(sqls(calls)).toContain('COMMIT');
+  });
+
+  it('stores the decomposed TOID columns from the event id', async () => {
+    const { db, calls } = fakeDb();
+    const event = makeEvent('port_upd', [addr(OWNER), str('bafy')], {
+      id: '0024256944495710208-0000000003',
+    });
+
+    await processPage(db, TESTNET_CONTRACT, page([event]));
+
+    const insert = calls.find((c) => c.sql.includes('INSERT INTO contract_events'))!;
+    expect(insert.params?.slice(11)).toEqual(['24256944495710208', 13, 0, 3]);
   });
 
   it('marks unknown topics as ignored', async () => {
@@ -182,7 +199,11 @@ describe('pollOnce', () => {
 
   it('prefers the saved cursor, then a reset start ledger, then INDEXER_START_LEDGER', async () => {
     const rpc = fakeRpc();
-    await pollOnce({ db: fakeDb({ state: { cursor: 'abc', start_ledger: '7' } }).db, rpc, config });
+    await pollOnce({
+      db: fakeDb({ state: { cursor: '0024284788768636927-4294967295', start_ledger: '7' } }).db,
+      rpc,
+      config,
+    });
     await pollOnce({
       db: fakeDb({ state: { start_ledger: '7' } }).db,
       rpc,
@@ -190,8 +211,43 @@ describe('pollOnce', () => {
     });
     await pollOnce({ db: fakeDb().db, rpc, config: { ...config, startLedger: 9 } });
 
-    expect(rpc.getEvents.mock.calls.map(([p]) => p.cursor ?? p.startLedger)).toEqual(['abc', 7, 9]);
+    expect(rpc.getEvents.mock.calls.map(([p]) => p.cursor ?? p.startLedger)).toEqual([
+      '0024284788768636927-4294967295',
+      7,
+      9,
+    ]);
     expect(rpc.getHealth).not.toHaveBeenCalled();
+  });
+
+  it('recovers from a corrupt cursor by resuming at last_ledger', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: 'garbage', last_ledger: '5654242' } });
+    const rpc = fakeRpc();
+
+    await pollOnce({ db, rpc, config });
+
+    expect(rpc.getEvents).toHaveBeenCalledWith({
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      startLedger: 5654242,
+    });
+    expect(calls.find((c) => c.params?.[0] === 'cursor')?.params).toEqual(['cursor', null]);
+    const recovered = calls.find((c) => c.params?.[0] === 'cursor_recovered');
+    expect(JSON.parse(recovered!.params![1] as string)).toMatchObject({
+      invalidCursor: 'garbage',
+      resumedAt: 5654242,
+    });
+  });
+
+  it('halts with cursor_invalid when neither the cursor nor last_ledger is valid', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: 'garbage' } });
+    const rpc = fakeRpc();
+
+    const err = await pollOnce({ db, rpc, config }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(CursorInvalidError);
+    expect(err.message).toMatch(/reset-cursor/);
+    expect(rpc.getEvents).not.toHaveBeenCalled();
+    expect(calls.find((c) => c.params?.[0] === 'status')?.params).toEqual(['status', 'cursor_invalid']);
   });
 
   it('halts with a clear error when the cursor is older than the retention window', async () => {
@@ -221,10 +277,56 @@ describe('pollOnce', () => {
     expect(rpc.getEvents).toHaveBeenLastCalledWith({
       contractId: TESTNET_CONTRACT,
       limit: 100,
-      startLedger: 101,
+      startLedger: 100,
     });
     const gap = calls.find((c) => c.params?.[0] === 'last_gap');
-    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({ missedFrom: 50, resumedAt: 101 });
+    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({
+      missedFrom: 50,
+      missedTo: 99,
+      resumedAt: 100,
+    });
+  });
+
+  it('retries from the new oldest ledger when the window moves while resuming', async () => {
+    const { db, calls } = fakeDb({ state: { start_ledger: '50' } });
+    const rpc = fakeRpc({
+      getEvents: jest
+        .fn()
+        .mockRejectedValueOnce(new LedgerRangeError('range', 100, 200))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 105, 210))
+        .mockResolvedValueOnce(page([])),
+    });
+
+    await pollOnce({ db, rpc, config: { ...config, onRetentionGap: 'skip' } });
+
+    expect(rpc.getEvents.mock.calls.map(([p]) => p.startLedger)).toEqual([50, 100, 105]);
+    const gap = calls.find((c) => c.params?.[0] === 'last_gap');
+    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({
+      missedFrom: 50,
+      missedTo: 104,
+      resumedAt: 105,
+    });
+  });
+
+  it('gives up after a bounded number of resume attempts', async () => {
+    const { db } = fakeDb({ state: { start_ledger: '50' } });
+    const rpc = fakeRpc({
+      getEvents: jest
+        .fn()
+        .mockRejectedValueOnce(new LedgerRangeError('range', 100, 200))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 101, 201))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 102, 202))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 103, 203)),
+    });
+
+    const err = await pollOnce({
+      db,
+      rpc,
+      config: { ...config, onRetentionGap: 'skip', maxGapResumeAttempts: 2 },
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(RetentionGapError);
+    expect(rpc.getEvents).toHaveBeenCalledTimes(3);
   });
 
   it('clamps an old INDEXER_START_LEDGER on an empty database instead of halting', async () => {
@@ -241,10 +343,14 @@ describe('pollOnce', () => {
     expect(rpc.getEvents).toHaveBeenLastCalledWith({
       contractId: TESTNET_CONTRACT,
       limit: 100,
-      startLedger: 101,
+      startLedger: 100,
     });
     const gap = calls.find((c) => c.params?.[0] === 'last_gap');
-    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({ missedFrom: 5, resumedAt: 101 });
+    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({
+      missedFrom: 5,
+      missedTo: 99,
+      resumedAt: 100,
+    });
   });
 
   it('does not treat a start ledger ahead of the RPC as a retention gap', async () => {
@@ -355,6 +461,14 @@ describe('indexer loop', () => {
     expect(ledgerFromCursor(testnetEvents[0].id)).toBe(testnetEvents[0].ledger);
   });
 
+  it('validates saved cursors', () => {
+    expect(isValidCursor('0024284788768636927-4294967295')).toBe(true);
+    expect(isValidCursor('garbage')).toBe(false);
+    expect(isValidCursor('')).toBe(false);
+    expect(isValidCursor('0-0')).toBe(false);
+    expect(isValidCursor('12-')).toBe(false);
+  });
+
   it('backs off exponentially up to the cap', () => {
     const c = { pollIntervalMs: 1000, maxBackoffMs: 10000 };
     expect([0, 1, 2, 3, 4, 10].map((n) => backoffDelay(c, n))).toEqual([
@@ -374,5 +488,53 @@ describe('indexer loop', () => {
     await indexer.stop();
 
     expect(rpc.getEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails a tick that exceeds its deadline, marks status error and recovers', async () => {
+    const { db, calls } = fakeDb();
+    let release: (() => void) | undefined;
+    const stuck = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const rpc = fakeRpc({
+      getEvents: jest
+        .fn()
+        .mockImplementationOnce(async () => {
+          await stuck;
+          return page([]);
+        })
+        .mockResolvedValue(page([])),
+    });
+
+    const indexer = createIndexer({
+      db,
+      rpc,
+      config: { ...config, tickTimeoutMs: 20, shutdownTimeoutMs: 200 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const errorWrite = calls.find((c) => c.params?.[0] === 'status' && c.params?.[1] === 'error');
+    expect(errorWrite).toBeDefined();
+
+    release!();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(rpc.getEvents.mock.calls.length).toBeGreaterThan(1);
+    await indexer.stop();
+  });
+
+  it('stop() returns within shutdownTimeoutMs during a stuck tick', async () => {
+    const { db } = fakeDb();
+    const rpc = fakeRpc({ getEvents: jest.fn(() => new Promise<GetEventsResult>(() => undefined)) });
+
+    const indexer = createIndexer({
+      db,
+      rpc,
+      config: { ...config, tickTimeoutMs: 60000, shutdownTimeoutMs: 20 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const started = Date.now();
+    await indexer.stop();
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });

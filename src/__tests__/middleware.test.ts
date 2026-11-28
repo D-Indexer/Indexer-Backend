@@ -1,3 +1,4 @@
+import { rpcHeaders } from '../config/env';
 import { errorHandler } from '../middleware/errorHandler';
 import { notFoundHandler } from '../middleware/notFound';
 import { requestId } from '../middleware/requestId';

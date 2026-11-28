@@ -13,7 +13,9 @@ import { errorHandler } from './middleware/errorHandler';
 import { multerErrorHandler } from './middleware/multerErrorHandler';
 import { notFoundHandler } from './middleware/notFound';
 import { requestId } from './middleware/requestId';
+import { readConsistency } from './middleware/readConsistency';
 import { securityHeaders } from './middleware/securityHeaders';
+import { noStore } from './middleware/conditionalGet';
 import { AppEnv } from './config/env';
 import type { FeatureFlagKey, FeatureFlagService } from './featureFlags';
 import type { Queryable } from './db/types';
@@ -81,11 +83,37 @@ export function createApp(deps: AppDependencies) {
   const { env, featureFlags } = deps;
   const app = express();
 
+  const { middleware: overloadMiddleware } = createOverloadMiddleware(env);
+
   app.disable('x-powered-by');
+  app.set('trust proxy', env.TRUST_PROXY);
+  warnIfTrustProxyUnset(env);
   app.use(requestId);
+  app.use((req, res, next) => {
+    const startedAt = Date.now();
+    res.on('finish', () => {
+      logger.info('Request', {
+        requestId: req.id,
+        method: req.method,
+        path: req.originalUrl,
+        status: res.statusCode,
+        ip: req.ip,
+        durationMs: Date.now() - startedAt,
+      });
+    });
+    next();
+  });
   app.use(securityHeaders);
   app.use(cors({ origin: corsOrigin(env) }));
   app.use(express.json({ limit: env.REQUEST_BODY_LIMIT }));
+  const defaultNetworkPassphrase = env.API_NETWORK_DEFAULT || env.STELLAR_NETWORK_PASSPHRASE;
+  app.use(networkMiddleware(defaultNetworkPassphrase));
+
+  // #188 – Shed load when event-loop lag is high (health probes are exempt).
+  app.use(overloadMiddleware);
+
+  // #187 – Shed load when the DB pool is saturated.
+  app.use(dbLoadShedding(pool, env));
 
   app.get('/', (_req, res) => {
     res.json({

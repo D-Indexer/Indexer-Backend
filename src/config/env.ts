@@ -243,9 +243,12 @@ export const envSchema = z
     REQUEST_BODY_LIMIT: z.string().default('1mb'),
     INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
     INDEXER_PAGE_LIMIT: z.coerce.number().int().min(1).max(10000).default(200),
+    INDEXER_MAX_PAGES_PER_TICK: z.coerce.number().int().min(1).max(1000).default(50),
     INDEXER_START_LEDGER: optionalPositiveInt,
     INDEXER_ON_RETENTION_GAP: z.enum(['halt', 'skip']).default('halt'),
+    INDEXER_MAX_GAP_RESUME_ATTEMPTS: z.coerce.number().int().min(1).default(5),
     INDEXER_MAX_BACKOFF_MS: z.coerce.number().int().positive().default(60000),
+    INDEXER_RPC_VERSION_POLICY: z.enum(['warn', 'refuse']).default('warn'),
     INDEXER_STALE_AFTER_MS: z.coerce.number().int().positive().default(120000),
     INDEXER_HTTP_PORT: z.coerce.number().int().positive().max(65535).default(3001),
     INDEXER_TICK_WINDOW_MULTIPLIER: z.coerce.number().int().min(1).default(3),
@@ -262,6 +265,7 @@ export const envSchema = z
       .union([z.literal('').transform(() => undefined), z.string().min(1)])
       .optional(),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+    SHUTDOWN_FORCE_CLOSE_MS: z.coerce.number().int().positive().default(8000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
     PORTFOLIO_TRANSFERS_ENABLED: z
       .enum(['true', 'false', '1', '0'])
@@ -362,7 +366,107 @@ export function getIndexerDatabaseUrl(env: AppEnv): string {
   return env.INDEXER_DATABASE_URL ?? env.DATABASE_URL;
 }
 
+/** Split a comma-separated endpoint list, dropping blanks and duplicates. */
+export function parseRpcUrls(value: string | undefined): string[] {
+  if (!value) return [];
+  const urls = value
+    .split(',')
+    .map((url) => url.trim())
+    .filter((url) => url.length > 0);
+  return [...new Set(urls)];
+}
+
+const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const FORBIDDEN_HEADERS = new Set(['host', 'content-length', 'connection', 'transfer-encoding']);
+
+export type RpcHeadersResult = { ok: true; headers: Record<string, string> } | { ok: false; error: string };
+
+/**
+ * Parse a JSON object of RPC headers. Error messages never include header
+ * values, so a malformed config cannot leak an API key into logs.
+ */
+export function parseRpcHeaders(raw: string): RpcHeadersResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, error: 'must be a JSON object of header name/value pairs' };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'must be a JSON object of header name/value pairs' };
+  }
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!HEADER_NAME_RE.test(name)) {
+      return { ok: false, error: `contains an invalid header name: ${JSON.stringify(name)}` };
+    }
+    if (FORBIDDEN_HEADERS.has(name.toLowerCase())) {
+      return { ok: false, error: `must not set the ${name} header` };
+    }
+    if (typeof value !== 'string' || value.trim() === '') {
+      return { ok: false, error: `header ${name} must have a non-empty string value` };
+    }
+    if (/[\r\n]/.test(value)) {
+      return { ok: false, error: `header ${name} must not contain line breaks` };
+    }
+    headers[name] = value;
+  }
+  return { ok: true, headers };
+}
+
+/** All configured RPC endpoints, primary first. */
+export function rpcUrls(env: Pick<AppEnv, 'STELLAR_RPC_URL' | 'STELLAR_RPC_URLS'>): string[] {
+  const urls = parseRpcUrls(env.STELLAR_RPC_URLS);
+  if (urls.length > 0) return urls;
+  return env.STELLAR_RPC_URL ? [env.STELLAR_RPC_URL] : [];
+}
+
+/** Express `trust proxy` setting derived from TRUST_PROXY. */
+export type TrustProxy = AppEnv['TRUST_PROXY'];
+
+/** Warn (once) when production runs without TRUST_PROXY, so client IPs may be wrong. */
+export function warnIfTrustProxyUnset(env: Pick<AppEnv, 'NODE_ENV' | 'TRUST_PROXY'>): void {
+  if (env.NODE_ENV === 'production' && env.TRUST_PROXY === false) {
+    logger.warn(
+      'TRUST_PROXY is unset in production; req.ip will be the load balancer address. Set TRUST_PROXY to the hop count or trusted CIDRs.'
+    );
+  }
+}
+
 let cachedEnv: AppEnv | null = null;
+
+/**
+ * Resolve the headers sent with every RPC request: STELLAR_RPC_HEADERS merged
+ * with the JSON file at STELLAR_RPC_HEADERS_FILE (file wins). Throws without
+ * echoing header values when the configuration is invalid.
+ */
+export function rpcHeaders(
+  env: Pick<AppEnv, 'STELLAR_RPC_HEADERS' | 'STELLAR_RPC_HEADERS_FILE'>,
+  readFile: (path: string) => string = (path) => readFileSync(path, 'utf8')
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const sources: Array<[string, string | undefined]> = [
+    ['STELLAR_RPC_HEADERS', env.STELLAR_RPC_HEADERS],
+    ['STELLAR_RPC_HEADERS_FILE', env.STELLAR_RPC_HEADERS_FILE],
+  ];
+  for (const [key, raw] of sources) {
+    if (raw === undefined || raw.trim() === '') continue;
+    let content = raw;
+    if (key === 'STELLAR_RPC_HEADERS_FILE') {
+      try {
+        content = readFile(raw.trim());
+      } catch {
+        throw new Error(`Invalid environment configuration: ${key} could not be read. See docs/configuration.md`);
+      }
+    }
+    const result = parseRpcHeaders(content);
+    if (!result.ok) {
+      throw new Error(`Invalid environment configuration: ${key} ${result.error}. See docs/configuration.md`);
+    }
+    Object.assign(headers, result.headers);
+  }
+  return headers;
+}
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   const { env, issues } = resolveSecretFiles(source);

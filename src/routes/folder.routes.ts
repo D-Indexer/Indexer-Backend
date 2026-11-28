@@ -14,4 +14,6 @@ export function createFolderRoutes(deps: FolderRoutesDeps): Router {
 // Future wildcard routes must use the new path-to-regexp syntax, e.g. '/*splat'
 // (the legacy '*' / ':param*' forms are no longer valid in Express 5).
 
+attachMethodNotAllowed(router);
+
 export default router;

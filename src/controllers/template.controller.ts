@@ -5,9 +5,20 @@ import { badRequest, notFound } from '../http/errors';
 import { parsePageRequest } from '../http/pagination';
 import { templateIdSchema } from '../validation/schemas';
 
-export interface TemplateControllerDeps {
-  db: Queryable;
-}
+export const list = async (_req: Request, res: Response): Promise<void> => {
+  const templates = await templateService.listTemplates();
+  const newest = templates.reduce<Date | null>(
+    (acc, template) => (acc === null || template.registeredAt > acc ? template.registeredAt : acc),
+    null
+  );
+  conditionalGet(
+    collectionEtag(templates.map((template) => ({ marker: template.registeredAt }))),
+    newest,
+    req,
+    res
+  );
+  res.json(templates);
+};
 
 export interface TemplateController {
   list: RequestHandler;
@@ -45,13 +56,7 @@ export function createTemplateController({ db }: TemplateControllerDeps): Templa
       res.json(template);
     },
 
-    listPortfolios: async (req: Request, res: Response): Promise<void> => {
-      const id = parseTemplateId(req.params['id']);
-      const page = parsePageRequest(req.query, 2);
-      const template = await templateService.getTemplate(db, id);
-      if (!template) throw notFound('Template not found');
-      const { items, nextCursor } = await templateService.listTemplatePortfolios(db, id, page);
-      res.json({ portfolios: items, nextCursor });
-    },
-  };
-}
+  if (!template) throw notFound('Template not found');
+  conditionalGet(resourceEtag(template.registeredAt), template.registeredAt, req, res);
+  res.json(template);
+};

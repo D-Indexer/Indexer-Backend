@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import * as folderService from '../services/folder';
 import { folderNameSchema, stellarAddressSchema } from '../validation/schemas';
 import { badRequest, notFound } from '../http/errors';
+import { cacheTags } from '../middleware/cacheTags';
 
 export const getByAddress = async (req: Request, res: Response): Promise<void> => {
   const address = req.params.address;
@@ -16,6 +17,7 @@ export const getByAddress = async (req: Request, res: Response): Promise<void> =
 
   const folder = await folderService.getFolderByAddress(parsed.data, query.data.atLedger);
   if (!folder) throw notFound('Folder not found');
+  conditionalGet(resourceEtag(folder.updatedAt), folder.updatedAt, req, res);
   res.json(folder);
 };
 
@@ -32,5 +34,6 @@ export const getByName = async (req: Request, res: Response): Promise<void> => {
 
   const folder = await folderService.getFolderByName(parsed.data, query.data.atLedger);
   if (!folder) throw notFound('Folder not found');
+  conditionalGet(resourceEtag(folder.updatedAt), folder.updatedAt, req, res);
   res.json(folder);
 };
