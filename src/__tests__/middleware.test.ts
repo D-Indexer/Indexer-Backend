@@ -1,9 +1,12 @@
+import { rpcHeaders } from '../config/env';
 import { errorHandler } from '../middleware/errorHandler';
 import { notFoundHandler } from '../middleware/notFound';
 import { requestId } from '../middleware/requestId';
 import { securityHeaders } from '../middleware/securityHeaders';
+import { serverTiming } from '../middleware/serverTiming';
 import { HttpError } from '../http/errors';
 import { mockResponse } from './testUtils';
+import { getContext, runWithContext } from '../utils/context';
 
 describe('middleware', () => {
   it('propagates incoming request ids', () => {
@@ -51,6 +54,87 @@ describe('middleware', () => {
     });
   });
 
+  it('isolates request contexts across interleaved async work', async () => {
+    const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const runRequest = (requestId: string, wait: number) =>
+      runWithContext({ requestId }, async () => {
+        const seen: string[] = [];
+        seen.push(getContext()?.requestId as string);
+        await delay(wait);
+        seen.push(getContext()?.requestId as string);
+        await delay(wait);
+        seen.push(getContext()?.requestId as string);
+        return seen;
+      });
+
+    const [first, second] = await Promise.all([
+      runRequest('req-a', 15),
+      runRequest('req-b', 5),
+    ]);
+
+    expect(first).toEqual(['req-a', 'req-a', 'req-a']);
+    expect(second).toEqual(['req-b', 'req-b', 'req-b']);
+    expect(getContext()).toBeUndefined();
+  });
+
+  it('emits accurate Server-Timing entries for timed dependencies', () => {
+    const res = mockResponse();
+    const next = jest.fn();
+    const middleware = serverTiming({ enabled: true, slowThresholdMs: 10_000 });
+
+    runWithContext({ requestId: 'req-123' }, () => {
+      middleware({} as any, res, next);
+      const ctx = getContext() as any;
+      ctx.timings.db = { count: 3, durationMs: 12.3 };
+      ctx.timings.ipfs = { count: 1, durationMs: 850 };
+      ctx.timings.app = { count: 0, durationMs: 4 };
+      res.emit('finish');
+    });
+
+    expect(next).toHaveBeenCalled();
+    expect(res.setHeader).toHaveBeenCalledWith(
+      'Server-Timing',
+      'db;dur=12.3;desc="3 queries", ipfs;dur=850;desc="1 call", app;dur=4'
+    );
+  });
+
+  it('omits Server-Timing when disabled', () => {
+    const res = mockResponse();
+    const middleware = serverTiming({ enabled: false, slowThresholdMs: 10_000 });
+
+    runWithContext({ requestId: 'req-123' }, () => {
+      middleware({} as any, res, jest.fn());
+      const ctx = getContext() as any;
+      ctx.timings.db = { count: 1, durationMs: 5 };
+      res.emit('finish');
+    });
+
+    expect(res.setHeader).not.toHaveBeenCalledWith('Server-Timing', expect.anything());
+  });
+
+  it('logs a warning with the breakdown for slow requests', () => {
+    const res = mockResponse();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const middleware = serverTiming({ enabled: true, slowThresholdMs: 100 });
+
+    runWithContext({ requestId: 'req-slow' }, () => {
+      middleware({} as any, res, jest.fn());
+      const ctx = getContext() as any;
+      ctx.timings.db = { count: 2, durationMs: 60 };
+      ctx.timings.ipfs = { count: 1, durationMs: 120 };
+      ctx.timings.app = { count: 0, durationMs: 10 };
+      res.emit('finish');
+    });
+
+    expect(warnSpy).toHaveBeenCalled();
+    const message = String(warnSpy.mock.calls[0][0]);
+    expect(message).toContain('req-slow');
+    expect(message).toContain('db');
+    expect(message).toContain('ipfs');
+    warnSpy.mockRestore();
+  });
+
   it('exposes expected HTTP errors', () => {
     const res = mockResponse();
     const logSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -65,5 +149,156 @@ describe('middleware', () => {
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({ error: 'Bad input', requestId: 'req-123' });
     logSpy.mockRestore();
+  });
+});
+
+describe('upload quota middleware', () => {
+  const SALT = 'test-salt';
+  const IP = '203.0.113.7';
+  const HASH = 'a'.repeat(64);
+
+  function makeClock(start: Date) {
+    let now = start.getTime();
+    return {
+      now: () => new Date(now),
+      advance: (ms: number) => {
+        now += ms;
+      },
+      set: (date: Date) => {
+        now = date.getTime();
+      },
+    };
+  }
+
+  function makeReq(overrides: Record<string, unknown> = {}) {
+    return {
+      ip: IP,
+      body: {},
+      header: jest.fn().mockReturnValue(undefined),
+      ...overrides,
+    } as any;
+  }
+
+  function makeStore(clock: ReturnType<typeof makeClock>) {
+    return new UploadQuotaStore({ now: clock.now });
+  }
+
+  it('returns 429 with a reset time when the daily byte quota is exceeded', () => {
+    const clock = makeClock(new Date('2024-05-01T10:00:00.000Z'));
+    const store = makeStore(clock);
+    const middleware = createUploadQuotaMiddleware({
+      store,
+      salt: SALT,
+      maxDailyBytes: 100,
+      maxDailyFiles: 100,
+      now: clock.now,
+    });
+    const next = jest.fn();
+
+    middleware(makeReq({ body: { size: 60 } }), mockResponse(), next);
+    expect(next).toHaveBeenCalledTimes(1);
+
+    const res = mockResponse();
+    middleware(makeReq({ body: { size: 60 } }), res, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(429);
+    const payload = (res.json as jest.Mock).mock.calls[0][0];
+    expect(payload.error).toBeDefined();
+    expect(payload.resetAt).toBe('2024-05-02T00:00:00.000Z');
+    expect(res.setHeader).toHaveBeenCalledWith('retry-after', expect.any(String));
+  });
+
+  it('enforces the daily file-count quota', () => {
+    const clock = makeClock(new Date('2024-05-01T10:00:00.000Z'));
+    const store = makeStore(clock);
+    const middleware = createUploadQuotaMiddleware({
+      store,
+      salt: SALT,
+      maxDailyBytes: 1_000_000,
+      maxDailyFiles: 2,
+      now: clock.now,
+    });
+    const next = jest.fn();
+
+    middleware(makeReq({ body: { size: 1 } }), mockResponse(), next);
+    middleware(makeReq({ body: { size: 1 } }), mockResponse(), next);
+    expect(next).toHaveBeenCalledTimes(2);
+
+    const res = mockResponse();
+    middleware(makeReq({ body: { size: 1 } }), res, next);
+
+    expect(next).toHaveBeenCalledTimes(2);
+    expect(res.status).toHaveBeenCalledWith(429);
+    expect((res.json as jest.Mock).mock.calls[0][0].resetAt).toBe('2024-05-02T00:00:00.000Z');
+  });
+
+  it('rolls the quota window over at UTC midnight', () => {
+    const clock = makeClock(new Date('2024-05-01T23:59:00.000Z'));
+    const store = makeStore(clock);
+    const middleware = createUploadQuotaMiddleware({
+      store,
+      salt: SALT,
+      maxDailyBytes: 100,
+      maxDailyFiles: 100,
+      now: clock.now,
+    });
+    const next = jest.fn();
+
+    middleware(makeReq({ body: { size: 100 } }), mockResponse(), next);
+    expect(next).toHaveBeenCalledTimes(1);
+
+    const blocked = mockResponse();
+    middleware(makeReq({ body: { size: 1 } }), blocked, next);
+    expect(blocked.status).toHaveBeenCalledWith(429);
+
+    clock.set(new Date('2024-05-02T00:00:00.000Z'));
+
+    const res = mockResponse();
+    middleware(makeReq({ body: { size: 100 } }), res, next);
+
+    expect(next).toHaveBeenCalledTimes(2);
+    expect(res.status).not.toHaveBeenCalledWith(429);
+  });
+
+  it('rejects blocklisted content hashes before pinning', () => {
+    const clock = makeClock(new Date('2024-05-01T10:00:00.000Z'));
+    const store = makeStore(clock);
+    store.blockContentHash(HASH);
+    const middleware = createUploadQuotaMiddleware({
+      store,
+      salt: SALT,
+      maxDailyBytes: 1_000_000,
+      maxDailyFiles: 100,
+      now: clock.now,
+    });
+    const next = jest.fn();
+    const res = mockResponse();
+
+    middleware(makeReq({ body: { size: 10, sha256: HASH } }), res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(store.getUsage(hashClientIp(IP, SALT), clock.now()).bytes).toBe(0);
+  });
+
+  it('persists only a salted hash of the client IP', () => {
+    const clock = makeClock(new Date('2024-05-01T10:00:00.000Z'));
+    const store = makeStore(clock);
+    const middleware = createUploadQuotaMiddleware({
+      store,
+      salt: SALT,
+      maxDailyBytes: 1_000_000,
+      maxDailyFiles: 100,
+      now: clock.now,
+    });
+
+    middleware(makeReq({ body: { size: 42 } }), mockResponse(), jest.fn());
+
+    const keys = store.listClientKeys();
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).not.toContain(IP);
+    expect(keys[0]).toBe(hashClientIp(IP, SALT));
+    expect(keys[0]).toMatch(/^[0-9a-f]{64}$/);
   });
 });
