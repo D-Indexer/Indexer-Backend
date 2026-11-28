@@ -68,6 +68,14 @@ async function openRange(
 }
 
 /**
+ * Outcome of applying one event. `orphaned` means the event updates a row that
+ * does not exist yet (the indexer started partway through history, or the
+ * parent event is later in the same page); it is stored and re-applied when the
+ * parent row arrives.
+ */
+export type ApplyOutcome = 'applied' | 'orphaned';
+
+/**
  * Apply one decoded contract event to the read model. Runs inside the page
  * transaction (see processPage); `at` is the ledger close time of the event.
  * Each event id is applied at most once, so handlers don't need to be
@@ -82,23 +90,37 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
         'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
         [event.admin, at]
       );
-      return;
+      return 'applied';
 
     case 'adm_add':
       await db.query(
         'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
         [event.newAdmin, at]
       );
-      return;
+      return 'applied';
 
     case 'adm_rm':
       await db.query('DELETE FROM admins WHERE address = $1', [event.target]);
-      return;
+      return 'applied';
 
     case 'folder_cl':
+      // A name belongs to exactly one owner: drop it from any previous owner
+      // (and record the move) before the claiming owner takes it.
+      await db.query(
+        `INSERT INTO folder_name_history (name, owner, claimed_at)
+         SELECT name, owner, claimed_at FROM folders WHERE name = $1 AND owner <> $2
+         ON CONFLICT (name, owner, claimed_at) DO NOTHING`,
+        [event.folderName, event.owner]
+      );
+      await db.query('DELETE FROM folders WHERE name = $1 AND owner <> $2', [
+        event.folderName,
+        event.owner,
+      ]);
       await db.query(
         `INSERT INTO folders (owner, name, claimed_at, updated_at) VALUES ($1, $2, $3, $3)
-         ON CONFLICT (owner) DO UPDATE SET name = EXCLUDED.name, updated_at = EXCLUDED.updated_at`,
+         ON CONFLICT (owner) DO UPDATE
+           SET name = EXCLUDED.name, claimed_at = EXCLUDED.claimed_at,
+               updated_at = EXCLUDED.updated_at`,
         [event.owner, event.folderName, at]
       );
       await openRange(db, 'folder_versions', 'owner', event.owner, event.ledger, ['name'], [
@@ -138,7 +160,7 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
       );
       return;
 
-    case 'tmpl_set':
+    case 'tmpl_set': {
       // set_user_template also re-points an already-minted portfolio.
       await db.query('UPDATE folders SET template_id = $2, updated_at = $3 WHERE owner = $1', [
         event.owner,
@@ -250,4 +272,5 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
       throw new Error(`unhandled event topic: ${JSON.stringify(unhandled)}`);
     }
   }
+  return reapplied;
 }

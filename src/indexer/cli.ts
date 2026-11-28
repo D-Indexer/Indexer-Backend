@@ -45,6 +45,14 @@ export async function run(args: string[]): Promise<number> {
       if (!fresh) console.error(`indexer unhealthy: ${JSON.stringify(state)}`);
       return fresh ? 0 : 1;
     }
+    case 'orphans': {
+      const { rows } = await pool.query(
+        `SELECT id, ledger, ledger_closed_at, tx_hash, topic, data, indexed_at
+           FROM contract_events WHERE status = 'orphaned' ORDER BY ledger, id`
+      );
+      console.log(JSON.stringify(rows, null, 2));
+      return 0;
+    }
     default:
       console.error(USAGE);
       return 2;

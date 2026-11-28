@@ -168,6 +168,7 @@ events. The outbox is the delivery path for external systems.
 | ----------------- | ----------------------- | ---------------------------------------------------------------------------------------------- |
 | `contract_events` | RPC event id            | every event: ledger, close time, tx hash, raw topic/value XDR, decoded data, status, error     |
 | `folders`         | `owner` (unique `name`) | `folder_cl`, `tmpl_set`, `port_mint`                                                           |
+| `folder_name_history` | `(name, owner, claimed_at)` | `folder_cl` (every claim, including names later moved to another owner)                  |
 | `templates`       | `id`                    | `tmpl_reg`                                                                                     |
 | `portfolios`      | `owner`                 | `port_mint`, `port_upd`, `tmpl_set`                                                            |
 | `portfolio_versions` | `(owner, version)`   | `port_mint`, `port_upd`: owner, version number, cid, template id, event id, time               |
