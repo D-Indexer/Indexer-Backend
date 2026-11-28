@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import type { Pool, PoolClient } from 'pg';
 import { logger as defaultLogger } from '../utils/logger';
+import { convertContractEventsXdrToBytea } from './xdrByteaMigration';
 
 /**
  * database/schema.sql is the single source of truth for the schema.
@@ -209,9 +210,13 @@ export async function migrate(db: Pick<Pool, 'connect'>, options: MigrateOptions
   }
 }
 
-/** Data migrations that run after the schema on every `migrate()`. */
+/** Data migrations that run after the schema on every `migrate()`. Each is a no-op once applied. */
 function defaultPostSchemaSteps(): PostSchemaStep[] {
-  return [];
+  return [
+    async (client, logger) => {
+      await convertContractEventsXdrToBytea(client, { logger });
+    },
+  ];
 }
 
 if (require.main === module) {

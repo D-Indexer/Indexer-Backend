@@ -14,6 +14,14 @@
 -- alone: unique indexes on a partitioned table must include the partition key.)
 -- A DEFAULT partition is the safety net for any ledger range that has not had a
 -- partition created ahead of time.
+--
+-- topic_xdr / value_xdr hold the raw event XDR as bytes, not base64 text
+-- (base64 is ~33% larger). Conversion happens at the boundary in
+-- src/indexer/xdrStorage.ts; anything that exposes raw XDR still returns
+-- base64 (in SQL: translate(encode(value_xdr, 'base64'), E'\n', ''); encode()
+-- wraps lines every 76 chars). They are the last columns so
+-- that a fresh table and one converted from the old TEXT layout by
+-- src/db/xdrByteaMigration.ts (which appends the new columns) are identical.
 CREATE TABLE IF NOT EXISTS contract_events (
   id                TEXT NOT NULL,
   ledger            INTEGER NOT NULL,
@@ -21,12 +29,12 @@ CREATE TABLE IF NOT EXISTS contract_events (
   tx_hash           TEXT NOT NULL,
   contract_id       TEXT NOT NULL,
   topic             TEXT NOT NULL,
-  topic_xdr         TEXT[] NOT NULL,
-  value_xdr         TEXT NOT NULL,
   data              JSONB,
   status            TEXT NOT NULL CHECK (status IN ('applied', 'ignored', 'rejected')),
   error             TEXT,
   indexed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  topic_xdr         BYTEA[] NOT NULL,
+  value_xdr         BYTEA NOT NULL,
   PRIMARY KEY (ledger, id)
 ) PARTITION BY RANGE (ledger);
 

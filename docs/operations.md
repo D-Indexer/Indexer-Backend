@@ -396,6 +396,59 @@ Local stack with PgBouncer: `docker compose --profile pgbouncer up` starts PgBou
 configuration, with `TEST_DATABASE_URL` pointing at PgBouncer and
 `TEST_DATABASE_DIRECT_URL` at Postgres.
 
+### Raw XDR storage (BYTEA)
+
+`contract_events.topic_xdr` / `value_xdr` store the raw event XDR as bytes (`BYTEA[]` /
+`BYTEA`), not base64 text. The indexer converts at the boundary
+(`src/indexer/xdrStorage.ts`); everything that exposes raw XDR still returns base64. In SQL:
+
+```sql
+-- encode() wraps lines every 76 characters; strip them to get the RPC's base64.
+SELECT id, translate(encode(value_xdr, 'base64'), E'\n', '') AS value_xdr_b64
+FROM contract_events WHERE id = '...';
+```
+
+XDR that is not canonical base64 cannot round-trip through bytes. Such an event is always
+`rejected` (it doesn't decode either), and its text is stored verbatim as UTF-8
+(`convert_from(value_xdr, 'UTF8')`).
+
+**Upgrading an existing database.** `migrate()` converts the old `TEXT` columns
+automatically, while it holds the migration lock (`src/db/xdrByteaMigration.ts`):
+
+1. It adds `topic_xdr_bin` / `value_xdr_bin` (catalog-only) and converts rows in
+   keyset-ordered batches of 5,000 on `(ledger, id)`. Each batch is its own short transaction.
+2. It swaps in one short transaction: `LOCK TABLE ... ACCESS EXCLUSIVE`, convert stragglers,
+   drop the `TEXT` columns, rename the `BYTEA` ones into place, `SET NOT NULL`.
+
+It is resumable: progress is the data itself, so after a crash or restart the next
+`migrate()` carries on where it stopped. Stop old-version indexers before upgrading. A
+pre-BYTEA indexer writing after the swap would store base64 text as bytes.
+
+Plan for disk headroom: the conversion updates every row, so until the table is rewritten
+it is about **2.2×** its original size (dead tuples plus the dropped columns). Afterwards,
+reclaim the space partition by partition:
+
+```sql
+VACUUM FULL contract_events_p5000000;   -- repeat per partition (or use pg_repack online)
+```
+
+Measured with `scripts/measure-xdr-storage.ts`: 500,000 rows cycled from the testnet fixture
+events, 4 partitions, PostgreSQL 16.
+
+|                                | TEXT (base64) | BYTEA, after `VACUUM FULL` | Change |
+| ------------------------------ | ------------: | -------------------------: | -----: |
+| XDR column bytes / row         |         209.7 |                      161.1 | -23.2% |
+| Heap                           |     279.0 MiB |                  260.4 MiB |  -6.7% |
+| TOAST                          |       0.0 MiB |                    0.0 MiB |      – |
+| Indexes                        |      77.8 MiB |                   77.9 MiB |  +0.2% |
+| Total (heap + TOAST + indexes) |     357.0 MiB |                  338.4 MiB |  -5.2% |
+
+The XDR itself shrinks by roughly the expected quarter. The table as a whole shrinks less
+because ids, hashes, the decoded `data` JSONB and the indexes dominate a row. Folder events
+are small, so nothing was being TOASTed. The conversion of 500k rows took about 50 s.
+Re-measure against your own data with
+`MEASURE_DATABASE_URL=... npx tsx scripts/measure-xdr-storage.ts <rows>`.
+
 ### Partitioning `contract_events`
 
 `contract_events` is range-partitioned by `ledger`, one partition per

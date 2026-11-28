@@ -4,6 +4,7 @@ import { applyEvent } from './handlers';
 import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
 import { logger } from '../utils/logger';
 import { runWithContext } from '../utils/context';
+import { insertContractEvent, toStoredXdr } from './xdrStorage';
 
 /** Subscriber types that receive an outbox row for every applied event. */
 export const OUTBOX_SUBSCRIBERS = ['webhook', 'changes'] as const;
@@ -234,32 +235,27 @@ async function storeEvent(
     error = err.message;
   }
 
-  const status = error ? 'rejected' : decoded ? 'applied' : 'ignored';
-  // contract_events is range-partitioned on ledger; the primary key is
-  // (ledger, id). The ledger is derived from the event id, so conflicting on
-  // the primary key is exactly "this event id is already stored".
-  const inserted = await client.query(
-    `INSERT INTO contract_events
-       (id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-     ON CONFLICT (ledger, id) DO NOTHING
-     RETURNING id`,
-    [
-      event.id,
-      event.ledger,
-      event.ledgerClosedAt,
-      event.txHash,
-      contractId,
-      topic,
-      event.topic,
-      event.value,
-      decoded ? JSON.stringify(decoded) : null,
-      status,
-      error,
-    ]
-  );
+  // Raw XDR is stored as bytes (BYTEA), not base64 text; see xdrStorage.ts.
+  // XDR that is not canonical base64 cannot round-trip, so such an event is
+  // rejected (it would not decode anyway) and its text is kept verbatim.
+  const stored = toStoredXdr(event);
+  if (stored.error) {
+    decoded = null;
+    error ??= stored.error;
+  }
 
-  if (inserted.rowCount === 0) return 'duplicate';
+  const status = error ? 'rejected' : decoded ? 'applied' : 'ignored';
+  const inserted = await insertContractEvent(client, {
+    event,
+    contractId,
+    topic,
+    stored,
+    data: decoded,
+    status,
+    error,
+  });
+
+  if (!inserted) return 'duplicate';
   if (!decoded) {
     if (error) logger.warn('Rejected malformed contract event', { id: event.id, topic, error });
     return status as 'ignored' | 'rejected';
