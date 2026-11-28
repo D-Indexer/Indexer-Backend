@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import { createContainer } from '../container';
+import { getDirectDatabaseUrl } from '../config/env';
+import { createDirectPool } from '../db/connections';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
 import { redactUrl } from './rpc';
@@ -11,7 +13,14 @@ async function main(): Promise<void> {
   const container = createContainer();
   const { db, env } = container;
 
-  await migrate(db);
+  // Migrations hold a session-level advisory lock, so they run on a short-lived
+  // direct connection (DATABASE_DIRECT_URL) even when `db` goes through PgBouncer.
+  const migrationPool = createDirectPool(getDirectDatabaseUrl(env));
+  try {
+    await migrate(migrationPool);
+  } finally {
+    await migrationPool.end();
+  }
 
   logger.info('Connecting indexer', { rpc: redactUrl(env.STELLAR_RPC_URL) });
 

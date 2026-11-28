@@ -15,15 +15,13 @@ import { logger as defaultLogger } from '../utils/logger';
  *    a single file at the project root (e.g. `dist/indexer.js`).
  */
 function resolveSchemaPath(): string {
-  const override = process.env.SCHEMA_PATH;
+  const override = process.env['SCHEMA_PATH'];
   if (override) {
     return path.resolve(override);
   }
-  const candidates = [
-    path.resolve(__dirname, '../../database/schema.sql'),
-    path.resolve(__dirname, '../database/schema.sql'),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+  const fromSource = path.resolve(__dirname, '../../database/schema.sql');
+  const fromBundle = path.resolve(__dirname, '../database/schema.sql');
+  return [fromSource, fromBundle].find((candidate) => existsSync(candidate)) ?? fromSource;
 }
 
 export const SCHEMA_PATH = resolveSchemaPath();
@@ -69,6 +67,13 @@ export async function assertNoLegacySchema(db: Pick<Pool, 'query'>): Promise<voi
   }
 }
 
+/** The single row a `SELECT <fn>()` returns. */
+function firstRow<T>(result: { rows: T[] }): T {
+  const row = result.rows[0];
+  if (row === undefined) throw new Error('expected a row');
+  return row;
+}
+
 type MigrateLogger = Pick<typeof defaultLogger, 'info' | 'warn'>;
 
 /** A step run after the schema is applied, while the migration lock is still held. */
@@ -89,20 +94,48 @@ export type MigrateOptions = {
 /**
  * Take the migration advisory lock on `client`, logging how long it waited.
  * `pg_try_advisory_lock` first, so the common uncontended case logs nothing
- * alarming and a contended start says why it is pausing.
+ * alarming and a contended start says why it is pausing. Returns the backend
+ * pid that holds the lock.
  */
 async function acquireMigrationLock(client: PoolClient, logger: MigrateLogger): Promise<number> {
   const started = Date.now();
-  const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [
-    MIGRATION_LOCK_KEY,
-  ]);
-  if (!rows[0]?.locked) {
+  const tried = firstRow(
+    await client.query<{ locked: boolean; pid: number }>(
+      'SELECT pg_try_advisory_lock($1) AS locked, pg_backend_pid() AS pid',
+      [MIGRATION_LOCK_KEY]
+    )
+  );
+  let pid = tried.pid;
+  if (!tried.locked) {
     logger.info('Waiting for migration lock held by another process', { lockKey: MIGRATION_LOCK_KEY });
-    await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+    const waited = firstRow(
+      await client.query<{ pid: number }>('SELECT pg_advisory_lock($1), pg_backend_pid() AS pid', [
+        MIGRATION_LOCK_KEY,
+      ])
+    );
+    pid = waited.pid;
   }
-  const waitedMs = Date.now() - started;
-  logger.info('Acquired migration lock', { lockKey: MIGRATION_LOCK_KEY, waitedMs });
-  return waitedMs;
+  logger.info('Acquired migration lock', { lockKey: MIGRATION_LOCK_KEY, waitedMs: Date.now() - started });
+  return pid;
+}
+
+/**
+ * Behind PgBouncer in transaction mode, consecutive statements on one client
+ * can run on different server sessions, so the session-level lock would not
+ * protect anything and the unlock would run on the wrong session, leaking the
+ * lock. Detect that and refuse before touching the schema.
+ */
+async function assertSameSession(client: PoolClient, lockPid: number): Promise<void> {
+  const { pid } = firstRow(await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'));
+  if (pid !== lockPid) {
+    throw new Error(
+      `migrate() is running through a transaction-pooling proxy (e.g. PgBouncer pool_mode=transaction): ` +
+        `the migration lock was taken on backend ${lockPid} but the next statement ran on backend ` +
+        `${pid}. Set DATABASE_DIRECT_URL to a direct Postgres connection. Backend ${lockPid} ` +
+        `may still hold the lock; release it with SELECT pg_terminate_backend(${lockPid}). ` +
+        'See docs/operations.md#connection-pooling-pgbouncer.'
+    );
+  }
 }
 
 /**
@@ -129,8 +162,9 @@ export async function migrate(db: Pick<Pool, 'connect'>, options: MigrateOptions
   let releaseError: Error | undefined;
 
   try {
-    await acquireMigrationLock(client, logger);
+    const lockPid = await acquireMigrationLock(client, logger);
     try {
+      await assertSameSession(client, lockPid);
       await assertNoLegacySchema(client);
       await client.query('BEGIN');
       try {
@@ -144,10 +178,22 @@ export async function migrate(db: Pick<Pool, 'connect'>, options: MigrateOptions
         await step(client, logger);
       }
     } finally {
+      // No `throw` in here: a failed unlock must not mask the original error.
       try {
-        await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]);
+        const { unlocked } = firstRow(
+          await client.query<{ unlocked: boolean }>('SELECT pg_advisory_unlock($1) AS unlocked', [
+            MIGRATION_LOCK_KEY,
+          ])
+        );
+        if (!unlocked) {
+          releaseError = new Error(
+            `migration lock was not held by this session (taken on backend ${lockPid})`
+          );
+        }
       } catch (err) {
         releaseError = err instanceof Error ? err : new Error(String(err));
+      }
+      if (releaseError) {
         logger.warn('Failed to release migration lock; discarding the connection', {
           error: releaseError.message,
         });
@@ -171,15 +217,13 @@ function defaultPostSchemaSteps(): PostSchemaStep[] {
 if (require.main === module) {
   // Imported lazily so loading this module (e.g. in tests) doesn't need env.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const pool: Pool = require('./client').default;
+  const { getDirectDatabaseUrl, loadEnv } = require('../config/env') as typeof import('../config/env');
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { waitForDatabase } = require('./client');
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { env } = require('../config/env');
-  waitForDatabase(pool, {
-    timeoutMs: env.DB_WAIT_TIMEOUT_MS,
-    maxDelayMs: env.DB_WAIT_MAX_DELAY_MS,
-  })
+  const { createDirectPool, waitForDatabase } = require('./connections') as typeof import('./connections');
+  // The migration lock is session-scoped: migrate over a direct connection,
+  // never through PgBouncer in transaction mode.
+  const pool = createDirectPool(getDirectDatabaseUrl(loadEnv()));
+  waitForDatabase(pool, { logger: defaultLogger })
     .then(() => migrate(pool))
     .then(() => defaultLogger.info('Migrations applied'))
     .catch((err: unknown) => {

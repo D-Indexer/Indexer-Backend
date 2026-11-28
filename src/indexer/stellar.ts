@@ -317,6 +317,10 @@ async function enqueueOutbox(client: PoolClient, event: RawEvent, decoded: Decod
  * Persist one getEvents page and advance the cursor in a single transaction.
  * Events already stored (same RPC event id) are skipped, so replaying a page
  * after a crash or a manual cursor rewind is safe.
+ *
+ * PgBouncer: transaction-pooling safe. Everything (inserts, SAVEPOINTs, the
+ * cursor write and pg_notify, which Postgres delivers on commit) runs inside
+ * one BEGIN ... COMMIT on one checked-out client, with no session state.
  */
 export async function processPage(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
   return runWithContext({ pageId: page.cursor, cursor: page.cursor }, () =>

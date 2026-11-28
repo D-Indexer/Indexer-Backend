@@ -117,6 +117,71 @@ jobs:
           kill "$SERVER_PID" || true
           exit 1
 
+  # Runs the test suite through PgBouncer in transaction pooling mode, as
+  # managed Postgres deployments commonly do. Pooled tests use TEST_DATABASE_URL
+  # (PgBouncer); session-required work (migrations, LISTEN) uses
+  # TEST_DATABASE_DIRECT_URL. See docs/operations.md#connection-pooling-pgbouncer.
+  pgbouncer:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: folder
+          POSTGRES_PASSWORD: folder
+          POSTGRES_DB: folder_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U folder"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      pgbouncer:
+        # Keep in sync with the `pgbouncer` profile in deploy/docker-compose.yml.
+        image: edoburu/pgbouncer:v1.25.2-p0
+        env:
+          DB_HOST: postgres
+          DB_PORT: '5432'
+          DB_USER: folder
+          DB_PASSWORD: folder
+          AUTH_TYPE: scram-sha-256
+          POOL_MODE: transaction
+          MAX_PREPARED_STATEMENTS: '0'
+          MAX_CLIENT_CONN: '200'
+          DEFAULT_POOL_SIZE: '10'
+        ports:
+          - 6432:5432
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Wait for PgBouncer
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 6432 -U folder; then exit 0; fi
+            sleep 2
+          done
+          echo "PgBouncer did not become ready" >&2
+          exit 1
+
+      - name: Test through PgBouncer (transaction pooling)
+        env:
+          TEST_DATABASE_URL: postgresql://folder:folder@localhost:6432/folder_test
+          TEST_DATABASE_DIRECT_URL: postgresql://folder:folder@localhost:5432/folder_test
+          DATABASE_DIRECT_URL: postgresql://folder:folder@localhost:5432/folder_test
+        run: npm test
+
   schema-upgrade:
     runs-on: ubuntu-latest
     services:

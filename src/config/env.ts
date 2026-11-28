@@ -46,6 +46,14 @@ export const envVarMeta: Record<keyof AppEnv, EnvVarMeta> = {
     secret: true,
     required: true,
   },
+  DATABASE_DIRECT_URL: {
+    description:
+      'Direct (non-PgBouncer) PostgreSQL connection string for session-scoped work: migrations ' +
+      '(advisory lock), LISTEN connections and snapshot import/export. Falls back to DATABASE_URL. ' +
+      'Set it when DATABASE_URL points at PgBouncer in transaction pooling mode.',
+    example: 'postgres://postgres:postgres@postgres:5432/folder',
+    secret: true,
+  },
   STELLAR_RPC_URL: {
     description: 'Soroban RPC endpoint used to read contract state and events.',
     example: TESTNET_RPC_URL,
@@ -199,6 +207,10 @@ export const envSchema = z
       .string()
       .min(1, 'DATABASE_URL is required')
       .describe(envVarMeta.DATABASE_URL.description),
+    DATABASE_DIRECT_URL: z
+      .union([z.literal('').transform(() => undefined), z.string().min(1)])
+      .optional()
+      .describe(envVarMeta.DATABASE_DIRECT_URL.description),
     STELLAR_RPC_URL: z
       .string({ required_error: `STELLAR_RPC_URL is required (testnet: ${TESTNET_RPC_URL})` })
       .url('STELLAR_RPC_URL must be a valid URL')
@@ -344,6 +356,16 @@ export function getUploadQuotaConfig(env: AppEnv = getEnv()): UploadQuotaConfig 
 /** Connection string for the internet-facing API process (falls back to DATABASE_URL). */
 export function getApiDatabaseUrl(env: AppEnv): string {
   return env.API_DATABASE_URL ?? env.DATABASE_URL;
+}
+
+/**
+ * Connection string for work that needs a real Postgres session (advisory
+ * locks, LISTEN, migrations). Falls back to DATABASE_URL, which is correct when
+ * DATABASE_URL is already a direct connection. See
+ * docs/operations.md#connection-pooling-pgbouncer.
+ */
+export function getDirectDatabaseUrl(env: Pick<AppEnv, 'DATABASE_URL' | 'DATABASE_DIRECT_URL'>): string {
+  return env.DATABASE_DIRECT_URL ?? env.DATABASE_URL;
 }
 
 /** Connection string for the indexer process (falls back to DATABASE_URL). */

@@ -1,12 +1,20 @@
-import { Pool, type PoolConfig } from 'pg';
-import { getEnv } from '../config/env';
-import cache from '../cache';
+import { Client, Pool, type PoolConfig } from 'pg';
+import { getDirectDatabaseUrl, getEnv, type AppEnv } from '../config/env';
+import { cache } from '../cache';
 
 export type PoolEnv = Pick<
   AppEnv,
   'DATABASE_URL' | 'DB_MAX_CONNECTIONS' | 'DB_IDLE_TIMEOUT_MS' | 'DB_CONNECTION_TIMEOUT_MS'
 >;
 
+const env = getEnv();
+
+/**
+ * The shared pool uses DATABASE_URL, which may point at PgBouncer in
+ * transaction pooling mode: only transaction-safe work goes through it (see
+ * src/db/connections.ts). Session-scoped work — the LISTEN connection below,
+ * migrations, snapshots — uses getDirectDatabaseUrl(env) instead.
+ */
 const poolConfig: PoolConfig = {
   connectionString: env.DATABASE_URL,
   max: env.DB_MAX_CONNECTIONS,
@@ -101,7 +109,9 @@ async function connectListener(): Promise<void> {
     return;
   }
 
-  const client = new Client({ connectionString: env.DATABASE_URL });
+  // LISTEN is session state: through PgBouncer in transaction mode the
+  // notifications would go to whichever client holds the server connection.
+  const client = new Client({ connectionString: getDirectDatabaseUrl(env) });
   listenClient = client;
 
   client.on('notification', (msg) => {

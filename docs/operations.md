@@ -341,6 +341,61 @@ Fix the credentials or create the database, then restart.
 - Connect locally to the compose database:
   `docker compose exec postgres psql -U folder folder`.
 
+### Connection pooling (PgBouncer)
+
+Managed Postgres is often fronted by PgBouncer in **transaction** pooling mode to cap
+connection counts. There, a client holds a server connection only for one transaction, so
+anything that relies on session state between transactions breaks, often silently. The
+backend therefore uses two connection strings:
+
+| Variable              | Used for                                                     | May point at PgBouncer (transaction mode)? |
+| --------------------- | ------------------------------------------------------------ | ------------------------------------------ |
+| `DATABASE_URL`        | Everything transaction-safe: API queries, indexer pages      | Yes                                        |
+| `DATABASE_DIRECT_URL` | Session-required work (below). Falls back to `DATABASE_URL`. | **No**: must reach Postgres directly       |
+
+Leave `DATABASE_DIRECT_URL` unset when `DATABASE_URL` is already a direct connection.
+
+**Session-required: needs `DATABASE_DIRECT_URL`**
+
+| Feature                                           | Why                                                                       | Code                                                  |
+| ------------------------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Migrations (`npm run db:migrate`, indexer start)  | Holds a session-level `pg_advisory_lock` across several transactions      | `src/db/migrate.ts`                                   |
+| Cache-invalidation listener                       | `LISTEN cache_invalidate`; notifications go to the session that listened  | `src/db/client.ts`                                    |
+| `folder_indexed` subscribers                      | `LISTEN folder_indexed`                                                   | `src/db/listen.ts` (defaults to `DATABASE_DIRECT_URL`) |
+| Feature-flag invalidation                         | `LISTEN feature_flags_changed`; pass a direct client as `listener`        | `src/featureFlags.ts`                                 |
+| Snapshot export/import (`export-snapshot`, ...)   | Long REPEATABLE READ export transaction; runs migrations before importing | `src/indexer/snapshot.ts`                             |
+
+**Transaction-safe: fine through PgBouncer**
+
+- Single-statement queries (API reads, `writeState`, `ensurePartitions`).
+- `processPage`: inserts, `SAVEPOINT`s, the cursor write and `pg_notify()` all run inside
+  one `BEGIN ... COMMIT` on one checked-out client. `NOTIFY` is delivered on commit, so
+  *sending* works through the pool; only `LISTEN` needs a direct session.
+- Parameterised queries. node-postgres uses the unnamed prepared statement unless a query
+  passes `name`, and nothing does. Do not add named statements: they depend on PgBouncer's
+  `max_prepared_statements`, which CI sets to `0`.
+
+Rules for new code:
+
+- Never use session-level `SET`. Use `withTransaction(db, fn, { settings: { name: value } })`
+  from `src/db/connections.ts`, which applies `set_config(name, value, true)` (`SET LOCAL`)
+  so the value ends with the transaction.
+- Anything that `LISTEN`s, holds an advisory lock across transactions, or needs a session
+  for any other reason connects with `getDirectDatabaseUrl(env)`.
+
+`migrate()` refuses to run through a transaction-pooling proxy. If its statements land on
+different server sessions it fails with
+`migrate() is running through a transaction-pooling proxy ... Set DATABASE_DIRECT_URL`,
+naming the backend that may still hold the lock (release it with
+`SELECT pg_terminate_backend(<pid>)`).
+
+Local stack with PgBouncer: `docker compose --profile pgbouncer up` starts PgBouncer
+(`pool_mode=transaction`, `max_prepared_statements=0`) on `localhost:6432`. Set
+`DATABASE_URL` to `...@pgbouncer:5432/folder` and `DATABASE_DIRECT_URL` to
+`...@postgres:5432/folder`. CI's `pgbouncer` job runs the test suite through the same
+configuration, with `TEST_DATABASE_URL` pointing at PgBouncer and
+`TEST_DATABASE_DIRECT_URL` at Postgres.
+
 ### Partitioning `contract_events`
 
 `contract_events` is range-partitioned by `ledger`, one partition per

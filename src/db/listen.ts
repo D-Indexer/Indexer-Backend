@@ -34,7 +34,11 @@ export type IndexedEvent =
 export type IndexedHandler = (event: IndexedEvent) => void;
 
 export interface SubscribeIndexedOptions {
-  /** Postgres connection string. Defaults to `process.env.DATABASE_URL`. */
+  /**
+   * Postgres connection string. Must be a direct (non-PgBouncer) connection:
+   * LISTEN is session state. Defaults to `process.env.DATABASE_DIRECT_URL`,
+   * then `process.env.DATABASE_URL`.
+   */
   connectionString?: string;
   /** Base delay (ms) before reconnecting. Defaults to 1000. */
   reconnectBaseDelayMs?: number;
@@ -85,7 +89,7 @@ export function subscribeIndexed(
   options: SubscribeIndexedOptions = {},
 ): IndexedSubscription {
   const connectionString =
-    options.connectionString ?? process.env.DATABASE_URL;
+    options.connectionString ?? (process.env['DATABASE_DIRECT_URL'] || process.env['DATABASE_URL']);
   const baseDelay = options.reconnectBaseDelayMs ?? 1000;
   const maxDelay = options.reconnectMaxDelayMs ?? 30000;
   const logger = options.logger ?? console;

@@ -7,9 +7,9 @@
 import { Client, Pool } from 'pg';
 import { loadSchemaSql, migrate, MIGRATION_LOCK_KEY } from '../db/migrate';
 
-const url = process.env.TEST_DATABASE_URL;
+const url = process.env['TEST_DATABASE_URL'];
 // Session-level advisory locks need a direct (non-PgBouncer) session.
-const directUrl = process.env.TEST_DATABASE_DIRECT_URL ?? url;
+const directUrl = process.env['TEST_DATABASE_DIRECT_URL'] ?? url;
 const describeDb = url ? describe : describe.skip;
 
 const SCHEMA = 'migrate_concurrency_test';
@@ -45,7 +45,7 @@ async function heldMigrationLocks(): Promise<number> {
           AND classid = $1::bigint::oid AND objid = $2::bigint::oid`,
       [high, low]
     );
-    return rows[0].n;
+    return rows[0]!.n;
   });
 }
 
@@ -98,7 +98,7 @@ describeDb('migrate() under concurrency', () => {
     await holder.connect();
     await holder.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
 
-    const infos: Array<{ msg: string; ctx?: Record<string, unknown> }> = [];
+    const infos: Array<{ msg: string; ctx: Record<string, unknown> | undefined }> = [];
     const logger = {
       info: (msg: string, ctx?: Record<string, unknown>) => infos.push({ msg, ctx }),
       warn: () => undefined,
@@ -113,7 +113,7 @@ describeDb('migrate() under concurrency', () => {
       await running;
 
       const acquired = infos.find((i) => i.msg === 'Acquired migration lock');
-      expect(acquired?.ctx?.waitedMs).toBeGreaterThanOrEqual(250);
+      expect(acquired?.ctx?.['waitedMs']).toBeGreaterThanOrEqual(250);
     } finally {
       await holder.end();
       await pool.end();
@@ -158,5 +158,34 @@ describeDb('migrate() under concurrency', () => {
       await pool.end();
     }
     expect(await heldMigrationLocks()).toBe(0);
+  });
+});
+
+describe('migrate() behind a transaction-pooling proxy', () => {
+  it('refuses, and discards the connection, when statements hop between server sessions', async () => {
+    let pid = 100;
+    const statements: string[] = [];
+    let releasedWith: unknown = 'not released';
+    const client = {
+      query: async (sql: string) => {
+        statements.push(sql);
+        // Each statement lands on a different backend, as PgBouncer
+        // pool_mode=transaction may do between transactions.
+        pid++;
+        if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true, pid }] };
+        if (sql.includes('pg_advisory_unlock')) return { rows: [{ unlocked: false }] };
+        return { rows: [{ pid }] };
+      },
+      release: (err?: unknown) => {
+        releasedWith = err;
+      },
+    };
+    const db = { connect: async () => client } as unknown as Pool;
+
+    await expect(migrate(db, { schemaSql: 'SELECT 1', logger: silent })).rejects.toThrow(
+      /transaction-pooling proxy.*DATABASE_DIRECT_URL.*pg_terminate_backend\(101\)/
+    );
+    expect(statements.some((s) => s.includes('BEGIN'))).toBe(false);
+    expect(releasedWith).toBeInstanceOf(Error);
   });
 });
