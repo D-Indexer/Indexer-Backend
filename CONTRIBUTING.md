@@ -12,10 +12,12 @@ Comment on an issue before starting so work isn't duplicated.
 
 ## Set up
 
-Requirements: Node 20+, Docker.
+Requirements: Node 22+ (Active LTS), Docker. The repo pins the runtime in `.nvmrc`, so
+`nvm use` (or `fnm use`) picks the right version.
 
 ```bash
 git clone https://github.com/D-Indexer/Indexer-Backend.git && cd Indexer-Backend
+nvm use                         # reads .nvmrc (Node 22)
 npm install
 cp .env.example .env            # preset for testnet
 docker compose up -d postgres ipfs
@@ -24,19 +26,28 @@ npm run dev:indexer             # terminal 1: indexes the testnet contract
 npm run dev                     # terminal 2: API on http://localhost:3000
 ```
 
-Or run everything in containers with `docker compose up --build` (see the README).
+Dev servers and CLI scripts run through [`tsx`](https://tsx.is/), which strips types on
+load instead of type-checking them, so startup is fast. Type checking is a separate step
+(`npm run typecheck`). Or run everything in containers with `docker compose up --build`
+(see the README).
 
 ## Checks
 
 CI runs these on every pull request. Run them before pushing:
 
 ```bash
-npm run typecheck
+npm run typecheck   # tsc --noEmit
 npm run lint        # ESLint + Prettier check; `npm run format` fixes
 npm test
 ```
 
 `npm run check` runs all three.
+
+`npm run build` bundles the API, indexer and CLI with esbuild into `dist/` (single files
+with source maps, native modules externalised). Production runs those bundles; stack
+traces map back to the TypeScript sources via the emitted `.map` files. `src/db/migrate.ts`
+resolves `SCHEMA_PATH` relative to the bundle, so run migrations from the repo root or the
+container's working directory.
 
 ## Tests
 
