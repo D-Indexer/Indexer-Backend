@@ -1,51 +1,39 @@
 import { Request, Response } from 'express';
 import * as folderService from '../services/folder';
-import { asyncHandler } from '../middleware/asyncHandler';
-import { addressLookupSchema, folderListQuerySchema, folderNameSchema, stellarAddressSchema } from '../validation/schemas';
+import { folderNameSchema, stellarAddressSchema } from '../validation/schemas';
 import { badRequest, notFound } from '../http/errors';
-import { decodeCursor } from '../http/cursor';
+import { cacheTags } from '../middleware/cacheTags';
 
-export const list = asyncHandler(async (req: Request, res: Response) => {
-  const parsed = folderListQuerySchema.safeParse(req.query);
-  if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
-
-  const { order, limit, cursor } = parsed.data;
-  const page = await folderService.listFolders({
-    order,
-    limit,
-    cursor: cursor === undefined ? undefined : decodeCursor(cursor, order),
-  });
-  res.json(page);
-});
-
-export const getByAddress = asyncHandler(async (req: Request, res: Response) => {
-  const parsed = stellarAddressSchema.safeParse(req.params.address);
-  if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
-
-  const folder = await folderService.getFolderByAddress(parsed.data);
-  if (!folder) throw notFound('Folder not found');
-  res.json(folder);
-});
-
-export const lookup = asyncHandler(async (req: Request, res: Response) => {
-  const parsed = addressLookupSchema.safeParse(req.body);
+export const getByAddress = async (req: Request, res: Response): Promise<void> => {
+  const address = req.params.address;
+  const parsed = stellarAddressSchema.safeParse(address);
   if (!parsed.success) {
-    const details = parsed.error.errors.map((issue) => ({
-      index: typeof issue.path[0] === 'number' ? issue.path[0] : null,
-      address: typeof issue.path[0] === 'number' ? (req.body?.addresses?.[issue.path[0]] ?? null) : null,
-      message: issue.message,
-    }));
-    throw badRequest(parsed.error.errors[0].message, details);
+    const firstError = parsed.error.errors[0];
+    throw badRequest(firstError ? firstError.message : 'Invalid address');
   }
 
-  res.json(await folderService.getFoldersByAddresses(parsed.data.addresses));
-});
+  const query = atLedgerQuerySchema.safeParse(req.query);
+  if (!query.success) throw badRequest(query.error.errors[0].message);
 
-export const getByName = asyncHandler(async (req: Request, res: Response) => {
-  const parsed = folderNameSchema.safeParse(req.params.name);
-  if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
-
-  const folder = await folderService.getFolderByName(parsed.data);
+  const folder = await folderService.getFolderByAddress(parsed.data, query.data.atLedger);
   if (!folder) throw notFound('Folder not found');
+  conditionalGet(resourceEtag(folder.updatedAt), folder.updatedAt, req, res);
   res.json(folder);
-});
+};
+
+export const getByName = async (req: Request, res: Response): Promise<void> => {
+  const name = req.params.name;
+  const parsed = folderNameSchema.safeParse(name);
+  if (!parsed.success) {
+    const firstError = parsed.error.errors[0];
+    throw badRequest(firstError ? firstError.message : 'Invalid folder name');
+  }
+
+  const query = atLedgerQuerySchema.safeParse(req.query);
+  if (!query.success) throw badRequest(query.error.errors[0].message);
+
+  const folder = await folderService.getFolderByName(parsed.data, query.data.atLedger);
+  if (!folder) throw notFound('Folder not found');
+  conditionalGet(resourceEtag(folder.updatedAt), folder.updatedAt, req, res);
+  res.json(folder);
+};

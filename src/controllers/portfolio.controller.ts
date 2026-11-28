@@ -1,55 +1,40 @@
 import { Request, Response } from 'express';
 import * as portfolioService from '../services/portfolio';
-import { asyncHandler } from '../middleware/asyncHandler';
-import { addressLookupSchema, portfolioListQuerySchema, stellarAddressSchema, tokenIdSchema } from '../validation/schemas';
+import { stellarAddressSchema } from '../validation/schemas';
 import { badRequest, notFound } from '../http/errors';
-import { decodeCursor } from '../http/cursor';
+import { validateManifest } from '../validation/manifest';
 
-export const list = asyncHandler(async (req: Request, res: Response) => {
-  const parsed = portfolioListQuerySchema.safeParse(req.query);
-  if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
+export const getByAddress = async (req: Request, res: Response): Promise<void> => {
+  const address = req.params.address;
+  if (typeof address !== 'string') throw badRequest('Invalid address');
 
-  const { order, limit, cursor } = parsed.data;
-  const page = await portfolioService.listPortfolios({
-    order,
-    limit,
-    cursor: cursor === undefined ? undefined : decodeCursor(cursor, order),
-  });
-  res.json(page);
-});
-
-export const getByAddress = asyncHandler(async (req: Request, res: Response) => {
-  const parsed = stellarAddressSchema.safeParse(req.params.address);
-  if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
-
-  const portfolio = await portfolioService.getPortfolio(parsed.data);
-  if (!portfolio) throw notFound('Portfolio not found');
-  res.json(portfolio);
-});
-
-export const lookup = asyncHandler(async (req: Request, res: Response) => {
-  const parsed = addressLookupSchema.safeParse(req.body);
+  const parsed = stellarAddressSchema.safeParse(address);
   if (!parsed.success) {
-    const details = parsed.error.errors.map((issue) => ({
-      index: typeof issue.path[0] === 'number' ? issue.path[0] : null,
-      address: typeof issue.path[0] === 'number' ? (req.body?.addresses?.[issue.path[0]] ?? null) : null,
-      message: issue.message,
-    }));
-    throw badRequest(parsed.error.errors[0].message, details);
+    const firstError = parsed.error.errors[0];
+    throw badRequest(firstError ? firstError.message : 'Invalid address');
   }
 
-  res.json(await portfolioService.getPortfoliosByAddresses(parsed.data.addresses));
-});
+  const ledgerParsed = atLedgerSchema.safeParse(req.query.atLedger);
+  if (!ledgerParsed.success) throw badRequest(ledgerParsed.error.errors[0].message);
 
-export const getMetadata = asyncHandler(async (req: Request, res: Response) => {
-  const parsed = tokenIdSchema.safeParse(req.params.tokenId);
-  if (!parsed.success) throw badRequest(parsed.error.errors[0].message);
+  const atLedger = ledgerParsed.data;
 
-  const metadata = await portfolioService.getPortfolioMetadata(parsed.data);
-  if (!metadata) throw notFound('Token not found');
+  if (atLedger !== undefined) {
+    const result = await portfolioService.getPortfolioAtLedger(parsed.data, atLedger);
+    if (result === null) throw notFound('Portfolio not found');
+    if (result === 'out_of_range') {
+      throw badRequest(
+        `atLedger ${atLedger} is outside the indexed ledger range`,
+      );
+    }
+    res.json(result);
+    return;
+  }
 
-  // Metadata is immutable per token id until the portfolio is updated; let
-  // clients and gateways cache it briefly.
-  res.set('Cache-Control', 'public, max-age=60');
-  res.json(metadata);
-});
+  const portfolio = res.locals?.network
+    ? await portfolioService.getPortfolio(parsed.data, res.locals.network)
+    : await portfolioService.getPortfolio(parsed.data);
+  if (!portfolio) throw notFound('Portfolio not found');
+  conditionalGet(resourceEtag(portfolio.updatedAt), portfolio.updatedAt, req, res);
+  res.json(portfolio);
+};

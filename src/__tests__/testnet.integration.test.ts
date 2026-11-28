@@ -98,7 +98,7 @@ describeLive('testnet integration', () => {
 
     // port_mint + port_upd -> portfolios, holding the CID from the update.
     const events = await pool.query(
-      "SELECT topic, data FROM contract_events WHERE data->>'owner' = $1 ORDER BY id",
+      "SELECT topic, data FROM contract_events WHERE data->>'owner' = $1 ORDER BY toid, event_index",
       [expected.owner]
     );
     expect(events.rows.map((r) => r.topic)).toEqual(['folder_cl', 'port_mint', 'port_upd']);
