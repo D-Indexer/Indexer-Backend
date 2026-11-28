@@ -192,7 +192,12 @@ change the status code; the indexer process has its own healthcheck
     "lagSeconds": 12.4,
     "lastLedger": 5654521,
     "lastSuccessAt": "2026-11-10T07:37:30.225Z",
-    "lastError": null
+    "lastError": null,
+    "leader": {
+      "instanceId": "indexer-1:42",
+      "since": "2026-11-10T07:30:00.000Z",
+      "heartbeatAt": "2026-11-10T07:37:30.225Z"
+    }
   },
   "requestId": "03a1e532-cabc-4f9a-bfd7-b7242bb46db2"
 }

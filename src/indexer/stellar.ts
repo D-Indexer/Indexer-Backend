@@ -259,6 +259,8 @@ export async function writeState(
   entries: Partial<Record<string, string | null>>,
   network?: string
 ): Promise<void> {
+  const upserts: [string, string][] = [];
+  const deletes: string[] = [];
   for (const [key, value] of Object.entries(entries)) {
     if (value === null || value === undefined) {
       await db.query(
@@ -732,6 +734,8 @@ async function storeEvent(
       eventIndex,
     ]
   );
+  return new Set(rows.map((row) => row.id));
+}
 
   if (inserted.rowCount === 0) return { outcome: 'duplicate', tags: [] };
   if (!decoded) {
@@ -739,9 +743,6 @@ async function storeEvent(
     return { outcome: status as 'ignored' | 'rejected', tags: [] };
   }
 
-  // A deterministic DB error means the event contradicts the read model. Record
-  // it and move on rather than blocking the indexer; anything else (connection
-  // loss, etc.) aborts the page so it is retried.
   await client.query('SAVEPOINT apply_event');
   try {
     await applyEvent(client, decoded, new Date(event.ledgerClosedAt));
@@ -1093,6 +1094,16 @@ async function pollOnceInContext(
       startLedger: resumeAt,
     });
   }
+}
+
+/**
+ * Fetch and persist one page. Returns the number of events in the page so the
+ * caller can keep paging while it is full.
+ */
+export async function pollOnce(deps: IndexerDependencies): Promise<{ events: number; result: PageResult }> {
+  const state = await readState(deps.db);
+  const request = await nextRequest(deps, state);
+  const page = await fetchPage(deps, request);
 
   // Ensure partitions exist for the scanned range before inserting, even when
   // the page is empty (e.g. a caught-up poll at the chain tip).
