@@ -100,3 +100,69 @@ export async function listFolders(options: {
 
   return { items: page.map(mapFolder), nextCursor };
 }
+
+export type NameAvailability = {
+  name: string;
+  normalized: string;
+  valid: boolean;
+  available: boolean;
+  reason?: string;
+  indexedLedger: number | null;
+};
+
+export async function checkNameAvailability(name: string): Promise<NameAvailability> {
+  const normalized = name.trim().toLowerCase();
+
+  // Validate against contract rules
+  if (normalized.length === 0) {
+    return {
+      name,
+      normalized,
+      valid: false,
+      available: false,
+      reason: 'Folder name is required',
+      indexedLedger: null,
+    };
+  }
+  if (normalized.length > FOLDER_NAME_MAX_LENGTH) {
+    return {
+      name,
+      normalized,
+      valid: false,
+      available: false,
+      reason: `Folder name must be at most ${FOLDER_NAME_MAX_LENGTH} characters`,
+      indexedLedger: null,
+    };
+  }
+  if (!FOLDER_NAME_REGEX.test(normalized)) {
+    return {
+      name,
+      normalized,
+      valid: false,
+      available: false,
+      reason: 'Folder name contains unsupported characters',
+      indexedLedger: null,
+    };
+  }
+  if (FOLDER_NAME_RESERVED.has(normalized)) {
+    return {
+      name,
+      normalized,
+      valid: false,
+      available: false,
+      reason: 'Folder name is reserved',
+      indexedLedger: null,
+    };
+  }
+
+  // Check availability in DB and fetch indexer cursor in parallel
+  const [folderResult, stateResult] = await Promise.all([
+    pool.query('SELECT 1 FROM folders WHERE lower(name) = $1 LIMIT 1', [normalized]),
+    pool.query<{ value: string }>(`SELECT value FROM indexer_state WHERE key = 'lastLedger'`),
+  ]);
+
+  const available = folderResult.rowCount === 0;
+  const indexedLedger = stateResult.rows[0] ? Number(stateResult.rows[0].value) : null;
+
+  return { name, normalized, valid: true, available, indexedLedger };
+}
