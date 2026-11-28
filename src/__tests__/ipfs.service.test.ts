@@ -1,4 +1,5 @@
-import { pinBundle, pinFile, resolveUrl } from '../services/ipfs';
+import { pinFile, resolveUrl } from '../services/ipfs';
+import { runWithContext, getContext } from '../utils/context';
 
 describe('ipfs service', () => {
   afterEach(() => {
@@ -22,6 +23,32 @@ describe('ipfs service', () => {
     expect(url.pathname).toBe('/api/v0/add');
     expect(url.searchParams.get('pin')).toBe('true');
     expect(init).toMatchObject({ method: 'POST', signal: expect.any(AbortSignal) });
+  });
+
+  it('sends the Authorization header when IPFS_API_AUTH is configured', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ Hash: 'bafyAuthed' }),
+    } as Response);
+
+    await expect(pinFile(Buffer.from('data'), 'profile.png')).resolves.toBe('bafyAuthed');
+
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.get('authorization')).toBe('Bearer test-secret');
+  });
+
+  it('omits the Authorization header when IPFS_API_AUTH is unset', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ Hash: 'bafyAnon' }),
+    } as Response);
+
+    await expect(pinFile(Buffer.from('data'), 'profile.png')).resolves.toBe('bafyAnon');
+
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.has('authorization')).toBe(false);
   });
 
   it('maps a timeout to 504 and an unreachable node to 502', async () => {
@@ -56,103 +83,35 @@ describe('ipfs service', () => {
     });
   });
 
-  it('adds a bundle wrapped in a directory and parses the NDJSON response', async () => {
-    const ndjson = [
-      JSON.stringify({ Name: 'avatar.png', Hash: 'bafyAvatar', Size: '3' }),
-      JSON.stringify({ Name: 'cv.pdf', Hash: 'bafyCv', Size: '4' }),
-      JSON.stringify({ Name: 'manifest.json', Hash: 'bafyManifest', Size: '5' }),
-      JSON.stringify({ Name: '', Hash: 'bafyRoot', Size: '12' }),
-    ].join('\n');
-
+  it('propagates the current request id to outbound Kubo calls', async () => {
     const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValueOnce({
       ok: true,
-      text: async () => ndjson,
+      json: async () => ({ Hash: 'bafyAdded' }),
     } as Response);
 
-    const result = await pinBundle([
-      { path: 'avatar.png', content: Buffer.from('abc') },
-      { path: 'cv.pdf', content: Buffer.from('abcd') },
-      { path: 'manifest.json', content: Buffer.from('{}') },
-    ]);
-
-    expect(result).toEqual({
-      rootCid: 'bafyRoot',
-      files: {
-        'avatar.png': 'bafyAvatar',
-        'cv.pdf': 'bafyCv',
-        'manifest.json': 'bafyManifest',
-      },
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
-    expect(url.pathname).toBe('/api/v0/add');
-    expect(url.searchParams.get('wrap-with-directory')).toBe('true');
-    expect(url.searchParams.get('pin')).toBe('true');
-    expect(init).toMatchObject({ method: 'POST', signal: expect.any(AbortSignal) });
-
-    const body = init.body as FormData;
-    const paths = Array.from(body.keys()).sort();
-    expect(paths).toEqual(['avatar.png', 'cv.pdf', 'manifest.json']);
-  });
-
-  it('uses stable paths for bundle entries', async () => {
-    const ndjson = [
-      JSON.stringify({ Name: 'manifest.json', Hash: 'bafyManifest', Size: '2' }),
-      JSON.stringify({ Name: '', Hash: 'bafyRoot', Size: '2' }),
-    ].join('\n');
-
-    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValueOnce({
-      ok: true,
-      text: async () => ndjson,
-    } as Response);
-
-    await pinBundle([{ path: 'manifest.json', content: Buffer.from('{}') }]);
+    await runWithContext({ requestId: 'req-abc-123' }, () =>
+      pinFile(Buffer.from('data'), 'profile.png'),
+    );
 
     const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
-    const body = init.body as FormData;
-    const entry = body.get('manifest.json') as File;
-    expect(entry).toBeDefined();
-    expect(entry.name).toBe('manifest.json');
+    const headers = new Headers(init.headers);
+    expect(headers.get('x-request-id')).toBe('req-abc-123');
   });
 
-  it('fails when the bundle response has no root CID', async () => {
-    const ndjson = [JSON.stringify({ Name: 'avatar.png', Hash: 'bafyAvatar', Size: '3' })].join('\n');
-
+  it('records the Kubo call duration in the request context', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValueOnce({
       ok: true,
-      text: async () => ndjson,
+      json: async () => ({ Hash: 'bafyAdded' }),
     } as Response);
 
-    await expect(pinBundle([{ path: 'avatar.png', content: Buffer.from('abc') }])).rejects.toThrow(/CID/);
-  });
-
-  it('maps bundle timeouts to 504 and unreachable nodes to 502', async () => {
-    const timeout = Object.assign(new Error('timed out'), { name: 'TimeoutError' });
-    jest
-      .spyOn(global, 'fetch')
-      .mockRejectedValueOnce(timeout)
-      .mockRejectedValueOnce(new TypeError('fetch failed'));
-
-    await expect(pinBundle([{ path: 'a.png', content: Buffer.from('d') }])).rejects.toMatchObject({
-      statusCode: 504,
-      expose: true,
+    const timings = await runWithContext({ requestId: 'req-timing' }, async () => {
+      await pinFile(Buffer.from('data'), 'profile.png');
+      return getContext()?.timings;
     });
-    await expect(pinBundle([{ path: 'a.png', content: Buffer.from('d') }])).rejects.toMatchObject({
-      statusCode: 502,
-      expose: true,
-    });
-  });
 
-  it('fails when the bundle add returns an error status', async () => {
-    jest.spyOn(global, 'fetch').mockResolvedValueOnce({
-      ok: false,
-      status: 503,
-    } as Response);
-
-    await expect(pinBundle([{ path: 'a.png', content: Buffer.from('d') }])).rejects.toMatchObject({
-      statusCode: 502,
-      message: 'IPFS add failed with status 503',
-    });
+    expect(timings).toBeDefined();
+    expect(timings?.ipfs?.count).toBe(1);
+    expect(typeof timings?.ipfs?.durationMs).toBe('number');
+    expect(timings?.ipfs?.durationMs).toBeGreaterThanOrEqual(0);
   });
 });

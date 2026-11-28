@@ -1,40 +1,65 @@
-import { Router } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import multer from 'multer';
-import * as ctrl from '../controllers/upload.controller';
 import { MAX_UPLOAD_BYTES } from '../validation/schemas';
-import { uploadSemaphore } from '../middleware/uploadSemaphore';
-import { env } from '../config/env';
+import type { FeatureFlagChecker } from '../featureFlags';
 
-const router = Router();
+export interface UploadRoutesDeps {
+  ipfs: {
+    upload: (file: Express.Multer.File) => Promise<{ cid: string; size: number }>;
+  };
+  featureFlags: FeatureFlagChecker;
+}
 
-// Acquire a global upload slot before multer starts buffering the body.
-// When saturated, respond 503 with Retry-After without reading the body.
-router.use(uploadSemaphore);
+export function createUploadRoutes(deps: UploadRoutesDeps): Router {
+  const router = Router();
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_UPLOAD_BYTES, files: 1, fields: 10, parts: 11 },
+  });
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_UPLOAD_BYTES, files: 1, fields: 10, parts: 11 },
-});
+  const requireUploadsEnabled = async (
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    try {
+      const enabled = await deps.featureFlags.isEnabled('uploads');
+      if (!enabled) {
+        res.status(503).json({
+          error: 'feature_disabled',
+          message: 'Uploads are temporarily disabled. Please try again later.',
+        });
+        return;
+      }
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
 
-const bundleUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: MAX_UPLOAD_BYTES,
-    files: env.UPLOAD_BUNDLE_MAX_FILES,
-    fields: 10,
-    parts: env.UPLOAD_BUNDLE_MAX_FILES + 10,
-  },
-});
+  const handleUpload = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    try {
+      if (!req.file) {
+        res.status(400).json({
+          error: 'no_file',
+          message: 'No file was provided in the request.',
+        });
+        return;
+      }
+      const result = await deps.ipfs.upload(req.file);
+      res.status(201).json(result);
+    } catch (err) {
+      next(err);
+    }
+  };
 
-router.post('/', upload.single('file'), ctrl.upload);
+  router.post('/', requireUploadsEnabled, upload.single('file'), handleUpload);
 
-router.post(
-  '/bundle',
-  bundleUpload.fields([
-    { name: 'files', maxCount: env.UPLOAD_BUNDLE_MAX_FILES },
-    { name: 'manifest', maxCount: 1 },
-  ]),
-  ctrl.uploadBundle,
-);
+  return router;
+}
 
-export default router;
+export default createUploadRoutes;
