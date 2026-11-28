@@ -308,6 +308,27 @@ Fix the credentials or create the database, then restart.
 - The schema is `database/schema.sql`. Every statement is `IF NOT EXISTS`, so applying it is
   idempotent: `npm run db:migrate`, the indexer at startup, and the compose Postgres init
   (first start of an empty volume) all apply it.
+- **Concurrent migrations are safe.** `IF NOT EXISTS` on its own is not concurrency-safe in
+  Postgres: two sessions applying the schema at once can fail with
+  `duplicate key value violates unique constraint "pg_type_typname_nsp_index"` or deadlock
+  on catalog locks. `migrate()` therefore checks out one dedicated connection, takes the
+  session-level advisory lock `pg_advisory_lock(5075394483740043623)` (`MIGRATION_LOCK_KEY`
+  in `src/db/migrate.ts`), applies the schema in a single transaction, and unlocks in
+  `finally`. Two replicas starting together, or a migration job racing the indexer, simply
+  run one after the other. Each run logs how long it waited:
+  ```text
+  INFO Waiting for migration lock held by another process {"lockKey":"5075394483740043623"}
+  INFO Acquired migration lock {"lockKey":"5075394483740043623","waitedMs":412}
+  ```
+  A migration stuck behind the lock is waiting on whoever holds it. Find that session with:
+  ```sql
+  SELECT pid, application_name, state, query_start, query
+  FROM pg_stat_activity
+  WHERE pid IN (SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted);
+  ```
+  The lock is session-scoped, so migrations must run on a direct Postgres connection, not
+  through PgBouncer in transaction mode (see
+  [Connection pooling](#connection-pooling-pgbouncer)).
 - **Upgrading from the pre-testnet schema**: migration refuses to run if `folders.cid` exists.
   That layout was never populated by the old indexer, which couldn't decode the contract's
   events. Drop it and migrate:
@@ -324,8 +345,11 @@ Fix the credentials or create the database, then restart.
 
 `contract_events` is range-partitioned by `ledger`, one partition per
 `CONTRACT_EVENTS_PARTITION_SIZE` ledgers (default 1,000,000, roughly two months). The
-primary key is `(ledger, id)`; a unique index on `id` keeps event ids unique across
-partitions, so `ON CONFLICT (id) DO NOTHING` still makes duplicate events no-ops.
+primary key is `(ledger, id)`. The ledger is derived from the event id (the high 32 bits of
+its TOID), so `(ledger, id)` is unique exactly when `id` is, and
+`ON CONFLICT (ledger, id) DO NOTHING` makes duplicate events no-ops. (Postgres does not allow a
+unique index on `id` alone: unique indexes on a partitioned table must include the partition
+key. `idx_contract_events_id` is a plain lookup index.)
 
 The indexer creates partitions ahead of the cursor: before each poll it ensures partitions
 exist up to `latestLedger + CONTRACT_EVENTS_PARTITION_LOOKAHEAD` ledgers. A `DEFAULT`
@@ -377,7 +401,7 @@ CREATE TABLE contract_events (
   PRIMARY KEY (ledger, id)
 ) PARTITION BY RANGE (ledger);
 
-CREATE UNIQUE INDEX contract_events_id_key ON contract_events (id);
+CREATE INDEX contract_events_id_idx ON contract_events (id);
 CREATE INDEX contract_events_rejected_idx
   ON contract_events (ledger) WHERE status = 'rejected';
 

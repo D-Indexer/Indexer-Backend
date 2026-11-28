@@ -236,13 +236,13 @@ async function storeEvent(
 
   const status = error ? 'rejected' : decoded ? 'applied' : 'ignored';
   // contract_events is range-partitioned on ledger; the primary key is
-  // (ledger, id) and a separate unique index on id preserves idempotent
-  // inserts. ON CONFLICT (id) targets that unique index.
+  // (ledger, id). The ledger is derived from the event id, so conflicting on
+  // the primary key is exactly "this event id is already stored".
   const inserted = await client.query(
     `INSERT INTO contract_events
        (id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-     ON CONFLICT (id) DO NOTHING
+     ON CONFLICT (ledger, id) DO NOTHING
      RETURNING id`,
     [
       event.id,

@@ -7,10 +7,13 @@
 --
 -- Declaratively range-partitioned on `ledger` (one partition per
 -- CONTRACT_EVENTS_PARTITION_SIZE ledgers, see src/indexer/stellar.ts). The
--- primary key must include the partition key, so it is (ledger, id); a
--- separate unique index on `id` keeps idempotent inserts working via
--- ON CONFLICT (id) DO NOTHING. A DEFAULT partition is the safety net for any
--- ledger range that has not had a partition created ahead of time.
+-- primary key must include the partition key, so it is (ledger, id). The
+-- ledger is derived from the event id (the TOID's high 32 bits), so (ledger, id)
+-- is unique exactly when id is, and idempotent inserts use
+-- ON CONFLICT (ledger, id) DO NOTHING. (Postgres rejects a unique index on `id`
+-- alone: unique indexes on a partitioned table must include the partition key.)
+-- A DEFAULT partition is the safety net for any ledger range that has not had a
+-- partition created ahead of time.
 CREATE TABLE IF NOT EXISTS contract_events (
   id                TEXT NOT NULL,
   ledger            INTEGER NOT NULL,
@@ -31,8 +34,8 @@ CREATE TABLE IF NOT EXISTS contract_events (
 CREATE TABLE IF NOT EXISTS contract_events_default
   PARTITION OF contract_events DEFAULT;
 
--- Unique lookup on id (the RPC event id) so duplicate events remain no-ops.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_events_id ON contract_events (id);
+-- Lookup by id (the RPC event id). Not UNIQUE: see the primary key note above.
+CREATE INDEX IF NOT EXISTS idx_contract_events_id ON contract_events (id);
 CREATE INDEX IF NOT EXISTS idx_contract_events_ledger ON contract_events (ledger);
 CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
   ON contract_events (indexed_at) WHERE status = 'rejected';
