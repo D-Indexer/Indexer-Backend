@@ -1,10 +1,18 @@
 import { Router } from 'express';
-import * as ctrl from '../controllers/portfolio.controller';
+import { createPortfolioController } from '../controllers/portfolio.controller';
+import type { PortfolioService } from '../services/portfolio.service';
 
-const router = Router();
+export interface PortfolioRoutesDeps {
+  portfolioService: PortfolioService;
+}
 
-router.post('/validate', ctrl.validateManifest);
+export function createPortfolioRoutes(deps: PortfolioRoutesDeps): Router {
+  const router = Router();
+  const ctrl = createPortfolioController({ portfolioService: deps.portfolioService });
 
-router.get('/:address', ctrl.getByAddress);
+  router.get('/:address', ctrl.getByAddress);
 
-export default router;
+  return router;
+}
+
+export default createPortfolioRoutes;
