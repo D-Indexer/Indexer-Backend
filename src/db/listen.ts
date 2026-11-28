@@ -84,8 +84,12 @@ export function subscribeIndexed(
   handler: IndexedHandler,
   options: SubscribeIndexedOptions = {},
 ): IndexedSubscription {
+  // LISTEN is session state, so default to the direct (non-pooled) URL.
+  // See docs/database-connections.md.
   const connectionString =
-    options.connectionString ?? process.env.DATABASE_URL;
+    options.connectionString ??
+    (process.env.DATABASE_DIRECT_URL || undefined) ??
+    process.env.DATABASE_URL;
   const baseDelay = options.reconnectBaseDelayMs ?? 1000;
   const maxDelay = options.reconnectMaxDelayMs ?? 30000;
   const logger = options.logger ?? console;

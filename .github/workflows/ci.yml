@@ -117,6 +117,85 @@ jobs:
           kill "$SERVER_PID" || true
           exit 1
 
+  # Runs the Postgres-backed test suite through PgBouncer in transaction mode,
+  # the way managed deployments are fronted. Catches session-state leaks
+  # (session SET, LISTEN, session advisory locks, named prepared statements)
+  # on the pooled path. See docs/database-connections.md.
+  pgbouncer:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: folder
+          POSTGRES_PASSWORD: folder
+          POSTGRES_DB: folder_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U folder"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      pgbouncer:
+        image: edoburu/pgbouncer:v1.23.1-p3
+        env:
+          DB_HOST: postgres
+          DB_PORT: '5432'
+          DB_USER: folder
+          DB_PASSWORD: folder
+          DB_NAME: folder_test
+          POOL_MODE: transaction
+          AUTH_TYPE: scram-sha-256
+          # Small pool forces clients to share server connections.
+          DEFAULT_POOL_SIZE: '3'
+          MAX_CLIENT_CONN: '200'
+        ports:
+          - 6432:5432
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Wait for PgBouncer
+        env:
+          PGPASSWORD: folder
+        run: |
+          for i in $(seq 1 30); do
+            if psql -h localhost -p 6432 -U folder -d folder_test -c 'SELECT 1' >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::PgBouncer did not become ready" >&2
+          exit 1
+
+      - name: Pin worker schema as a role default
+        # The test helpers select the per-worker schema with a session-level
+        # `SET search_path`, which does not stick in transaction pooling. Set it
+        # server-side instead. `npm test` runs --runInBand, so the worker is 1.
+        env:
+          PGPASSWORD: folder
+        run: |
+          psql -h localhost -p 5432 -U folder -d folder_test \
+            -c 'ALTER ROLE folder IN DATABASE folder_test SET search_path = test_1, public'
+
+      - name: Test through PgBouncer (transaction mode)
+        env:
+          # Pooled path for app queries; direct path for DDL and LISTEN.
+          TEST_DATABASE_URL: postgresql://folder:folder@localhost:6432/folder_test
+          TEST_DATABASE_DIRECT_URL: postgresql://folder:folder@localhost:5432/folder_test
+        run: npm test
+
   schema-upgrade:
     runs-on: ubuntu-latest
     services:

@@ -53,7 +53,11 @@ export interface FeatureFlagServiceOptions {
   db: FeatureFlagDb;
   /** Cache TTL in milliseconds. Defaults to 5000ms. */
   ttlMs?: number;
-  /** Optional LISTEN/NOTIFY client for cross-replica invalidation. */
+  /**
+   * Optional LISTEN/NOTIFY client for cross-replica invalidation. Must be a
+   * dedicated `pg.Client` on DATABASE_DIRECT_URL (`getDirectDatabaseUrl`), not
+   * a pooled client: LISTEN does not survive PgBouncer transaction pooling.
+   */
   listener?: FeatureFlagListener;
   /** Optional clock injection for tests. */
   now?: () => number;
