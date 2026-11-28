@@ -1,4 +1,4 @@
-import { Address, xdr } from '@stellar/stellar-sdk';
+import { Address, xdr } from '@stellar/stellar-base';
 import type { RawEvent } from './rpc';
 import { GENERATED_DECODERS } from './generated/events';
 

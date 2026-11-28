@@ -9,6 +9,19 @@ type FolderRow = {
   updated_at: Date;
 };
 
+type ModerationRow = {
+  state: string;
+};
+
+export type ModerationInfo = {
+  hidden: boolean;
+  state?: string;
+};
+
+export type FolderWithModeration = Folder & {
+  moderation?: ModerationInfo;
+};
+
 function mapFolder(row: FolderRow): Folder {
   return {
     owner: row.owner,
@@ -36,7 +49,7 @@ export async function getFolderByAddress(owner: string): Promise<Folder | null> 
   return row ? mapFolder(row) : null;
 }
 
-export async function getFolderByName(name: string): Promise<Folder | null> {
+export async function getFolderByName(name: string): Promise<FolderWithModeration | null> {
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE name = $1`, [name]);
   const row = rows[0];
   return row ? mapFolder(row) : null;

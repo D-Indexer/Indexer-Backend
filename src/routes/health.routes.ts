@@ -2,6 +2,7 @@ import { Router } from 'express';
 import pool from '../db/client';
 import { getEnv } from '../config/env';
 import { readState, STATE } from '../indexer/stellar';
+import { getCacheStats } from '../cache';
 
 export interface HealthRoutesDeps {
   db: Pool;

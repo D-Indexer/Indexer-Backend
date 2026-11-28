@@ -1,4 +1,4 @@
-import { StrKey } from '@stellar/stellar-sdk';
+import { StrKey } from '@stellar/stellar-base';
 import { z } from 'zod';
 import networksJson from './networks.json';
 

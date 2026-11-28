@@ -39,6 +39,9 @@ the API never talks to the RPC.
 | `src/indexer/stellar.ts`                        | Poll loop, page transactions, cursor, retention-gap handling                                                      |
 | `src/indexer/cli.ts`                            | `status`, `reset-cursor`, `healthcheck`                                                                           |
 | `src/routes`, `src/controllers`, `src/services` | REST API: routing, validation, SQL                                                                                |
+| `src/cache`                                     | In-process LRU cache with per-key TTL and tag invalidation, flushed by indexer NOTIFY messages                    |
+| `src/jobs`                                      | Postgres-leased background job runner: cron schedules, retries with backoff, per-job concurrency                  |
+| `src/cli/moderation.ts`                         | `hide` / `flag` / `unhide` / `list` moderation commands with an audit trail                                       |
 | `src/config/env.ts`                             | Zod schema for all configuration; the process exits on invalid config                                             |
 | `database/schema.sql`                           | The only schema definition; applied by `npm run db:migrate`, the indexer at startup and the compose Postgres init |
 
@@ -132,6 +135,8 @@ from archive data is not implemented yet.
 | `template_versions`  | `(id, version)`      | `tmpl_reg`: template id, version number, metadata uri, creator, event id, time                 |
 | `admins`          | `address`               | `init`, `adm_add`, `adm_rm`                                                                    |
 | `indexer_state`   | `key`                   | `cursor`, `last_ledger`, `last_success_at`, `status`, `last_error`, `start_ledger`, `last_gap` |
+| `moderation`      | `(entity_type, key)`    | operator actions: `hidden` / `flagged`, reason, actor, timestamps                              |
+| `jobs`            | `id`                    | job runner state: name, payload, run at, attempts, lease owner/expiry, status, last error      |
 
 Template ids are `BIGINT` because the contract uses `u32`. There are no foreign keys between
 `folders` and `portfolios`: an indexer that starts partway through history can see a mint

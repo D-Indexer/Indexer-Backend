@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import { Template } from '../types';
+import { cache } from '../cache';
 
 type TemplateRow = {
   id: string; // BIGINT comes back as a string

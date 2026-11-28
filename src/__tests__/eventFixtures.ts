@@ -1,4 +1,4 @@
-import { Address, xdr } from '@stellar/stellar-sdk';
+import { Address, xdr } from '@stellar/stellar-base';
 import type { RawEvent } from '../indexer/rpc';
 import fixture from './fixtures/testnet-events.json';
 

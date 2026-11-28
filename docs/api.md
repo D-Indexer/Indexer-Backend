@@ -17,6 +17,64 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/templates/:id/versions`](#get-templatesidversions) | Template metadata history         |
 | `POST` | [`/upload`](#post-upload)                        | Add and pin a file on IPFS            |
 
+## Moderation
+
+On-chain data can't be removed, but the API can choose what it promotes. Entries
+(folders and portfolios) can be marked `hidden` or `flagged` by an operator. Moderation
+state lives in its own `moderation` table, keyed by entity type and key, so re-indexing
+or replaying events never overwrites it.
+
+- **Listings, search and stats** never include `hidden` entries. `flagged` entries stay
+  visible but are marked so clients can de-emphasize them.
+- **Direct lookups** (`/folders/:address`, `/folders/name/:name`, `/portfolios/:address`)
+  still return the data, with a `moderation` block. Hidden entries are **not** turned
+  into `451`; the data is public on-chain and the API only declines to promote it.
+
+```json
+{
+  "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+  "name": "smoke-1794262900.folder",
+  "templateId": 1,
+  "claimedAt": "2026-11-09T22:22:27.000Z",
+  "updatedAt": "2026-11-09T22:23:07.000Z",
+  "moderation": { "hidden": true }
+}
+```
+
+`moderation` is omitted for entries with no active moderation record. For `flagged`
+entries it is `{ "hidden": false, "flagged": true, "reason": "…" }`.
+
+### CLI
+
+Moderation is managed with `src/cli/moderation.ts`. Every action requires an actor and
+a reason and is appended to the audit trail (see below).
+
+```bash
+# Hide / flag an entry
+npm run moderation -- hide folder GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM \
+  --actor alice --reason "impersonation"
+npm run moderation -- flag portfolio GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM \
+  --actor alice --reason "offensive content"
+
+# Undo a moderation action
+npm run moderation -- unhide folder GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM \
+  --actor alice --reason "appeal accepted"
+
+# Inspect
+npm run moderation -- list
+npm run moderation -- history folder GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM
+```
+
+Entity types are `folder` (keyed by owner address) and `portfolio` (keyed by owner
+address). States are `hidden` and `flagged`; `unhide` clears the record.
+
+### Audit trail
+
+Each moderation action is recorded with the entity type and key, the resulting state,
+the actor, the reason and a timestamp. Records are append-only: changing or clearing a
+moderation state adds a new row rather than editing the previous one, so
+`moderation history` shows the full sequence of actions for an entry.
+
 ## Errors
 
 Every error has the same shape:
@@ -142,7 +200,8 @@ curl localhost:3000/folders/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJ
 }
 ```
 
-Errors: `400` invalid address, `404` `Folder not found`.
+Errors: `400` invalid address, `404` `Folder not found`. Hidden entries are still
+returned, with `moderation: { hidden: true }` (see [moderation](#moderation)).
 
 ## `GET /folders/name/:name`
 
@@ -152,7 +211,8 @@ Same response as above, looked up by folder name.
 curl localhost:3000/folders/name/smoke-1794262900.folder
 ```
 
-Errors: `400` invalid name, `404` `Folder not found`.
+Errors: `400` invalid name, `404` `Folder not found`. Hidden entries are still returned,
+with `moderation: { hidden: true }`.
 
 ## `GET /portfolios/:address`
 
@@ -174,7 +234,8 @@ curl localhost:3000/portfolios/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX
 }
 ```
 
-Errors: `400` invalid address, `404` `Portfolio not found`.
+Errors: `400` invalid address, `404` `Portfolio not found`. Hidden entries are still
+returned, with `moderation: { hidden: true }`.
 
 ## `GET /portfolios/:address/versions`
 
