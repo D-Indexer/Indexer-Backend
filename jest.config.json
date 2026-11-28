@@ -5,5 +5,7 @@
   "testPathIgnorePatterns": ["/node_modules/", "/dist/"],
   "modulePathIgnorePatterns": ["<rootDir>/dist/"],
   "moduleFileExtensions": ["ts", "js"],
-  "setupFiles": ["<rootDir>/src/__tests__/jest.env.ts"]
+  "setupFiles": ["<rootDir>/src/__tests__/jest.env.ts"],
+  "globalSetup": "<rootDir>/src/__tests__/globalSetup.ts",
+  "globalTeardown": "<rootDir>/src/__tests__/globalTeardown.ts"
 }

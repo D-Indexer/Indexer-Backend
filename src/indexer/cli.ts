@@ -7,13 +7,20 @@ const USAGE = `Usage:
   npm run indexer -- status                 Print indexer state as JSON
   npm run indexer -- reset-cursor <ledger>  Re-index from <ledger> (already-stored events are skipped)
   npm run indexer -- healthcheck            Exit 1 if the indexer has not succeeded recently
-  npm run indexer -- orphans                Print orphaned events as JSON`;
+                                            (manual use only; containers probe the embedded
+                                            /healthz and /readyz HTTP endpoints instead)`;
 
 export async function run(args: string[]): Promise<number> {
   const [command, arg] = args;
   switch (command) {
     case 'status': {
-      console.log(JSON.stringify(await readState(pool), null, 2));
+      const state = await readState(pool);
+      const ipfs = await pool.query(
+        `SELECT status, COUNT(*)::int AS count FROM ipfs_cid_status GROUP BY status`
+      );
+      const counts: Record<string, number> = {};
+      for (const row of ipfs.rows as Array<{ status: string; count: number }>) counts[row.status] = row.count;
+      console.log(JSON.stringify({ ...state, ipfs }, null, 2));
       return 0;
     }
     case 'reset-cursor': {

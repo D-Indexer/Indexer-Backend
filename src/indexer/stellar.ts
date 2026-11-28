@@ -3,6 +3,21 @@ import { decodeEvent, decodeTopic, DecodedEvent, EventDecodeError } from './deco
 import { applyEvent, reapplyOrphans } from './handlers';
 import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
 import { logger } from '../utils/logger';
+import { runWithContext } from '../utils/context';
+
+/** Subscriber types that receive an outbox row for every applied event. */
+export const OUTBOX_SUBSCRIBERS = ['webhook', 'changes'] as const;
+export type OutboxSubscriber = (typeof OUTBOX_SUBSCRIBERS)[number];
+
+/** Stable idempotency key for an outbox row; sinks must dedupe on it. */
+export function outboxIdempotencyKey(eventId: string, subscriber: string): string {
+  return `${eventId}:${subscriber}`;
+}
+
+/** Ledger span covered by each `contract_events` partition. */
+export const PARTITION_LEDGER_SPAN = 1_000_000;
+/** How many partitions beyond the current one to keep ready. */
+export const PARTITION_LOOKAHEAD = 2;
 
 /** indexer_state keys. */
 export const STATE = {
@@ -34,7 +49,12 @@ export type IndexerConfig = {
   maxPagesPerTick?: number;
 };
 
-export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerConfig };
+export type IndexerDependencies = {
+  db: Db;
+  rpc: EventSource;
+  config: IndexerConfig;
+  onCidApplied?: (cid: string) => void | Promise<void>;
+};
 
 export type PageResult = {
   applied: number;
@@ -43,6 +63,44 @@ export type PageResult = {
   duplicates: number;
   orphaned: number;
 };
+
+/** Channel used to announce committed pages to API replicas. */
+export const INDEXED_CHANNEL = 'folder_indexed';
+
+/** Postgres NOTIFY payloads must stay below 8000 bytes. */
+export const MAX_NOTIFY_PAYLOAD_BYTES = 8000;
+
+export type IndexedNotification = {
+  last_ledger: number;
+  /** Compact list of affected entity keys; empty when `full_refresh` is set. */
+  keys: string[];
+  /** True when the key list was truncated; consumers must re-read all state. */
+  full_refresh: boolean;
+};
+
+/**
+ * Build the `folder_indexed` payload for a committed page, truncating the key
+ * list so the serialized JSON stays under the NOTIFY payload limit. When even
+ * a single key would overflow, fall back to a full-refresh signal.
+ */
+export function buildIndexedNotification(lastLedger: number, keys: Iterable<string>): string {
+  const unique = [...new Set(keys)];
+  const encode = (list: string[], fullRefresh: boolean) =>
+    JSON.stringify({ last_ledger: lastLedger, keys: list, full_refresh: fullRefresh } satisfies IndexedNotification);
+
+  const full = encode(unique, false);
+  if (Buffer.byteLength(full, 'utf8') <= MAX_NOTIFY_PAYLOAD_BYTES) return full;
+
+  // Drop keys from the end until the payload fits, then flag a full refresh so
+  // consumers know the list is incomplete.
+  let kept = unique.length;
+  while (kept > 0) {
+    kept--;
+    const candidate = encode(unique.slice(0, kept), true);
+    if (Buffer.byteLength(candidate, 'utf8') <= MAX_NOTIFY_PAYLOAD_BYTES) return candidate;
+  }
+  return encode([], true);
+}
 
 export class RetentionGapError extends Error {
   constructor(
@@ -85,6 +143,49 @@ function scannedLedger(page: GetEventsResult): number {
 export async function readState(db: Pick<Pool, 'query'>): Promise<Partial<Record<string, string>>> {
   const { rows } = await db.query<{ key: string; value: string }>('SELECT key, value FROM indexer_state');
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
+}
+
+/** Name of the partition covering `ledger` (range [start, start + span)). */
+export function partitionNameForLedger(ledger: number, span = PARTITION_LEDGER_SPAN): string {
+  const start = Math.floor(ledger / span) * span;
+  return `contract_events_p${start}`;
+}
+
+/**
+ * Create the partition covering `ledger` (and the next `lookahead` ones) if
+ * missing, plus the default partition as a safety net. Idempotent and safe to
+ * call concurrently: CREATE TABLE IF NOT EXISTS + CREATE ... PARTITION OF are
+ * guarded by the catalog, and duplicate-object races are ignored.
+ */
+export async function ensurePartitions(
+  db: Pick<Pool, 'query'>,
+  ledger: number,
+  lookahead = PARTITION_LOOKAHEAD,
+  span = PARTITION_LEDGER_SPAN
+): Promise<void> {
+  if (!Number.isFinite(ledger) || ledger < 0) return;
+  const first = Math.floor(ledger / span) * span;
+  for (let i = 0; i <= lookahead; i++) {
+    const start = first + i * span;
+    const end = start + span;
+    const name = `contract_events_p${start}`;
+    try {
+      await db.query(
+        `CREATE TABLE IF NOT EXISTS ${name} PARTITION OF contract_events
+           FOR VALUES FROM (${start}) TO (${end})`
+      );
+    } catch (err) {
+      // 42P07 duplicate_table / 23505 unique_violation: another worker won the race.
+      const code = (err as { code?: unknown })?.code;
+      if (code !== '42P07' && code !== '23505') throw err;
+    }
+  }
+  try {
+    await db.query('CREATE TABLE IF NOT EXISTS contract_events_default PARTITION OF contract_events DEFAULT');
+  } catch (err) {
+    const code = (err as { code?: unknown })?.code;
+    if (code !== '42P07' && code !== '23505') throw err;
+  }
 }
 
 export async function writeState(
@@ -166,6 +267,31 @@ export function isDeterministicDbError(err: unknown): boolean {
   return typeof code === 'string' && (code.startsWith('22') || code.startsWith('23'));
 }
 
+/**
+ * Entity keys touched by an event, used to keep NOTIFY payloads compact.
+ * Falls back to the event's contract and topic when no finer key is known.
+ */
+function affectedEntityKeys(event: RawEvent): string[] {
+  const keys: string[] = [];
+  try {
+    const decoded = decodeEvent(event);
+    if (decoded && typeof decoded === 'object') {
+      const record = decoded as unknown as Record<string, unknown>;
+      for (const field of ['key', 'id', 'address', 'account', 'folderId', 'folder_id']) {
+        const value = record[field];
+        if (typeof value === 'string' && value.length > 0) keys.push(value);
+      }
+    }
+  } catch {
+    // Undecodable events were rejected or ignored; nothing to announce.
+  }
+  if (keys.length === 0) {
+    const topic = decodeTopic(event);
+    if (topic) keys.push(topic);
+  }
+  return keys;
+}
+
 async function storeEvent(
   client: PoolClient,
   contractId: string,
@@ -184,6 +310,9 @@ async function storeEvent(
   }
 
   const status = error ? 'rejected' : decoded ? 'applied' : 'ignored';
+  // contract_events is range-partitioned on ledger; the primary key is
+  // (ledger, id) and a separate unique index on id preserves idempotent
+  // inserts. ON CONFLICT (id) targets that unique index.
   const inserted = await client.query(
     `INSERT INTO contract_events
        (id, ledger, ledger_closed_at, tx_hash, contract_id, topic, topic_xdr, value_xdr, data, status, error)
@@ -216,13 +345,8 @@ async function storeEvent(
   // loss, etc.) aborts the page so it is retried.
   await client.query('SAVEPOINT apply_event');
   try {
-    const outcome = await applyEvent(client, decoded, new Date(event.ledgerClosedAt));
-    if (outcome === 'orphaned') {
-      await client.query("UPDATE contract_events SET status = 'orphaned' WHERE id = $1", [event.id]);
-      await client.query('RELEASE SAVEPOINT apply_event');
-      logger.warn('Orphaned contract event: no row to update yet', { id: event.id, topic });
-      return 'orphaned';
-    }
+    await applyEvent(client, decoded, new Date(event.ledgerClosedAt));
+    await enqueueOutbox(client, event, decoded);
     await client.query('RELEASE SAVEPOINT apply_event');
     return 'applied';
   } catch (err) {
@@ -239,13 +363,47 @@ async function storeEvent(
 }
 
 /**
+ * Insert one outbox row per subscriber for an applied event. Runs inside the
+ * page transaction, so a rolled-back page leaves no rows and a committed page
+ * always has them (crash-safe delivery on restart). ON CONFLICT keeps replays
+ * idempotent.
+ */
+async function enqueueOutbox(client: PoolClient, event: RawEvent, decoded: DecodedEvent): Promise<void> {
+  const payload = JSON.stringify({
+    id: event.id,
+    ledger: event.ledger,
+    ledgerClosedAt: event.ledgerClosedAt,
+    txHash: event.txHash,
+    contractId: event.contractId,
+    topic: decodeTopic(event) ?? '',
+    event: decoded,
+  });
+  for (const subscriber of OUTBOX_SUBSCRIBERS) {
+    await client.query(
+      `INSERT INTO outbox (idempotency_key, event_id, subscriber, payload)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (idempotency_key) DO NOTHING`,
+      [outboxIdempotencyKey(event.id, subscriber), event.id, subscriber, payload]
+    );
+  }
+}
+
+/**
  * Persist one getEvents page and advance the cursor in a single transaction.
  * Events already stored (same RPC event id) are skipped, so replaying a page
  * after a crash or a manual cursor rewind is safe.
  */
 export async function processPage(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
-  const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0, orphaned: 0 };
+  return runWithContext({ pageId: page.cursor, cursor: page.cursor }, () =>
+    processPageInContext(db, contractId, page)
+  );
+}
+
+async function processPageInContext(db: Db, contractId: string, page: GetEventsResult): Promise<PageResult> {
+  const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0 };
+  const affectedKeys = new Set<string>();
   const client = await db.connect();
+  const appliedCids = new Set<string>();
 
   try {
     await client.query('BEGIN');
@@ -260,18 +418,29 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
     for (const event of page.events) {
       if (event.contractId !== contractId) continue;
       const outcome = await storeEvent(client, contractId, event);
+      if (outcome === 'applied') {
+        try {
+          const decoded = decodeEvent(event);
+          if (decoded && (decoded.topic === 'port_mint' || decoded.topic === 'port_upd')) {
+            appliedCids.add(decoded.ipfsCid);
+          }
+        } catch {
+          // The event is already handled by storeEvent; malformed events are recorded as rejected.
+        }
+      }
       if (outcome === 'duplicate') result.duplicates++;
       else result[outcome]++;
-      // A parent row may have just arrived; re-apply its orphaned children.
       if (outcome === 'applied') {
-        const owner = ownerOf(event);
-        if (owner) result.applied += await reapplyOrphans(client, owner);
+        for (const key of affectedEntityKeys(event)) affectedKeys.add(key);
       }
     }
     // The paging cursor encodes how far the RPC scanned (the chain tip for a
     // partial page), which is further than the last event's ledger.
     const lastLedger = scannedLedger(page);
-    const written = await writeStateIfUnchanged(client, expectedVersion, {
+    // Keep partitions ready ahead of the chain tip so inserts never fall into
+    // the default partition during normal operation.
+    await ensurePartitions(client, Math.max(lastLedger, page.latestLedger));
+    await writeState(client, {
       [STATE.cursor]: page.cursor,
       [STATE.startLedger]: null,
       [STATE.lastLedger]: String(lastLedger),
@@ -279,16 +448,25 @@ export async function processPage(db: Db, contractId: string, page: GetEventsRes
       [STATE.status]: 'ok',
       [STATE.lastError]: null,
     });
-    if (!written) {
-      // A reset-cursor landed while this page was in flight: drop the page so
-      // indexing resumes from the ledger the operator asked for.
-      await client.query('ROLLBACK');
-      logger.warn('Discarded in-flight page: indexer state changed during the poll', {
-        cursor: page.cursor,
-      });
-      return result;
-    }
+    // Postgres delivers NOTIFY only on commit, so a rolled-back page emits
+    // nothing. Exactly one notification is sent per committed page.
+    await client.query('SELECT pg_notify($1, $2)', [
+      INDEXED_CHANNEL,
+      buildIndexedNotification(lastLedger, affectedKeys),
+    ]);
     await client.query('COMMIT');
+    if (onCidApplied) {
+      for (const cid of appliedCids) {
+        try {
+          await onCidApplied(cid);
+        } catch (err) {
+          logger.warn('Immediate IPFS reconciliation failed', {
+            cid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
     return result;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -339,6 +517,15 @@ function requestedLedger(params: GetEventsParams): number {
 export async function pollOnce(deps: IndexerDependencies): Promise<{ events: number; result: PageResult }> {
   const state = await readState(deps.db);
   const { params, fromConfig } = await nextRequest(deps, state);
+  const pageId = params.cursor ?? `start:${params.startLedger}`;
+  return runWithContext({ pageId, cursor: params.cursor }, () => pollOnceInContext(deps, params, fromConfig));
+}
+
+async function pollOnceInContext(
+  deps: IndexerDependencies,
+  params: GetEventsParams,
+  fromConfig: boolean
+): Promise<{ events: number; result: PageResult }> {
 
   let page: GetEventsResult;
   try {
@@ -377,6 +564,10 @@ export async function pollOnce(deps: IndexerDependencies): Promise<{ events: num
       startLedger: resumeAt,
     });
   }
+
+  // Ensure partitions exist for the scanned range before inserting, even when
+  // the page is empty (e.g. a caught-up poll at the chain tip).
+  await ensurePartitions(deps.db, Math.max(scannedLedger(page), page.latestLedger));
 
   const result = await processPage(deps.db, deps.config.contractId, page);
   if (page.events.length > 0) {

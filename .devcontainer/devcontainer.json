@@ -1,0 +1,62 @@
+{
+  "name": "Stellar Dev Container",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "workspace",
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "stopCompose",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "moby": true
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "latest"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-azuretools.vscode-docker",
+        "mtxr.sqltools",
+        "mtxr.sqltools-driver-pg",
+        "EditorConfig.EditorConfig",
+        "streetsidesoftware.code-spell-checker"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "eslint.validate": ["javascript", "typescript"],
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+  "containerEnv": {
+    "TEST_DATABASE_URL": "postgres://postgres:postgres@postgres:5432/stellar_test",
+    "DATABASE_URL": "postgres://postgres:postgres@postgres:5432/stellar",
+    "STELLAR_RPC_URL": "http://kubo:5001",
+    "NODE_ENV": "development"
+  },
+  "remoteEnv": {
+    "PATH": "${containerEnv:PATH}:/usr/local/bin"
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "postStartCommand": "docker compose -f .devcontainer/docker-compose.yml ps || true",
+  "forwardPorts": [5432, 5001, 3000],
+  "portsAttributes": {
+    "5432": {
+      "label": "Postgres",
+      "onAutoForward": "silent"
+    },
+    "5001": {
+      "label": "Kubo RPC",
+      "onAutoForward": "silent"
+    },
+    "3000": {
+      "label": "App",
+      "onAutoForward": "notify"
+    }
+  },
+  "remoteUser": "node"
+}
