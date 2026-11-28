@@ -6,6 +6,10 @@
  * want the raw base64 XDR to store alongside each event.
  */
 
+import { Address, xdr } from '@stellar/stellar-sdk';
+import { z } from 'zod';
+import { logger } from '../utils/logger';
+
 /** Event exactly as returned by the RPC `getEvents` method. */
 export type RawEvent = {
   type: string;
@@ -26,7 +30,8 @@ export type GetEventsResult = {
 };
 
 export type GetEventsParams = {
-  contractId: string;
+  contractId?: string;
+  contractIds?: string[];
   limit: number;
 } & ({ startLedger: number; cursor?: never } | { cursor: string; startLedger?: never });
 
@@ -37,19 +42,33 @@ export type HealthResult = {
   ledgerRetentionWindow?: number;
 };
 
-/** Result of the RPC `getVersionInfo` method. */
-export type VersionInfo = {
-  version: string;
-  commitHash?: string;
-  buildTimestamp?: string;
-  captiveCoreVersion?: string;
-  protocolVersion?: number;
+/** A single ledger entry as returned by the RPC `getLedgerEntries` method. */
+export type RawLedgerEntry = {
+  /** Base64-encoded `LedgerKey` XDR, echoed back by the RPC. */
+  key: string;
+  /** Base64-encoded `LedgerEntryData` XDR. */
+  xdr: string;
+  /** Ledger sequence at which the entry expires (0 for non-TTL entries). */
+  liveUntilLedgerSeq?: number;
+  lastModifiedLedgerSeq?: number;
+  /** Present when the entry has been archived/evicted and only its TTL remains. */
+  ext?: unknown;
+};
+
+export type GetLedgerEntriesResult = {
+  entries: RawLedgerEntry[];
+  latestLedger: number;
+};
+
+export type GetLedgerEntriesParams = {
+  /** Base64-encoded `LedgerKey` XDR values to look up. */
+  keys: string[];
 };
 
 export interface EventSource {
   getEvents(params: GetEventsParams): Promise<GetEventsResult>;
   getHealth(): Promise<HealthResult>;
-  getVersionInfo?(): Promise<VersionInfo>;
+  getLedgerEntries(params: GetLedgerEntriesParams): Promise<GetLedgerEntriesResult>;
 }
 
 export class RpcError extends Error {
@@ -175,16 +194,20 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
   const safeUrl = redactUrl(options.url);
   let nextId = 1;
 
-  async function callOnce<T>(method: string, params?: unknown): Promise<T> {
+  async function callOnce<T>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) throw new RpcAbortError();
     let response: Response;
     try {
       response = await fetchImpl(options.url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
-        signal: AbortSignal.timeout(options.timeoutMs),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs)])
+          : AbortSignal.timeout(options.timeoutMs),
       });
     } catch (err) {
+      if (signal?.aborted) throw new RpcAbortError();
       const reason = err instanceof Error ? err.name : 'unknown';
       throw new RpcError(`${method} to ${safeUrl} failed: ${reason}`, undefined, true);
     }
@@ -194,10 +217,27 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
       throw new RpcError(`${method} to ${safeUrl} returned HTTP ${response.status}`, undefined, retryable);
     }
 
-    const body = (await response.json()) as {
+    const body = (await abortable(response.json(), signal)) as {
       result?: T;
       error?: { code: number; message: string };
     };
+    try {
+      raw = await response.text();
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      const contentType = response.headers.get('content-type') ?? 'unknown';
+      logger.warn('RPC returned a non-JSON body', {
+        method,
+        url: safeUrl,
+        contentType,
+        body: raw.slice(0, 200),
+      });
+      throw new RpcError(`${method} to ${safeUrl} returned a non-JSON body`, undefined, true);
+    }
+
+    if (body === null || typeof body !== 'object') {
+      throw new RpcError(`${method} to ${safeUrl} returned a non-JSON body`, undefined, true);
+    }
 
     if (body.error) {
       const range = RANGE_RE.exec(body.error.message);
@@ -222,32 +262,44 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     return body.result;
   }
 
-  async function call<T>(method: string, params?: unknown): Promise<T> {
+  async function call<T>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
     for (let attempt = 1; ; attempt++) {
       try {
-        return await callOnce<T>(method, params);
+        return await callOnce<T>(method, params, signal);
       } catch (err) {
+        if (signal?.aborted) throw new RpcAbortError();
         if (!(err instanceof RpcError) || !err.retryable || attempt >= maxAttempts) throw err;
         const delay = baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random() / 2);
-        await sleep(delay);
+        await abortable(sleep(delay), signal);
       }
     }
   }
 
   return {
-    getEvents(params) {
+    getEvents(params, signal) {
       const pagination =
         params.cursor !== undefined
           ? { cursor: params.cursor, limit: params.limit }
           : { limit: params.limit };
-      return call<GetEventsResult>('getEvents', {
+      return call<unknown>('getEvents', {
         ...(params.startLedger !== undefined ? { startLedger: params.startLedger } : {}),
-        filters: [{ type: 'contract', contractIds: [params.contractId] }],
+        filters: [{
+          type: 'contract',
+          contractIds: params.contractIds ?? (params.contractId ? [params.contractId] : []),
+        }],
         pagination,
-      });
+      }).then((result) =>
+        assertGetEventsInvariants(
+          parseRpcResult('getEvents', getEventsResultSchema, result),
+          params.contractId
+        )
+      );
     },
-    getHealth() {
-      return call<HealthResult>('getHealth');
+    getLedgerEntries(keys, signal) {
+      return call<GetLedgerEntriesResult>('getLedgerEntries', { keys }, signal);
+    },
+    getLedgerEntries(params) {
+      return call<GetLedgerEntriesResult>('getLedgerEntries', { keys: params.keys });
     },
     getVersionInfo() {
       return call<VersionInfo>('getVersionInfo');
