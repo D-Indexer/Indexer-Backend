@@ -46,6 +46,37 @@ composition root and entrypoints.
 }
 ```
 
+`npm run indexer -- status` also lists entries whose on-chain storage is archived or close
+to expiry. Soroban persistent entries (folder claims, template registrations, portfolio
+data) have a TTL and are archived when it lapses unless extended; events don't announce
+archival, so the indexer tracks it separately:
+
+```json
+{
+  "cursor": "0024284788768636927-4294967295",
+  "last_ledger": "5654242",
+  "last_success_at": "2026-11-10T07:37:30.225Z",
+  "status": "ok",
+  "archival": {
+    "checked_at": "2026-11-10T07:37:31.004Z",
+    "soon_to_expire": [
+      { "entity": "folder", "id": "42", "live_until_ledger": "5655000" }
+    ],
+    "archived": [{ "entity": "portfolio", "id": "7", "live_until_ledger": "5650000" }]
+  }
+}
+```
+
+API responses carry the same information per entity as
+`archival: { liveUntilLedger, archived }` ([api.md](api.md)). An archived entity must be
+restored on-chain before the contract can use it; transactions against it fail until then.
+
+TTL tracking queries `getLedgerEntries` for the storage keys behind recently active
+entities, in batches bounded by `TTL_BATCH_SIZE` and at most once per `TTL_CHECK_INTERVAL_MS`,
+so RPC usage stays within the configured limits. Archived entries are re-checked less often
+than active ones. If the status output shows `archival.checked_at` going stale, the TTL
+tracker is failing; check the logs for `TTL check failed`.
+
 Logs are single lines (`<ISO time> <LEVEL> <message> <json context>`) on stdout/stderr.
 `LOG_LEVEL=debug` adds more detail. RPC URLs in logs have credentials and query strings
 removed.
