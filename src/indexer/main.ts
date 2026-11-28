@@ -1,50 +1,51 @@
 import 'dotenv/config';
-import { getEnv, parseFolderContractConfig, networkId } from '../config/env';
-import pool from '../db/client';
+import { createContainer } from '../container';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
-import { createRpcClient, redactUrl } from './rpc';
+import { redactUrl } from './rpc';
 import { createIndexer } from './stellar';
+import { createHealthServer } from './httpHealth';
 
 /** Indexer process entrypoint: `npm run start:indexer` (or `dev:indexer`). */
 async function main(): Promise<void> {
-  const env = getEnv();
-  await migrate(pool);
+  const container = createContainer();
+  const { db, env } = container;
 
-  const rpc = createRpcClient({ url: env.STELLAR_RPC_URL, timeoutMs: env.STELLAR_RPC_TIMEOUT_MS });
-  const contracts = parseFolderContractConfig(env);
-  const network = networkId(env.STELLAR_NETWORK_PASSPHRASE);
+  await migrate(db);
+
   logger.info('Connecting indexer', { rpc: redactUrl(env.STELLAR_RPC_URL) });
 
-  const indexer = createIndexer({
-    db: pool,
-    rpc,
-    config: {
-      contractId: contracts.contractIds[0],
-      contractIds: contracts.contractIds,
-      startLedgers: contracts.startLedgers,
-      network,
-      pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
-      pageLimit: env.INDEXER_PAGE_LIMIT,
-      startLedger: env.INDEXER_START_LEDGER,
-      onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
-      maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
-    },
-  });
+  const indexer = createIndexer(container.deps);
+
+  // Start the cache LISTEN connection so this process receives NOTIFY messages
+  // and invalidates its in-process cache. The indexer publishes NOTIFY messages
+  // after applying events (see the publish point in src/indexer/stellar.ts);
+  // if the LISTEN connection is down, cache staleness is bounded by the TTL.
+  await startCacheListener();
+
+  health.start();
 
   const shutdown = async (signal: string) => {
     logger.info('Shutdown requested', { signal });
     const timeout = setTimeout(() => process.exit(1), env.SHUTDOWN_TIMEOUT_MS);
     timeout.unref();
+    await health.stop();
     await indexer.stop();
-    await pool.end();
+    await db.end();
     process.exit(0);
   };
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
-  process.on('SIGINT', () => void shutdown('SIGINT'));
+
+  installProcessHandlers({
+    logger,
+    shutdown,
+    isProduction: env.NODE_ENV === 'production',
+  });
 }
 
 main().catch((err) => {
-  logger.error('Indexer failed to start', { error: err instanceof Error ? err.message : err });
+  logger.error('Indexer failed to start', {
+    error: err instanceof Error ? err.message : err,
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   process.exit(1);
 });

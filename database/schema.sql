@@ -4,9 +4,14 @@
 
 -- Every contract event the indexer has seen, keyed by the RPC event id
 -- (a TOID encoding ledger, transaction, operation and event index).
--- The primary key makes reprocessing a page a no-op.
+--
+-- Declaratively range-partitioned on `ledger` (one partition per
+-- CONTRACT_EVENTS_PARTITION_SIZE ledgers, see src/indexer/stellar.ts). The
+-- primary key must include the partition key, so it is (ledger, id); a
+-- separate unique index on `id` keeps idempotent inserts working via
+-- ON CONFLICT (id) DO NOTHING. A DEFAULT partition is the safety net for any
+-- ledger range that has not had a partition created ahead of time.
 CREATE TABLE IF NOT EXISTS contract_events (
-  network           TEXT NOT NULL DEFAULT '',
   id                TEXT NOT NULL,
   ledger            INTEGER NOT NULL,
   ledger_closed_at  TIMESTAMPTZ NOT NULL,
@@ -19,14 +24,24 @@ CREATE TABLE IF NOT EXISTS contract_events (
   status            TEXT NOT NULL CHECK (status IN ('applied', 'ignored', 'rejected')),
   error             TEXT,
   indexed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (network, id)
-);
+  PRIMARY KEY (ledger, id)
+) PARTITION BY RANGE (ledger);
 
+-- Safety net: rows whose ledger has no dedicated partition land here.
+CREATE TABLE IF NOT EXISTS contract_events_default
+  PARTITION OF contract_events DEFAULT;
+
+-- Unique lookup on id (the RPC event id) so duplicate events remain no-ops.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_events_id ON contract_events (id);
 CREATE INDEX IF NOT EXISTS idx_contract_events_ledger ON contract_events (ledger);
 CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
   ON contract_events (indexed_at) WHERE status = 'rejected';
+CREATE INDEX IF NOT EXISTS idx_contract_events_topic_ledger
+  ON contract_events (topic, ledger);
 
 -- folder_cl (owner <-> folder_name); template_id tracks tmpl_set / port_mint.
+-- live_until_ledger is the TTL of the folder's persistent storage entry as
+-- reported by getLedgerEntries; NULL means not yet probed.
 CREATE TABLE IF NOT EXISTS folders (
   network      TEXT NOT NULL DEFAULT '',
   contract_id  TEXT,
@@ -39,6 +54,12 @@ CREATE TABLE IF NOT EXISTS folders (
   UNIQUE (network, name)
 );
 
+ALTER TABLE folders ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;
+ALTER TABLE folders ADD COLUMN IF NOT EXISTS ttl_checked_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_folders_live_until
+  ON folders (live_until_ledger) WHERE live_until_ledger IS NOT NULL;
+
 -- tmpl_reg
 CREATE TABLE IF NOT EXISTS templates (
   network        TEXT NOT NULL DEFAULT '',
@@ -47,21 +68,64 @@ CREATE TABLE IF NOT EXISTS templates (
   metadata_uri   TEXT NOT NULL,
   creator        TEXT,
   registered_at  TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (network, id)
+  from_ledger    INTEGER,
+  to_ledger      INTEGER
 );
+
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS ttl_checked_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_templates_live_until
+  ON templates (live_until_ledger) WHERE live_until_ledger IS NOT NULL;
 
 -- port_mint / port_upd / tmpl_set. No foreign key to folders: the indexer can
 -- start partway through history, so a portfolio may arrive before its folder.
+-- cid_normalized holds the CIDv1 base32 form for reverse lookups.
 CREATE TABLE IF NOT EXISTS portfolios (
-  network      TEXT NOT NULL DEFAULT '',
-  contract_id  TEXT,
-  owner        TEXT NOT NULL,
-  template_id  BIGINT NOT NULL,
-  ipfs_cid     TEXT NOT NULL,
-  minted_at    TIMESTAMPTZ NOT NULL,
-  updated_at   TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (network, owner)
+  owner           TEXT PRIMARY KEY,
+  template_id     BIGINT NOT NULL,
+  ipfs_cid        TEXT NOT NULL,
+  cid_normalized  TEXT,
+  minted_at       TIMESTAMPTZ NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL,
+  from_ledger     INTEGER,
+  to_ledger       INTEGER
 );
+
+-- Version history for portfolio content (port_mint / port_upd / tmpl_set).
+-- Version numbers are dense per owner and stable under replay: the handler
+-- derives the next version from the current max inside the page transaction.
+CREATE TABLE IF NOT EXISTS portfolio_versions (
+  owner           TEXT NOT NULL,
+  version         INTEGER NOT NULL,
+  ipfs_cid        TEXT NOT NULL,
+  cid_normalized  TEXT,
+  template_id     BIGINT NOT NULL,
+  event_id        TEXT,
+  at              TIMESTAMPTZ NOT NULL,
+  from_ledger     INTEGER,
+  to_ledger       INTEGER,
+  PRIMARY KEY (owner, version)
+);
+
+-- Version history for template metadata (tmpl_reg re-registration).
+CREATE TABLE IF NOT EXISTS template_versions (
+  id             BIGINT NOT NULL,
+  version        INTEGER NOT NULL,
+  metadata_uri   TEXT NOT NULL,
+  creator        TEXT,
+  event_id       TEXT,
+  at             TIMESTAMPTZ NOT NULL,
+  from_ledger    INTEGER,
+  to_ledger      INTEGER,
+  PRIMARY KEY (id, version)
+);
+
+ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;
+ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS ttl_checked_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_portfolios_live_until
+  ON portfolios (live_until_ledger) WHERE live_until_ledger IS NOT NULL;
 
 -- init / adm_add / adm_rm
 CREATE TABLE IF NOT EXISTS admins (
@@ -81,33 +145,32 @@ CREATE TABLE IF NOT EXISTS indexer_state (
   PRIMARY KEY (network, key)
 );
 
--- Upgrade an existing single-network database in place.
-ALTER TABLE contract_events ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT '';
-ALTER TABLE folders ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT '';
-ALTER TABLE folders ADD COLUMN IF NOT EXISTS contract_id TEXT;
-ALTER TABLE templates ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT '';
-ALTER TABLE templates ADD COLUMN IF NOT EXISTS contract_id TEXT;
-ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT '';
-ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS contract_id TEXT;
-ALTER TABLE admins ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT '';
-ALTER TABLE admins ADD COLUMN IF NOT EXISTS contract_id TEXT;
-ALTER TABLE indexer_state ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT '';
+-- Runtime feature flags for incident response. Read by the API and indexer
+-- with a short cache TTL; changes are audited via updated_by / updated_at /
+-- note. Rows are upserted by the `flags set` CLI command.
+CREATE TABLE IF NOT EXISTS feature_flags (
+  key         TEXT PRIMARY KEY,
+  enabled     BOOLEAN NOT NULL,
+  updated_by  TEXT,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  note        TEXT
+);
 
-DO $$
+-- NOTIFY-based cache invalidation: every insert/update/delete on feature_flags
+-- broadcasts the affected key on the `feature_flags_changed` channel so
+-- replicas can drop their cached value immediately instead of waiting for the
+-- TTL to expire. Listeners should treat the payload as a hint and re-read.
+CREATE OR REPLACE FUNCTION notify_feature_flags_changed() RETURNS TRIGGER AS $$
 BEGIN
-  ALTER TABLE contract_events DROP CONSTRAINT IF EXISTS contract_events_pkey;
-  ALTER TABLE contract_events ADD CONSTRAINT contract_events_pkey PRIMARY KEY (network, id);
-  ALTER TABLE folders DROP CONSTRAINT IF EXISTS folders_pkey;
-  ALTER TABLE folders ADD CONSTRAINT folders_pkey PRIMARY KEY (network, owner);
-  ALTER TABLE folders DROP CONSTRAINT IF EXISTS folders_name_key;
-  ALTER TABLE folders ADD CONSTRAINT folders_name_key UNIQUE (network, name);
-  ALTER TABLE templates DROP CONSTRAINT IF EXISTS templates_pkey;
-  ALTER TABLE templates ADD CONSTRAINT templates_pkey PRIMARY KEY (network, id);
-  ALTER TABLE portfolios DROP CONSTRAINT IF EXISTS portfolios_pkey;
-  ALTER TABLE portfolios ADD CONSTRAINT portfolios_pkey PRIMARY KEY (network, owner);
-  ALTER TABLE admins DROP CONSTRAINT IF EXISTS admins_pkey;
-  ALTER TABLE admins ADD CONSTRAINT admins_pkey PRIMARY KEY (network, address);
-  ALTER TABLE indexer_state DROP CONSTRAINT IF EXISTS indexer_state_pkey;
-  ALTER TABLE indexer_state ADD CONSTRAINT indexer_state_pkey PRIMARY KEY (network, key);
-EXCEPTION WHEN duplicate_table THEN NULL;
-END $$;
+  PERFORM pg_notify(
+    'feature_flags_changed',
+    COALESCE(NEW.key, OLD.key)
+  );
+  RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_feature_flags_changed ON feature_flags;
+CREATE TRIGGER trg_feature_flags_changed
+  AFTER INSERT OR UPDATE OR DELETE ON feature_flags
+  FOR EACH ROW EXECUTE FUNCTION notify_feature_flags_changed();

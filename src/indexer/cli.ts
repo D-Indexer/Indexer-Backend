@@ -6,7 +6,9 @@ import { readState, STATE, writeState } from './stellar';
 const USAGE = `Usage:
   npm run indexer -- status                 Print indexer state as JSON
   npm run indexer -- reset-cursor <ledger>  Re-index from <ledger> (already-stored events are skipped)
-  npm run indexer -- healthcheck            Exit 1 if the indexer has not succeeded recently`;
+  npm run indexer -- healthcheck            Exit 1 if the indexer has not succeeded recently
+                                            (manual use only; containers probe the embedded
+                                            /healthz and /readyz HTTP endpoints instead)`;
 
 export async function run(args: string[]): Promise<number> {
   const [command, arg] = args;
