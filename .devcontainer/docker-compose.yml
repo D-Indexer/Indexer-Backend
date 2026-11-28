@@ -1,0 +1,79 @@
+version: "3.8"
+
+services:
+  workspace:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    image: stellar-dev-workspace:latest
+    init: true
+    command: sleep infinity
+    volumes:
+      - ..:/workspaces/repo:cached
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      NODE_ENV: development
+      TEST_DATABASE_URL: postgres://postgres:postgres@postgres:5432/app_test
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/app
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+      IPFS_API_URL: http://kubo:5001
+      IPFS_GATEWAY_URL: http://kubo:8080
+      KUBO_API_URL: http://kubo:5001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kubo:
+        condition: service_healthy
+    networks:
+      - devnet
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - devnet
+
+  kubo:
+    image: ipfs/kubo:v0.29.0
+    restart: unless-stopped
+    ports:
+      - "4001:4001"
+      - "5001:5001"
+      - "8080:8080"
+    volumes:
+      - kubo-data:/data/ipfs
+    healthcheck:
+      test: ["CMD-SHELL", "ipfs id >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - devnet
+
+volumes:
+  postgres-data:
+  kubo-data:
+
+networks:
+  devnet:
+    driver: bridge

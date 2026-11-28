@@ -1,17 +1,66 @@
-import express from 'express';
+import express, { RequestHandler } from 'express';
 import cors from 'cors';
-import folderRoutes from './routes/folder.routes';
-import templateRoutes from './routes/template.routes';
-import uploadRoutes from './routes/upload.routes';
-import portfolioRoutes from './routes/portfolio.routes';
-import healthRoutes from './routes/health.routes';
-import eventRoutes from './routes/event.routes';
+import { createFolderRoutes } from './routes/folder.routes';
+import { createTemplateRoutes } from './routes/template.routes';
+import { createUploadRoutes } from './routes/upload.routes';
+import { createPortfolioRoutes } from './routes/portfolio.routes';
+import { createHealthRoutes } from './routes/health.routes';
 import { errorHandler } from './middleware/errorHandler';
 import { multerErrorHandler } from './middleware/multerErrorHandler';
 import { notFoundHandler } from './middleware/notFound';
 import { requestId } from './middleware/requestId';
+import { readConsistency } from './middleware/readConsistency';
 import { securityHeaders } from './middleware/securityHeaders';
+import { noStore } from './middleware/conditionalGet';
 import { AppEnv } from './config/env';
+import type { FeatureFlagKey, FeatureFlagService } from './featureFlags';
+
+/**
+ * Dependencies required to build the HTTP app. Everything is passed in
+ * explicitly so this module can be imported without touching `process.env`
+ * or opening any I/O.
+ */
+export interface AppDependencies {
+  env: AppEnv;
+  db: unknown;
+  services: Record<string, unknown>;
+  featureFlags: FeatureFlagService;
+}
+
+/** Feature flag gating each gated route group. */
+const ROUTE_FLAGS: Record<string, FeatureFlagKey> = {
+  uploads: 'uploads',
+  bundles: 'bundle_uploads',
+  webhooks: 'webhooks',
+  sse: 'sse',
+  graphql: 'graphql',
+};
+
+/**
+ * Builds middleware that rejects requests with 503 when the given feature flag
+ * is disabled. The flag is evaluated per request (the service caches reads).
+ */
+export function requireFeature(
+  featureFlags: FeatureFlagService,
+  flag: FeatureFlagKey,
+): RequestHandler {
+  return (_req, res, next) => {
+    featureFlags
+      .isEnabled(flag)
+      .then((enabled) => {
+        if (enabled) {
+          next();
+          return;
+        }
+        res.status(503).json({
+          error: 'Service Unavailable',
+          message: `The '${flag}' feature is currently disabled.`,
+          feature: flag,
+        });
+      })
+      .catch(next);
+  };
+}
 
 /**
  * CORS_ORIGIN: comma-separated allow-list, or `*` for any origin. Unset allows
@@ -28,7 +77,8 @@ export function corsOrigin(env: Pick<AppEnv, 'CORS_ORIGIN'>): cors.CorsOptions['
   return allowed;
 }
 
-export function createApp(env: AppEnv) {
+export function createApp(deps: AppDependencies) {
+  const { env, featureFlags } = deps;
   const app = express();
 
   app.disable('x-powered-by');
@@ -36,6 +86,8 @@ export function createApp(env: AppEnv) {
   app.use(securityHeaders);
   app.use(cors({ origin: corsOrigin(env) }));
   app.use(express.json({ limit: env.REQUEST_BODY_LIMIT }));
+  const defaultNetworkPassphrase = env.API_NETWORK_DEFAULT || env.STELLAR_NETWORK_PASSPHRASE;
+  app.use(networkMiddleware(defaultNetworkPassphrase));
 
   app.get('/', (_req, res) => {
     res.json({
@@ -45,12 +97,11 @@ export function createApp(env: AppEnv) {
     });
   });
 
-  app.use('/folders', folderRoutes);
-  app.use('/templates', templateRoutes);
-  app.use('/portfolios', portfolioRoutes);
-  app.use('/upload', uploadRoutes);
-  app.use('/health', healthRoutes);
-  app.use('/events', eventRoutes);
+  app.use('/folders', createFolderRoutes(deps));
+  app.use('/templates', createTemplateRoutes(deps));
+  app.use('/portfolios', createPortfolioRoutes(deps));
+  app.use('/upload', requireFeature(featureFlags, ROUTE_FLAGS.uploads), createUploadRoutes(deps));
+  app.use('/health', createHealthRoutes(deps));
 
   app.use(notFoundHandler);
   app.use(multerErrorHandler);

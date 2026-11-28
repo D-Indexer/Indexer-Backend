@@ -35,9 +35,29 @@ export interface ContractEvent {
 
 /** A minted portfolio NFT (contract events `port_mint` / `port_upd` / `tmpl_set`). */
 export interface Portfolio {
+  /** Stable portfolio identifier (NFT token id); primary key. */
+  tokenId: number;
+  /** Current owner; indexed attribute, may change on transfer. */
   owner: string;
   templateId: number;
-  ipfsCid: string;
+  /** Canonical CIDv1 base32, or null when the on-chain string is not a parseable CID. */
+  ipfsCid: string | null;
+  /** Original on-chain CID string, preserved verbatim. */
+  ipfsCidRaw: string;
+  /** Whether the on-chain CID string parsed successfully. */
+  cidValid: boolean;
   mintedAt: Date;
   updatedAt: Date;
+}
+
+/** A recorded ownership change for a portfolio (contract event `port_xfer`). */
+export interface PortfolioOwnershipHistory {
+  /** Stable portfolio identifier (NFT token id). */
+  tokenId: number;
+  /** Previous owner, null for the initial mint record. */
+  fromOwner: string | null;
+  /** New owner after the transfer. */
+  toOwner: string;
+  /** Ledger timestamp of the ownership change. */
+  transferredAt: Date;
 }
