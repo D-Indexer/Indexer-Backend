@@ -3,6 +3,11 @@
 # repo root (compose.yaml includes this file). Overrides come from your shell
 # or a root .env file, e.g. FOLDER_CONTRACT_ID=... docker compose up.
 
+# Single source of truth for the Kubo (IPFS) version. CI reads this same value
+# (see .github/workflows/ci.yml) so integration tests run against the exact
+# node version the local stack uses. Override with KUBO_VERSION=... if needed.
+x-kubo-version: &kubo-version ${KUBO_VERSION:-v0.29.0}
+
 x-app-env: &app-env
   NODE_ENV: development
   LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -37,7 +42,7 @@ services:
       retries: 10
 
   ipfs:
-    image: ipfs/kubo:v0.29.0
+    image: ipfs/kubo:${KUBO_VERSION:-v0.29.0}
     ports:
       # The Kubo RPC API is an admin interface: keep it on localhost.
       - '127.0.0.1:5001:5001'

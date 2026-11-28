@@ -21,6 +21,15 @@ function mapFolder(row: FolderRow): Folder {
 
 const COLUMNS = 'owner, name, template_id, claimed_at, updated_at';
 
+/**
+ * Hot SQL queries exported as named constants so query-plan regression tests
+ * can run EXPLAIN against exactly the production SQL.
+ */
+export const FOLDER_BY_OWNER_QUERY = `SELECT ${COLUMNS} FROM folders WHERE owner = $1`;
+export const FOLDER_BY_NAME_QUERY = `SELECT ${COLUMNS} FROM folders WHERE name = $1`;
+export const FOLDER_BY_TEMPLATE_ID_QUERY = `SELECT ${COLUMNS} FROM folders WHERE template_id = $1`;
+export const FOLDER_BY_LEDGER_QUERY = `SELECT ${COLUMNS} FROM folders WHERE ledger = $1`;
+
 export async function getFolderByAddress(owner: string): Promise<Folder | null> {
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE owner = $1`, [owner]);
   const row = rows[0];
