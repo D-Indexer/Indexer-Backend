@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { RequestHandler } from 'express';
+import { runWithContext } from '../utils/context';
 
 declare global {
   namespace Express {
@@ -16,5 +17,5 @@ export const requestId: RequestHandler = (req, res, next) => {
   const incoming = req.header('x-request-id')?.trim();
   req.id = incoming && VALID_REQUEST_ID.test(incoming) ? incoming : randomUUID();
   res.setHeader('x-request-id', req.id);
-  next();
+  runWithContext({ requestId: req.id }, () => next());
 };

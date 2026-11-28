@@ -26,7 +26,8 @@ export type GetEventsResult = {
 };
 
 export type GetEventsParams = {
-  contractId: string;
+  contractId?: string;
+  contractIds?: string[];
   limit: number;
 } & ({ startLedger: number; cursor?: never } | { cursor: string; startLedger?: never });
 
@@ -37,62 +38,33 @@ export type HealthResult = {
   ledgerRetentionWindow?: number;
 };
 
-/** Result of `getNetwork`: the network the RPC is serving. */
-export type NetworkResult = {
-  passphrase: string;
-  protocolVersion?: number;
-};
-
-/** One entry of a `getLedgerEntries` response. */
-export type LedgerEntryResult = {
+/** A single ledger entry as returned by the RPC `getLedgerEntries` method. */
+export type RawLedgerEntry = {
+  /** Base64-encoded `LedgerKey` XDR, echoed back by the RPC. */
   key: string;
-  xdr?: string;
-  lastModifiedLedgerSeq?: number;
+  /** Base64-encoded `LedgerEntryData` XDR. */
+  xdr: string;
+  /** Ledger sequence at which the entry expires (0 for non-TTL entries). */
   liveUntilLedgerSeq?: number;
+  lastModifiedLedgerSeq?: number;
+  /** Present when the entry has been archived/evicted and only its TTL remains. */
+  ext?: unknown;
 };
 
 export type GetLedgerEntriesResult = {
-  entries: LedgerEntryResult[] | null;
+  entries: RawLedgerEntry[];
   latestLedger: number;
 };
 
+export type GetLedgerEntriesParams = {
+  /** Base64-encoded `LedgerKey` XDR values to look up. */
+  keys: string[];
+};
+
 export interface EventSource {
-  getEvents(params: GetEventsParams, signal?: AbortSignal): Promise<GetEventsResult>;
-  getHealth(signal?: AbortSignal): Promise<HealthResult>;
-  getNetwork(signal?: AbortSignal): Promise<NetworkResult>;
-  getLedgerEntries(keys: string[], signal?: AbortSignal): Promise<GetLedgerEntriesResult>;
-}
-
-/** Thrown when a call is cancelled through its AbortSignal (e.g. indexer shutdown). */
-export class RpcAbortError extends Error {
-  constructor(message = 'RPC call aborted') {
-    super(message);
-    this.name = 'RpcAbortError';
-  }
-}
-
-export function isAbortError(err: unknown): boolean {
-  return err instanceof RpcAbortError || (err as { name?: unknown })?.name === 'AbortError';
-}
-
-/** Reject as soon as `signal` aborts, so retry sleeps and fetches stop promptly. */
-function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(new RpcAbortError());
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(new RpcAbortError());
-    signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort);
-        resolve(value);
-      },
-      (err) => {
-        signal.removeEventListener('abort', onAbort);
-        reject(err);
-      }
-    );
-  });
+  getEvents(params: GetEventsParams): Promise<GetEventsResult>;
+  getHealth(): Promise<HealthResult>;
+  getLedgerEntries(params: GetLedgerEntriesParams): Promise<GetLedgerEntriesResult>;
 }
 
 export class RpcError extends Error {
@@ -210,24 +182,20 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
         params.cursor !== undefined
           ? { cursor: params.cursor, limit: params.limit }
           : { limit: params.limit };
-      return call<GetEventsResult>(
-        'getEvents',
-        {
-          ...(params.startLedger !== undefined ? { startLedger: params.startLedger } : {}),
-          filters: [{ type: 'contract', contractIds: [params.contractId] }],
-          pagination,
-        },
-        signal
-      );
-    },
-    getHealth(signal) {
-      return call<HealthResult>('getHealth', undefined, signal);
-    },
-    getNetwork(signal) {
-      return call<NetworkResult>('getNetwork', undefined, signal);
+      return call<GetEventsResult>('getEvents', {
+        ...(params.startLedger !== undefined ? { startLedger: params.startLedger } : {}),
+        filters: [{
+          type: 'contract',
+          contractIds: params.contractIds ?? (params.contractId ? [params.contractId] : []),
+        }],
+        pagination,
+      });
     },
     getLedgerEntries(keys, signal) {
       return call<GetLedgerEntriesResult>('getLedgerEntries', { keys }, signal);
+    },
+    getLedgerEntries(params) {
+      return call<GetLedgerEntriesResult>('getLedgerEntries', { keys: params.keys });
     },
   };
 }
