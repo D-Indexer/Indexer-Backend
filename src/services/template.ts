@@ -1,4 +1,4 @@
-import pool from '../db/client';
+import type { Pool } from 'pg';
 import { Template } from '../types';
 import { cache } from '../cache';
 
@@ -20,27 +20,18 @@ function mapTemplate(row: TemplateRow): Template {
 
 const COLUMNS = 'id, metadata_uri, creator, registered_at';
 
-const TEMPLATES_TAG = 'templates';
-const TEMPLATES_TTL_MS = 60_000;
+// Hot SQL paths, exported as named constants so query-plan regression tests
+// can run EXPLAIN against the exact statements used in production.
+export const LIST_TEMPLATES_SQL = `SELECT ${COLUMNS} FROM templates ORDER BY id`;
+export const GET_TEMPLATE_SQL = `SELECT ${COLUMNS} FROM templates WHERE id = $1`;
 
 export async function listTemplates(): Promise<Template[]> {
-  return cache.getOrSet<Template[]>(
-    'templates:list',
-    async () => {
-      const { rows } = await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates ORDER BY id`);
-      return rows.map(mapTemplate);
-    },
-    { ttlMs: TEMPLATES_TTL_MS, tags: [TEMPLATES_TAG] },
-  );
+  const { rows } = await pool.query<TemplateRow>(LIST_TEMPLATES_SQL);
+  return rows.map(mapTemplate);
 }
 
 export async function getTemplate(id: number): Promise<Template | null> {
-  return cache.getOrSet<Template | null>(
-    `templates:${id}`,
-    async () => {
-      const { rows } = await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates WHERE id = $1`, [id]);
-      return rows[0] ? mapTemplate(rows[0]) : null;
-    },
-    { ttlMs: TEMPLATES_TTL_MS, tags: [TEMPLATES_TAG] },
-  );
+  const { rows } = await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates WHERE id = $1`, [id]);
+  const row = rows[0];
+  return row ? mapTemplate(row) : null;
 }

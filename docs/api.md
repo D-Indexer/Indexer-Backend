@@ -10,8 +10,11 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/folders/:address`](#get-foldersaddress)       | Folder claimed by an address          |
 | `GET`  | [`/folders/name/:name`](#get-foldersnamename)    | Folder by name                        |
 | `GET`  | [`/portfolios/:address`](#get-portfoliosaddress) | Portfolio NFT minted by an address    |
+| `GET`  | [`/portfolios/:address/versions`](#get-portfoliosaddressversions) | Portfolio version history |
+| `GET`  | [`/portfolios/by-cid/:cid`](#get-portfoliosby-cidcid) | Portfolios referencing a CID      |
 | `GET`  | [`/templates`](#get-templates)                   | All registered templates              |
 | `GET`  | [`/templates/:id`](#get-templatesid)             | One template                          |
+| `GET`  | [`/templates/:id/versions`](#get-templatesidversions) | Template metadata history         |
 | `POST` | [`/upload`](#post-upload)                        | Add and pin a file on IPFS            |
 
 ## Moderation
@@ -82,7 +85,7 @@ Every error has the same shape:
 
 | Status | When                                                  | `error` examples                                                                                                                                                                                                                                                             |
 | ------ | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | Invalid path parameter or upload                      | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit` |
+| `400`  | Invalid path parameter, query parameter or upload     | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `Invalid CID`, `atLedger must be a number`, `atLedger is before the earliest indexed ledger`, `atLedger is after the last indexed ledger`, `Invalid cursor`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit` |
 | `404`  | Resource not indexed, or unknown route                | `Folder not found`, `Portfolio not found`, `Template not found`, `Route not found` (also includes `path`)                                                                                                                                                                    |
 | `502`  | IPFS node unreachable or returned an error            | `IPFS node unreachable`, `IPFS add failed with status 500`                                                                                                                                                                                                                   |
 | `503`  | `/health` only: database unreachable                  | see below                                                                                                                                                                                                                                                                    |
@@ -100,6 +103,33 @@ to correlate; anything else is replaced with a UUID.
 - `:address` is a Stellar strkey: `G…` (account) or `C…` (contract), 56 characters.
 - `:name` is 1–64 characters of `A-Z a-z 0-9 . _ -`. On-chain names end in `.folder`.
 - `:id` is a non-negative integer up to `4294967295` (the contract stores `u32`).
+- `:cid` is a valid CIDv0 (`Qm…`) or CIDv1 (`bafy…`) string. Both forms of the same
+  content are equivalent: lookups normalise the input to CIDv1 before matching.
+- `atLedger` is a non-negative integer ledger sequence. It must fall within the
+  indexed range (`earliest indexed ledger` ≤ `atLedger` ≤ `last_ledger`); otherwise
+  the request is rejected with `400`.
+
+### Point-in-time reads (`?atLedger=`)
+
+`GET /folders/:address`, `GET /folders/name/:name`, `GET /portfolios/:address`,
+`GET /templates/:id` and `GET /templates` accept an optional `atLedger` query
+parameter. When present, the response reflects the state as of the end of that
+ledger instead of the current state. The response shape is unchanged; timestamps
+are still ledger close times.
+
+```bash
+curl "localhost:3000/portfolios/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM?atLedger=5654400"
+```
+
+Errors: `400` `atLedger must be a number`, `atLedger is before the earliest indexed
+ledger`, `atLedger is after the last indexed ledger`.
+
+### Pagination
+
+The `…/versions` endpoints are keyset paginated. Pass `limit` (1–100, default 20)
+and, to fetch the next page, the `cursor` value returned by the previous response.
+Pages are ordered newest version first. An invalid `cursor` returns `400`
+`Invalid cursor`.
 
 ## `GET /`
 
@@ -165,7 +195,8 @@ curl localhost:3000/folders/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJ
   "name": "smoke-1794262900.folder",
   "templateId": 1,
   "claimedAt": "2026-11-09T22:22:27.000Z",
-  "updatedAt": "2026-11-09T22:23:07.000Z"
+  "updatedAt": "2026-11-09T22:23:07.000Z",
+  "archival": { "liveUntilLedger": 5658123, "archived": false }
 }
 ```
 
@@ -198,12 +229,84 @@ curl localhost:3000/portfolios/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX
   "templateId": 1,
   "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
   "mintedAt": "2026-11-09T22:23:07.000Z",
-  "updatedAt": "2026-11-09T22:23:52.000Z"
+  "updatedAt": "2026-11-09T22:23:52.000Z",
+  "archival": { "liveUntilLedger": 5658123, "archived": false }
 }
 ```
 
 Errors: `400` invalid address, `404` `Portfolio not found`. Hidden entries are still
 returned, with `moderation: { hidden: true }`.
+
+## `GET /portfolios/:address/versions`
+
+Version history of the portfolio owned by `address`, newest first. A new version is
+recorded on every `port_mint`, `port_upd` and `tmpl_set` event. `version` numbers are
+dense and stable: replaying the same ledger range produces identical history.
+
+```bash
+curl "localhost:3000/portfolios/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM/versions?limit=2"
+```
+
+```json
+{
+  "versions": [
+    {
+      "version": 2,
+      "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
+      "templateId": 1,
+      "ledger": 5654521,
+      "at": "2026-11-09T22:23:52.000Z"
+    },
+    {
+      "version": 1,
+      "ipfsCid": "bafkreiacuprjr4kth5rfldcy4tdq5xfltl22kdlc3es72u4qsqqcb6ypxa",
+      "templateId": 1,
+      "ledger": 5654400,
+      "at": "2026-11-09T22:23:07.000Z"
+    }
+  ],
+  "nextCursor": "2"
+}
+```
+
+`nextCursor` is `null` on the last page.
+
+Errors: `400` invalid address or cursor, `404` `Portfolio not found`.
+
+## `GET /portfolios/by-cid/:cid`
+
+Reverse lookup: portfolios whose current or historical `ipfsCid` matches `cid`.
+CIDv0 and CIDv1 inputs for the same content return the same results. Lookup is
+index-backed.
+
+```bash
+curl "localhost:3000/portfolios/by-cid/bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu"
+```
+
+```json
+{
+  "cid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
+  "current": [
+    {
+      "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+      "templateId": 1,
+      "updatedAt": "2026-11-09T22:23:52.000Z"
+    }
+  ],
+  "historical": [
+    {
+      "owner": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
+      "version": 1,
+      "at": "2026-11-09T22:14:42.000Z"
+    }
+  ]
+}
+```
+
+`historical` lists versions that referenced the CID but are no longer current. Pass
+`includeHistorical=false` to omit it (default `true`).
+
+Errors: `400` `Invalid CID`.
 
 ## `GET /templates`
 
@@ -215,7 +318,8 @@ All registered templates (`tmpl_reg`), ordered by id. Not paginated yet.
     "id": 1,
     "metadataUri": "ipfs://bafkreiejxg6d3gqvi3737mcwxkv4u7gismaraxgv5zfoqtfuc3nbdgve7i",
     "creator": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
-    "registeredAt": "2026-11-09T22:14:42.000Z"
+    "registeredAt": "2026-11-09T22:14:42.000Z",
+    "archival": { "liveUntilLedger": 5658123, "archived": false }
   }
 ]
 ```
@@ -225,6 +329,26 @@ All registered templates (`tmpl_reg`), ordered by id. Not paginated yet.
 One template, same shape as a list item.
 
 Errors: `400` invalid id, `404` `Template not found`.
+
+## Archival
+
+Soroban persistent storage entries have a TTL and are archived when it expires unless it
+is extended. Folder claims, template registrations and portfolios are all stored this way,
+and archival is not announced by contract events, so the indexer periodically queries
+`getLedgerEntries` for the storage keys backing each entity and records their TTL.
+
+Every folder, portfolio and template response includes an `archival` object:
+
+| Field             | Meaning                                                                                                                       |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `liveUntilLedger` | The ledger at which the entity's storage entry expires, or `null` if it hasn't been checked yet.                              |
+| `archived`        | `true` when the entry is no longer live (its TTL has passed or the key is missing on-chain).                                  |
+
+An archived entry must be restored (via `RestoreFootprint`) before the contract can read
+or write it, so treat `archived: true` as "not currently usable on-chain" even though the
+read model still returns the last indexed data. The indexer prioritises recently active
+entities and batches `getLedgerEntries` calls to keep RPC usage bounded; see
+[operations](operations.md#status-cli) for the soon-to-expire list in the status CLI.
 
 ## `POST /upload`
 
@@ -248,3 +372,15 @@ Errors: `400` (no file, type, size, content mismatch), `502` / `504` (IPFS).
 
 The endpoint is unauthenticated and not rate limited yet; don't expose it publicly
 without a proxy that enforces limits.
+
+## RPC usage limits
+
+TTL tracking is the only part of the indexer that calls `getLedgerEntries`; event polling
+uses a separate cursor. To stay within provider quotas:
+
+- Keys are queried in batches (`TTL_BATCH_SIZE`, default 50) rather than one call per entity.
+- Polls run on an interval (`TTL_POLL_INTERVAL_MS`, default 60000) and are skipped while a
+  previous poll is still in flight.
+- Recently active entities are checked first; entities whose TTL is far from expiry are
+  refreshed less often.
+- If the RPC returns a rate-limit error the poll backs off and retries on the next interval.

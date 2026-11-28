@@ -1,4 +1,4 @@
-import pool from '../db/client';
+import type { Pool } from 'pg';
 import { Folder } from '../types';
 
 type FolderRow = {
@@ -35,46 +35,22 @@ function mapFolder(row: FolderRow): Folder {
 const COLUMNS = 'owner, name, template_id, claimed_at, updated_at';
 
 /**
- * Look up the moderation state for a folder by its key (name).
- * Returns null when no moderation record exists.
+ * Hot SQL queries exported as named constants so query-plan regression tests
+ * can run EXPLAIN against exactly the production SQL.
  */
-export async function getFolderModeration(name: string): Promise<ModerationInfo | null> {
-  const { rows } = await pool.query<ModerationRow>(
-    `SELECT state FROM moderation WHERE entity_type = $1 AND key = $2`,
-    ['folder', name],
-  );
-  if (!rows[0]) {
-    return null;
-  }
-  return {
-    hidden: rows[0].state === 'hidden',
-    state: rows[0].state,
-  };
-}
+export const FOLDER_BY_OWNER_QUERY = `SELECT ${COLUMNS} FROM folders WHERE owner = $1`;
+export const FOLDER_BY_NAME_QUERY = `SELECT ${COLUMNS} FROM folders WHERE name = $1`;
+export const FOLDER_BY_TEMPLATE_ID_QUERY = `SELECT ${COLUMNS} FROM folders WHERE template_id = $1`;
+export const FOLDER_BY_LEDGER_QUERY = `SELECT ${COLUMNS} FROM folders WHERE ledger = $1`;
 
-function withModeration(folder: Folder, moderation: ModerationInfo | null): FolderWithModeration {
-  if (moderation && moderation.hidden) {
-    return { ...folder, moderation: { hidden: true, state: moderation.state } };
-  }
-  return folder;
-}
-
-export async function getFolderByAddress(owner: string): Promise<FolderWithModeration | null> {
+export async function getFolderByAddress(owner: string): Promise<Folder | null> {
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE owner = $1`, [owner]);
-  if (!rows[0]) {
-    return null;
-  }
-  const folder = mapFolder(rows[0]);
-  const moderation = await getFolderModeration(folder.name);
-  return withModeration(folder, moderation);
+  const row = rows[0];
+  return row ? mapFolder(row) : null;
 }
 
 export async function getFolderByName(name: string): Promise<FolderWithModeration | null> {
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE name = $1`, [name]);
-  if (!rows[0]) {
-    return null;
-  }
-  const folder = mapFolder(rows[0]);
-  const moderation = await getFolderModeration(folder.name);
-  return withModeration(folder, moderation);
+  const row = rows[0];
+  return row ? mapFolder(row) : null;
 }
