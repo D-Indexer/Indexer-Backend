@@ -9,6 +9,7 @@ import {
   RetentionGapError,
 } from '../indexer/stellar';
 import { addr, makeEvent, OWNER, str, TESTNET_CONTRACT, testnetEvents, u32 } from './eventFixtures';
+import { cassetteSource, listCassettes } from './rpcCassette';
 
 type Call = { sql: string; params?: unknown[] };
 
@@ -266,6 +267,86 @@ describe('scanned ledger', () => {
     );
 
     expect(calls.find((c) => c.params?.[0] === 'last_ledger')?.params).toEqual(['last_ledger', '5654242']);
+  });
+});
+
+describe('recorded RPC cassettes', () => {
+  it('ships the four required cassettes', () => {
+    expect(listCassettes()).toEqual(
+      expect.arrayContaining(['full-catch-up', 'empty-page', 'retention-gap', 'partial-page-tip'])
+    );
+  });
+
+  it('replays a full catch-up from a start ledger', async () => {
+    const { db, calls } = fakeDb();
+    const rpc = cassetteSource('full-catch-up');
+
+    await pollOnce({ db, rpc, config: { ...config, startLedger: 100 } });
+    await pollOnce({ db, rpc, config: { ...config, startLedger: 100 } });
+
+    expect(rpc.getEvents).toHaveBeenNthCalledWith(1, {
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      startLedger: 100,
+    });
+    expect(rpc.getEvents).toHaveBeenNthCalledWith(2, {
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      cursor: '0024284788768636927-0000000001',
+    });
+    expect(calls.filter((c) => c.params?.[0] === 'cursor').map((c) => c.params![1])).toEqual([
+      '0024284788768636927-0000000001',
+      '0024284788768636927-4294967295',
+    ]);
+  });
+
+  it('treats an empty page as caught up and keeps the returned cursor', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: '0024284788768636927-4294967295' } });
+    const rpc = cassetteSource('empty-page');
+
+    await pollOnce({ db, rpc, config });
+
+    expect(rpc.getEvents).toHaveBeenCalledWith({
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      cursor: '0024284788768636927-4294967295',
+    });
+    expect(calls.some((c) => c.sql.includes('INSERT INTO contract_events'))).toBe(false);
+    expect(calls.find((c) => c.params?.[0] === 'cursor')?.params).toEqual([
+      'cursor',
+      '0024284788768636927-4294967295',
+    ]);
+  });
+
+  it('halts on a recorded retention-gap error', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: '0021474836480000000-0000000000' } });
+    const rpc = cassetteSource('retention-gap');
+
+    const err = await pollOnce({ db, rpc, config }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(RetentionGapError);
+    expect(err.message).toMatch(/ledger 5000000.*from 5533280.*docs\/operations.md/);
+    expect(calls.find((c) => c.params?.[0] === 'status')?.params).toEqual(['status', 'retention_gap']);
+  });
+
+  it('records the scanned ledger from a partial page at the tip', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: '0024284788768636927-0000000001' } });
+    const rpc = cassetteSource('partial-page-tip');
+
+    await pollOnce({ db, rpc, config });
+
+    expect(calls.find((c) => c.params?.[0] === 'last_ledger')?.params).toEqual(['last_ledger', '5654242']);
+    expect(calls.find((c) => c.params?.[0] === 'cursor')?.params).toEqual([
+      'cursor',
+      '0024284788768636927-4294967295',
+    ]);
+  });
+
+  it('fails the test on an unrecorded request', async () => {
+    const rpc = cassetteSource('empty-page');
+    await expect(
+      rpc.getEvents({ contractId: TESTNET_CONTRACT, limit: 100, startLedger: 1 })
+    ).rejects.toThrow(/no cassette entry/);
   });
 });
 

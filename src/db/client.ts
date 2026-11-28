@@ -1,135 +1,182 @@
-import { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
+import { Pool, type PoolConfig } from 'pg';
 import { getEnv } from '../config/env';
-import { recordTiming } from '../middleware/serverTiming';
+import cache from '../cache';
 
-const env = getEnv();
+export type PoolEnv = Pick<
+  AppEnv,
+  'DATABASE_URL' | 'DB_MAX_CONNECTIONS' | 'DB_IDLE_TIMEOUT_MS' | 'DB_CONNECTION_TIMEOUT_MS'
+>;
 
-const pool = new Pool({
+const poolConfig: PoolConfig = {
   connectionString: env.DATABASE_URL,
   max: env.DB_MAX_CONNECTIONS,
   idleTimeoutMillis: env.DB_IDLE_TIMEOUT_MS,
   connectionTimeoutMillis: env.DB_CONNECTION_TIMEOUT_MS,
-});
+};
 
-const originalQuery = pool.query.bind(pool) as Pool['query'];
-
-// Wrap pool.query to record DB timing into the current request context.
-(pool as Pool).query = function instrumentedQuery(
-  ...args: Parameters<Pool['query']>
-): ReturnType<Pool['query']> {
-  const start = process.hrtime.bigint();
-  const finish = () => {
-    const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
-    recordTiming('db', durationMs);
-  };
-
-  const result = (originalQuery as (...a: Parameters<Pool['query']>) => ReturnType<Pool['query']>)(
-    ...args,
-  );
-
-  // pg's query supports both callback and promise styles.
-  if (result && typeof (result as Promise<unknown>).then === 'function') {
-    return (result as Promise<QueryResult<QueryResultRow>>).then(
-      (res) => {
-        finish();
-        return res;
-      },
-      (err) => {
-        finish();
-        throw err;
-      },
-    ) as ReturnType<Pool['query']>;
-  }
-
-  // Callback style: wrap the final callback argument if present.
-  const lastArg = args[args.length - 1];
-  if (typeof lastArg === 'function') {
-    const cb = lastArg as (...cbArgs: unknown[]) => void;
-    (args as unknown[])[args.length - 1] = (...cbArgs: unknown[]) => {
-      finish();
-      cb(...cbArgs);
-    };
-    return (originalQuery as (...a: Parameters<Pool['query']>) => ReturnType<Pool['query']>)(
-      ...args,
-    );
-  }
-
-  finish();
-  return result;
-} as Pool['query'];
-
-const originalConnect = pool.connect.bind(pool) as Pool['connect'];
-
-// Wrap pool.connect so that queries issued on a checked-out client are also timed.
-(pool as Pool).connect = function instrumentedConnect(
-  ...args: Parameters<Pool['connect']>
-): ReturnType<Pool['connect']> {
-  const result = (originalConnect as (...a: Parameters<Pool['connect']>) => ReturnType<Pool['connect']>)(
-    ...args,
-  );
-
-  const instrumentClient = (client: PoolClient) => {
-    const clientQuery = client.query.bind(client) as PoolClient['query'];
-    (client as PoolClient).query = function instrumentedClientQuery(
-      ...qArgs: Parameters<PoolClient['query']>
-    ): ReturnType<PoolClient['query']> {
-      const start = process.hrtime.bigint();
-      const finish = () => {
-        const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
-        recordTiming('db', durationMs);
-      };
-
-      const qResult = (clientQuery as (...a: Parameters<PoolClient['query']>) => ReturnType<PoolClient['query']>)(
-        ...qArgs,
-      );
-
-      if (qResult && typeof (qResult as Promise<unknown>).then === 'function') {
-        return (qResult as Promise<QueryResult<QueryResultRow>>).then(
-          (res) => {
-            finish();
-            return res;
-          },
-          (err) => {
-            finish();
-            throw err;
-          },
-        ) as ReturnType<PoolClient['query']>;
-      }
-
-      const lastQArg = qArgs[qArgs.length - 1];
-      if (typeof lastQArg === 'function') {
-        const cb = lastQArg as (...cbArgs: unknown[]) => void;
-        (qArgs as unknown[])[qArgs.length - 1] = (...cbArgs: unknown[]) => {
-          finish();
-          cb(...cbArgs);
-        };
-        return (clientQuery as (...a: Parameters<PoolClient['query']>) => ReturnType<PoolClient['query']>)(
-          ...qArgs,
-        );
-      }
-
-      finish();
-      return qResult;
-    } as PoolClient['query'];
-    return client;
-  };
-
-  if (result && typeof (result as Promise<unknown>).then === 'function') {
-    return (result as Promise<PoolClient>).then(instrumentClient) as ReturnType<Pool['connect']>;
-  }
-
-  const lastArg = args[args.length - 1];
-  if (typeof lastArg === 'function') {
-    const cb = lastArg as (...cbArgs: unknown[]) => void;
-    (args as unknown[])[args.length - 1] = (err: unknown, client: PoolClient | undefined, done: unknown) => {
-      cb(err, client ? instrumentClient(client) : client, done);
-    };
-    return (originalConnect as (...a: Parameters<Pool['connect']>) => ReturnType<Pool['connect']>)(
-      ...args,
-    );
-  }
-
-  return result;
-} as Pool['connect'];
+const pool = new Pool(poolConfig);
 
 export default pool;
+
+const CACHE_INVALIDATE_CHANNEL = 'cache_invalidate';
+
+const RECONNECT_BASE_DELAY_MS = 500;
+const RECONNECT_MAX_DELAY_MS = 30000;
+
+let listenClient: Client | null = null;
+let listenStarted = false;
+let listenDown = false;
+let reconnectAttempts = 0;
+let reconnectTimer: NodeJS.Timeout | null = null;
+let shuttingDown = false;
+
+/**
+ * Whether the dedicated LISTEN connection is currently up.
+ * When false, the cache falls back to TTL-based expiry.
+ */
+export function isListenUp(): boolean {
+  return listenStarted && !listenDown && listenClient !== null;
+}
+
+function parseTags(payload: string | undefined): string[] {
+  if (!payload) {
+    return [];
+  }
+  return payload
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0);
+}
+
+function handleNotification(payload: string | undefined): void {
+  const tags = parseTags(payload);
+  if (tags.length === 0) {
+    // Empty payload means "invalidate everything".
+    cache.flush();
+    return;
+  }
+  for (const tag of tags) {
+    cache.invalidateTag(tag);
+  }
+}
+
+function scheduleReconnect(): void {
+  if (shuttingDown || reconnectTimer) {
+    return;
+  }
+  const delay = Math.min(
+    RECONNECT_BASE_DELAY_MS * 2 ** reconnectAttempts,
+    RECONNECT_MAX_DELAY_MS,
+  );
+  reconnectAttempts += 1;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void connectListener();
+  }, delay);
+  // Do not keep the process alive solely for reconnects.
+  if (typeof reconnectTimer.unref === 'function') {
+    reconnectTimer.unref();
+  }
+}
+
+function markDown(client: Client): void {
+  if (listenClient !== client) {
+    return;
+  }
+  listenDown = true;
+  listenClient = null;
+  try {
+    client.removeAllListeners();
+    void client.end().catch(() => {
+      /* ignore */
+    });
+  } catch {
+    /* ignore */
+  }
+  scheduleReconnect();
+}
+
+async function connectListener(): Promise<void> {
+  if (shuttingDown) {
+    return;
+  }
+
+  const client = new Client({ connectionString: env.DATABASE_URL });
+  listenClient = client;
+
+  client.on('notification', (msg) => {
+    if (msg.channel === CACHE_INVALIDATE_CHANNEL) {
+      handleNotification(msg.payload);
+    }
+  });
+
+  client.on('error', () => {
+    markDown(client);
+  });
+
+  client.on('end', () => {
+    markDown(client);
+  });
+
+  try {
+    await client.connect();
+    await client.query(`LISTEN ${CACHE_INVALIDATE_CHANNEL}`);
+    if (listenClient !== client) {
+      // Was torn down while connecting.
+      return;
+    }
+    listenDown = false;
+    reconnectAttempts = 0;
+    // Flush on (re)connect to avoid serving entries that may have gone
+    // stale while the LISTEN connection was down.
+    cache.flush();
+  } catch {
+    markDown(client);
+  }
+}
+
+/**
+ * Start the dedicated LISTEN connection used for cache invalidation.
+ * Safe to call multiple times; only the first call has an effect.
+ */
+export function startCacheInvalidationListener(): void {
+  if (listenStarted || shuttingDown) {
+    return;
+  }
+  listenStarted = true;
+  void connectListener();
+}
+
+/**
+ * Stop the LISTEN connection and cancel any pending reconnect.
+ */
+export async function stopCacheInvalidationListener(): Promise<void> {
+  shuttingDown = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  const client = listenClient;
+  listenClient = null;
+  listenDown = true;
+  if (client) {
+    try {
+      client.removeAllListeners();
+      await client.end();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Publish a NOTIFY message on the cache invalidation channel.
+ * `tags` are joined with commas; an empty list invalidates everything.
+ */
+export async function publishCacheInvalidation(tags: string[]): Promise<void> {
+  const payload = tags.join(',');
+  await pool.query('SELECT pg_notify($1, $2)', [
+    CACHE_INVALIDATE_CHANNEL,
+    payload,
+  ]);
+}

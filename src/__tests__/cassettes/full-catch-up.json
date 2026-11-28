@@ -1,0 +1,114 @@
+{
+  "name": "full-catch-up",
+  "description": "Full catch-up from a start ledger to the tip. Includes a partial page mid-stream and a final empty page with a cursor.",
+  "recordedAt": "2024-01-01T00:00:00.000Z",
+  "interactions": [
+    {
+      "request": {
+        "method": "getEvents",
+        "params": {
+          "startLedger": 1000,
+          "filters": [
+            {
+              "type": "contract",
+              "contractIds": ["CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"]
+            }
+          ],
+          "pagination": {
+            "limit": 2
+          }
+        }
+      },
+      "response": {
+        "events": [
+          {
+            "type": "contract",
+            "ledger": 1000,
+            "ledgerClosedAt": "2024-01-01T00:00:00Z",
+            "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            "id": "0000001000-0000000001",
+            "pagingToken": "1000-1",
+            "inSuccessfulContractCall": true,
+            "topic": ["AAAADwAAAAh0cmFuc2Zlcg=="],
+            "value": {
+              "xdr": "AAAAAQAAAAEAAAAB"
+            }
+          },
+          {
+            "type": "contract",
+            "ledger": 1001,
+            "ledgerClosedAt": "2024-01-01T00:00:05Z",
+            "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            "id": "0000001001-0000000001",
+            "pagingToken": "1001-1",
+            "inSuccessfulContractCall": true,
+            "topic": ["AAAADwAAAAh0cmFuc2Zlcg=="],
+            "value": {
+              "xdr": "AAAAAQAAAAEAAAAC"
+            }
+          }
+        ],
+        "latestLedger": 1010,
+        "cursor": "1001-1"
+      }
+    },
+    {
+      "request": {
+        "method": "getEvents",
+        "params": {
+          "cursor": "1001-1",
+          "filters": [
+            {
+              "type": "contract",
+              "contractIds": ["CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"]
+            }
+          ],
+          "pagination": {
+            "limit": 2
+          }
+        }
+      },
+      "response": {
+        "events": [
+          {
+            "type": "contract",
+            "ledger": 1002,
+            "ledgerClosedAt": "2024-01-01T00:00:10Z",
+            "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            "id": "0000001002-0000000001",
+            "pagingToken": "1002-1",
+            "inSuccessfulContractCall": true,
+            "topic": ["AAAADwAAAAh0cmFuc2Zlcg=="],
+            "value": {
+              "xdr": "AAAAAQAAAAEAAAAD"
+            }
+          }
+        ],
+        "latestLedger": 1010,
+        "cursor": "1002-1"
+      }
+    },
+    {
+      "request": {
+        "method": "getEvents",
+        "params": {
+          "cursor": "1002-1",
+          "filters": [
+            {
+              "type": "contract",
+              "contractIds": ["CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"]
+            }
+          ],
+          "pagination": {
+            "limit": 2
+          }
+        }
+      },
+      "response": {
+        "events": [],
+        "latestLedger": 1010,
+        "cursor": "1002-1"
+      }
+    }
+  ]
+}
