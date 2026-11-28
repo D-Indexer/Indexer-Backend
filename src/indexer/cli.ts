@@ -7,41 +7,20 @@ const USAGE = `Usage:
   npm run indexer -- status                 Print indexer state as JSON
   npm run indexer -- reset-cursor <ledger>  Re-index from <ledger> (already-stored events are skipped)
   npm run indexer -- healthcheck            Exit 1 if the indexer has not succeeded recently
-  npm run indexer -- retry-rejected [--topic <t>] [--since-ledger <n>] [--dry-run]
-                                            Re-decode stored rejected events and apply the ones that now decode
-  npm run indexer -- gaps [--open]          List recorded index gaps as JSON (--open: unfilled only)
-  npm run indexer -- fill-gap <id>          Mark a recorded gap as filled (backfilled)`;
-
-type RetryArgs = { topic?: string; sinceLedger?: number; dryRun: boolean };
-
-function parseRetryArgs(args: string[]): RetryArgs | null {
-  const parsed: RetryArgs = { dryRun: false };
-  for (let i = 0; i < args.length; i++) {
-    const flag = args[i];
-    if (flag === '--dry-run') {
-      parsed.dryRun = true;
-    } else if (flag === '--topic' || flag === '--since-ledger') {
-      const value = args[++i];
-      if (value === undefined) return null;
-      if (flag === '--topic') {
-        parsed.topic = value;
-      } else {
-        const ledger = Number(value);
-        if (!Number.isInteger(ledger) || ledger <= 0) return null;
-        parsed.sinceLedger = ledger;
-      }
-    } else {
-      return null;
-    }
-  }
-  return parsed;
-}
+                                            (manual use only; containers probe the embedded
+                                            /healthz and /readyz HTTP endpoints instead)`;
 
 export async function run(args: string[]): Promise<number> {
   const [command, arg] = args;
   switch (command) {
     case 'status': {
-      console.log(JSON.stringify(await readState(pool), null, 2));
+      const state = await readState(pool);
+      const ipfs = await pool.query(
+        `SELECT status, COUNT(*)::int AS count FROM ipfs_cid_status GROUP BY status`
+      );
+      const counts: Record<string, number> = {};
+      for (const row of ipfs.rows as Array<{ status: string; count: number }>) counts[row.status] = row.count;
+      console.log(JSON.stringify({ ...state, ipfs }, null, 2));
       return 0;
     }
     case 'reset-cursor': {
@@ -102,6 +81,14 @@ export async function run(args: string[]): Promise<number> {
       const fresh = Number.isFinite(last) && Date.now() - last < getEnv().INDEXER_STALE_AFTER_MS;
       if (!fresh) console.error(`indexer unhealthy: ${JSON.stringify(state)}`);
       return fresh ? 0 : 1;
+    }
+    case 'orphans': {
+      const { rows } = await pool.query(
+        `SELECT id, ledger, ledger_closed_at, tx_hash, topic, data, indexed_at
+           FROM contract_events WHERE status = 'orphaned' ORDER BY ledger, id`
+      );
+      console.log(JSON.stringify(rows, null, 2));
+      return 0;
     }
     default:
       console.error(USAGE);
