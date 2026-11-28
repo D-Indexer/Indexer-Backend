@@ -13,6 +13,23 @@ export const getByAddress = async (req: Request, res: Response): Promise<void> =
     throw badRequest(firstError ? firstError.message : 'Invalid address');
   }
 
+  const ledgerParsed = atLedgerSchema.safeParse(req.query.atLedger);
+  if (!ledgerParsed.success) throw badRequest(ledgerParsed.error.errors[0].message);
+
+  const atLedger = ledgerParsed.data;
+
+  if (atLedger !== undefined) {
+    const result = await portfolioService.getPortfolioAtLedger(parsed.data, atLedger);
+    if (result === null) throw notFound('Portfolio not found');
+    if (result === 'out_of_range') {
+      throw badRequest(
+        `atLedger ${atLedger} is outside the indexed ledger range`,
+      );
+    }
+    res.json(result);
+    return;
+  }
+
   const portfolio = await portfolioService.getPortfolio(parsed.data);
   if (!portfolio) throw notFound('Portfolio not found');
   res.json(portfolio);

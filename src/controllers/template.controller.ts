@@ -18,7 +18,22 @@ export const getOne = async (req: Request, res: Response): Promise<void> => {
     throw badRequest(firstIssue ? firstIssue.message : 'Invalid template id');
   }
 
-  const template = await templateService.getTemplate(parsed.data);
+  const atLedger = parseAtLedger(req.query.atLedger);
+
+  let template;
+  try {
+    template = await templateService.getTemplate(parsed.data, atLedger);
+  } catch (err) {
+    if (isOutOfRangeError(err)) {
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'atLedger is outside the indexed ledger range';
+      throw badRequest(message);
+    }
+    throw err;
+  }
+
   if (!template) throw notFound('Template not found');
   res.json(template);
 };

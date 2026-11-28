@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS contract_events (
 CREATE INDEX IF NOT EXISTS idx_contract_events_ledger ON contract_events (ledger);
 CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
   ON contract_events (indexed_at) WHERE status = 'rejected';
+CREATE INDEX IF NOT EXISTS idx_contract_events_topic_ledger
+  ON contract_events (topic, ledger);
 
 -- folder_cl (owner <-> folder_name); template_id tracks tmpl_set / port_mint.
 -- live_until_ledger is the TTL of the folder's persistent storage entry as
@@ -46,7 +48,9 @@ CREATE TABLE IF NOT EXISTS templates (
   id             BIGINT PRIMARY KEY,
   metadata_uri   TEXT NOT NULL,
   creator        TEXT,
-  registered_at  TIMESTAMPTZ NOT NULL
+  registered_at  TIMESTAMPTZ NOT NULL,
+  from_ledger    INTEGER,
+  to_ledger      INTEGER
 );
 
 ALTER TABLE templates ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;
@@ -57,12 +61,45 @@ CREATE INDEX IF NOT EXISTS idx_templates_live_until
 
 -- port_mint / port_upd / tmpl_set. No foreign key to folders: the indexer can
 -- start partway through history, so a portfolio may arrive before its folder.
+-- cid_normalized holds the CIDv1 base32 form for reverse lookups.
 CREATE TABLE IF NOT EXISTS portfolios (
-  owner        TEXT PRIMARY KEY,
-  template_id  BIGINT NOT NULL,
-  ipfs_cid     TEXT NOT NULL,
-  minted_at    TIMESTAMPTZ NOT NULL,
-  updated_at   TIMESTAMPTZ NOT NULL
+  owner           TEXT PRIMARY KEY,
+  template_id     BIGINT NOT NULL,
+  ipfs_cid        TEXT NOT NULL,
+  cid_normalized  TEXT,
+  minted_at       TIMESTAMPTZ NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL,
+  from_ledger     INTEGER,
+  to_ledger       INTEGER
+);
+
+-- Version history for portfolio content (port_mint / port_upd / tmpl_set).
+-- Version numbers are dense per owner and stable under replay: the handler
+-- derives the next version from the current max inside the page transaction.
+CREATE TABLE IF NOT EXISTS portfolio_versions (
+  owner           TEXT NOT NULL,
+  version         INTEGER NOT NULL,
+  ipfs_cid        TEXT NOT NULL,
+  cid_normalized  TEXT,
+  template_id     BIGINT NOT NULL,
+  event_id        TEXT,
+  at              TIMESTAMPTZ NOT NULL,
+  from_ledger     INTEGER,
+  to_ledger       INTEGER,
+  PRIMARY KEY (owner, version)
+);
+
+-- Version history for template metadata (tmpl_reg re-registration).
+CREATE TABLE IF NOT EXISTS template_versions (
+  id             BIGINT NOT NULL,
+  version        INTEGER NOT NULL,
+  metadata_uri   TEXT NOT NULL,
+  creator        TEXT,
+  event_id       TEXT,
+  at             TIMESTAMPTZ NOT NULL,
+  from_ledger    INTEGER,
+  to_ledger      INTEGER,
+  PRIMARY KEY (id, version)
 );
 
 ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;

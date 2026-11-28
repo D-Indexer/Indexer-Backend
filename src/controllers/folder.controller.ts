@@ -11,7 +11,10 @@ export const getByAddress = async (req: Request, res: Response): Promise<void> =
     throw badRequest(firstError ? firstError.message : 'Invalid address');
   }
 
-  const folder = await folderService.getFolderByAddress(parsed.data);
+  const query = atLedgerQuerySchema.safeParse(req.query);
+  if (!query.success) throw badRequest(query.error.errors[0].message);
+
+  const folder = await folderService.getFolderByAddress(parsed.data, query.data.atLedger);
   if (!folder) throw notFound('Folder not found');
   res.json(folder);
 };
@@ -24,7 +27,10 @@ export const getByName = async (req: Request, res: Response): Promise<void> => {
     throw badRequest(firstError ? firstError.message : 'Invalid folder name');
   }
 
-  const folder = await folderService.getFolderByName(parsed.data);
+  const query = atLedgerQuerySchema.safeParse(req.query);
+  if (!query.success) throw badRequest(query.error.errors[0].message);
+
+  const folder = await folderService.getFolderByName(parsed.data, query.data.atLedger);
   if (!folder) throw notFound('Folder not found');
   res.json(folder);
 };
