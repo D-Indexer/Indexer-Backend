@@ -23,7 +23,12 @@ export interface Portfolio {
   /** Current owner; indexed attribute, may change on transfer. */
   owner: string;
   templateId: number;
-  ipfsCid: string;
+  /** Canonical CIDv1 base32, or null when the on-chain string is not a parseable CID. */
+  ipfsCid: string | null;
+  /** Original on-chain CID string, preserved verbatim. */
+  ipfsCidRaw: string;
+  /** Whether the on-chain CID string parsed successfully. */
+  cidValid: boolean;
   mintedAt: Date;
   updatedAt: Date;
 }

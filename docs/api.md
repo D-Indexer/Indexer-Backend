@@ -232,6 +232,8 @@ curl localhost:3000/portfolios/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX
   "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
   "templateId": 1,
   "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
+  "ipfsCidRaw": "QmYwAPJzv5CZsnAzt8auVZRn6h1b5xVZ8gYb5xVZ8gYb5xVZ8gYb5xVZ8",
+  "cidValid": true,
   "mintedAt": "2026-11-09T22:23:07.000Z",
   "updatedAt": "2026-11-09T22:23:52.000Z",
   "archival": { "liveUntilLedger": 5658123, "archived": false }
@@ -311,6 +313,88 @@ curl "localhost:3000/portfolios/by-cid/bafkreifwfa7v77kn2om36djjtqiwqykldpady3yt
 `includeHistorical=false` to omit it (default `true`).
 
 Errors: `400` `Invalid CID`.
+
+## `POST /portfolios/validate`
+
+Validates a portfolio manifest against the versioned JSON Schema
+[`schemas/portfolio-manifest.v1.json`](../schemas/portfolio-manifest.v1.json) (JSON Schema
+2020-12). The same validation runs in the bundle upload path, so bad manifests are
+rejected at upload time instead of failing at render time.
+
+```bash
+curl -X POST localhost:3000/portfolios/validate \
+  -H 'content-type: application/json' \
+  --data @examples/manifests/valid.json
+```
+
+Request body: the manifest object itself.
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "My portfolio",
+  "items": [{ "type": "image", "cid": "bafkreiacuprjr4kth5rfldcy4tdq5xfltl22kdlc3es72u4qsqqcb6ypxa" }]
+}
+```
+
+`200` when valid:
+
+```json
+{ "valid": true, "schemaVersion": 1 }
+```
+
+`422` when invalid, with one entry per violation (JSON Pointer `path` + human `message`):
+
+```json
+{
+  "error": "Manifest validation failed",
+  "valid": false,
+  "schemaVersion": 1,
+  "errors": [
+    { "path": "/items/0/type", "message": "must be equal to one of the allowed values" },
+    { "path": "/name", "message": "must be a string" }
+  ],
+  "requestId": "…"
+}
+```
+
+Errors: `400` malformed JSON, `422` schema violations.
+
+### Schema versioning
+
+`schemaVersion` is a required integer field. The policy for evolving it:
+
+- **Additive, backward-compatible changes** (new optional fields, relaxed constraints)
+  keep the same `schemaVersion` and are documented in the schema's `$comment`.
+- **Breaking changes** (new required fields, removed fields, changed types) bump
+  `schemaVersion` and ship a new file `schemas/portfolio-manifest.v<N>.json`. Older
+  versions stay published and validated so existing on-chain manifests keep rendering.
+- The API validates against the version declared in the manifest; an unknown
+  `schemaVersion` is a `422` with `path: "/schemaVersion"`.
+
+## `GET /ipfs/:cid/*`
+
+Content-addressed gateway proxy. Serves content from the local Kubo node **only** for CIDs
+referenced by indexed portfolios or templates (or tracked uploads). Any other CID returns
+`404` without contacting Kubo, so the service never acts as an open gateway.
+
+```bash
+curl -i localhost:3000/ipfs/bafkreiacuprjr4kth5rfldcy4tdq5xfltl22kdlc3es72u4qsqqcb6ypxa
+```
+
+Behaviour:
+
+- `:cid` is normalised to CIDv1 base32 before the allow-list check; `Qm…` and `bafy…`
+  forms of the same content are equivalent.
+- `ETag` is the normalised CID; `Cache-Control: public, max-age=31536000, immutable`.
+- `Range` requests are supported and answered with `206` and `Content-Range`.
+- `Content-Type` is sniffed from the content; `X-Content-Type-Options: nosniff` is always set.
+- Responses carry a restrictive CSP
+  (`default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox`) so HTML/SVG
+  content cannot execute scripts.
+- Content is streamed from Kubo without buffering, so memory use is constant in file size.
+
+Errors: `400` invalid CID, `404` `CID not referenced`, `502` / `504` (IPFS).
 
 ## `GET /templates`
 

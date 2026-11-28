@@ -1,8 +1,33 @@
 import type { PoolClient } from 'pg';
+import { CID } from 'multiformats/cid';
+import { base32 } from 'multiformats/bases/base32';
 import type { DecodedEvent } from './decode';
 import { normaliseCid } from '../services/cid';
 
 export type Queryable = Pick<PoolClient, 'query'>;
+
+export interface NormalisedCid {
+  /** Canonical CIDv1 base32 form, or null when the input isn't a parseable CID. */
+  cid: string | null;
+  /** The original string exactly as stored on-chain. */
+  raw: string;
+  valid: boolean;
+}
+
+/**
+ * Normalise an arbitrary CID string to canonical CIDv1 base32. CIDv0 (`Qm...`)
+ * and other multibase encodings of the same content collapse to one form so
+ * equality checks across the read model are encoding-independent. Unparseable
+ * strings are flagged rather than rejected.
+ */
+export function normaliseCid(raw: string): NormalisedCid {
+  try {
+    const cid = CID.parse(raw);
+    return { cid: cid.toV1().toString(base32), raw, valid: true };
+  } catch {
+    return { cid: null, raw, valid: false };
+  }
+}
 
 /**
  * Ledger of the event currently being applied. Set by applyEvent so the
@@ -143,10 +168,12 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
       // mint_portfolio also sets the owner's selected template.
       const cid = normaliseCid(event.ipfsCid);
       await db.query(
-        `INSERT INTO portfolios (owner, template_id, ipfs_cid, minted_at, updated_at)
-         VALUES ($1, $2, $3, $4, $4)
+        `INSERT INTO portfolios
+           (owner, template_id, ipfs_cid, ipfs_cid_raw, cid_valid, minted_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $6)
          ON CONFLICT (owner) DO UPDATE
            SET template_id = EXCLUDED.template_id, ipfs_cid = EXCLUDED.ipfs_cid,
+               ipfs_cid_raw = EXCLUDED.ipfs_cid_raw, cid_valid = EXCLUDED.cid_valid,
                updated_at = EXCLUDED.updated_at`,
         [event.owner, event.templateId, cid, at]
       );

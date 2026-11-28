@@ -5,7 +5,9 @@ type PortfolioRow = {
   token_id: string | number;
   owner: string;
   template_id: string;
-  ipfs_cid: string;
+  ipfs_cid: string | null;
+  ipfs_cid_raw: string | null;
+  cid_valid: boolean;
   minted_at: Date;
   updated_at: Date;
 };
@@ -19,6 +21,8 @@ function mapPortfolio(row: PortfolioRow): Portfolio {
     owner: row.owner,
     templateId: Number(row.template_id),
     ipfsCid: row.ipfs_cid,
+    ipfsCidRaw: row.ipfs_cid_raw,
+    cidValid: row.cid_valid,
     mintedAt: row.minted_at,
     updatedAt: row.updated_at,
   };

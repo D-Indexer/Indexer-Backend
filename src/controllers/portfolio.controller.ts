@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import * as portfolioService from '../services/portfolio';
 import { stellarAddressSchema } from '../validation/schemas';
 import { badRequest, notFound } from '../http/errors';
+import { validateManifest } from '../validation/manifest';
 
 export const getByAddress = async (req: Request, res: Response): Promise<void> => {
   const address = req.params.address;
