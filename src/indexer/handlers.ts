@@ -85,5 +85,12 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
         at,
       ]);
       return;
+
+    default: {
+      // Exhaustiveness check: if a new topic is added to DecodedEvent without a
+      // handler above, `event` is no longer `never` here and this fails to compile.
+      const unhandled: never = event;
+      throw new Error(`unhandled event topic: ${JSON.stringify(unhandled)}`);
+    }
   }
 }

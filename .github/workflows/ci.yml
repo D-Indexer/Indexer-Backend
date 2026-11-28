@@ -44,7 +44,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install
@@ -68,7 +68,7 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Verify compiled entrypoints import
+      - name: Verify bundled CLI entrypoint
         env:
           NODE_ENV: test
           DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
@@ -76,7 +76,33 @@ jobs:
           FOLDER_CONTRACT_ID: CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV
           IPFS_API_URL: http://localhost:5001
           IPFS_GATEWAY: https://ipfs.io/ipfs
-        run: node -e "require('./dist/app'); require('./dist/indexer/stellar'); require('./dist/db/migrate')"
+        run: |
+          node dist/indexer/cli.js --help
+          node dist/indexer/cli.js status
+
+      - name: Verify bundled API entrypoint
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+          FOLDER_CONTRACT_ID: CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV
+          IPFS_API_URL: http://localhost:5001
+          IPFS_GATEWAY: https://ipfs.io/ipfs
+          PORT: "3000"
+        run: |
+          node dist/server.js &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/health > /dev/null; then
+              echo "Healthcheck passed"
+              kill "$SERVER_PID"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Healthcheck failed" >&2
+          kill "$SERVER_PID" || true
+          exit 1
 
   docker:
     runs-on: ubuntu-latest

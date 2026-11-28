@@ -23,6 +23,10 @@ function mapPortfolio(row: PortfolioRow): Portfolio {
 }
 
 export async function getPortfolio(owner: string): Promise<Portfolio | null> {
-  const { rows } = await pool.query<PortfolioRow>(GET_PORTFOLIO_SQL, [owner]);
-  return rows[0] ? mapPortfolio(rows[0]) : null;
+  const { rows } = await pool.query<PortfolioRow>(
+    'SELECT owner, template_id, ipfs_cid, minted_at, updated_at FROM portfolios WHERE owner = $1',
+    [owner]
+  );
+  const row = rows[0];
+  return row ? mapPortfolio(row) : null;
 }
