@@ -1,5 +1,6 @@
-import { getReadPool } from '../db/client';
+import type { Pool } from 'pg';
 import { Template } from '../types';
+import { cache } from '../cache';
 
 type TemplateRow = {
   id: string; // BIGINT comes back as a string
@@ -19,14 +20,19 @@ function mapTemplate(row: TemplateRow): Template {
 
 const COLUMNS = 'id, metadata_uri, creator, registered_at';
 
-export async function listTemplates(minLedger?: number): Promise<Template[]> {
-  const pool = await getReadPool(minLedger);
-  const { rows } = await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates ORDER BY id`);
+// Hot SQL paths, exported as named constants so query-plan regression tests
+// can run EXPLAIN against the exact statements used in production.
+export const LIST_TEMPLATES_SQL = `SELECT ${COLUMNS} FROM templates ORDER BY id`;
+export const GET_TEMPLATE_SQL = `SELECT ${COLUMNS} FROM templates WHERE id = $1`;
+
+export async function listTemplates(): Promise<Template[]> {
+  const { rows } = await pool.query<TemplateRow>(LIST_TEMPLATES_SQL);
   return rows.map(mapTemplate);
 }
 
 export async function getTemplate(id: number, minLedger?: number): Promise<Template | null> {
   const pool = await getReadPool(minLedger);
   const { rows } = await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates WHERE id = $1`, [id]);
-  return rows[0] ? mapTemplate(rows[0]) : null;
+  const row = rows[0];
+  return row ? mapTemplate(row) : null;
 }

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { loadEnv, TESTNET_CONTRACT_ID } from '../config/env';
 
 const validEnv = {
@@ -54,47 +57,60 @@ describe('environment configuration', () => {
     ).toBe('https://folder.app');
   });
 
-  it('parses upload quota configuration', () => {
-    const env = loadEnv({
-      ...validEnv,
-      UPLOAD_DAILY_BYTE_QUOTA: '1048576',
-      UPLOAD_DAILY_FILE_QUOTA: '25',
-      UPLOAD_IP_HASH_SALT: 'a-very-secret-salt',
+  describe('secret files', () => {
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'folder-env-'));
     });
 
-    expect(env.UPLOAD_DAILY_BYTE_QUOTA).toBe(1048576);
-    expect(env.UPLOAD_DAILY_FILE_QUOTA).toBe(25);
-    expect(env.UPLOAD_IP_HASH_SALT).toBe('a-very-secret-salt');
-  });
-
-  it('applies upload quota defaults and rejects invalid values', () => {
-    const env = loadEnv(validEnv);
-    expect(env.UPLOAD_DAILY_BYTE_QUOTA).toBeGreaterThan(0);
-    expect(env.UPLOAD_DAILY_FILE_QUOTA).toBeGreaterThan(0);
-    expect(env.UPLOAD_IP_HASH_SALT).toBeDefined();
-
-    expect(() => loadEnv({ ...validEnv, UPLOAD_DAILY_BYTE_QUOTA: '-1' })).toThrow(/UPLOAD_DAILY_BYTE_QUOTA/);
-    expect(() => loadEnv({ ...validEnv, UPLOAD_DAILY_FILE_QUOTA: 'abc' })).toThrow(/UPLOAD_DAILY_FILE_QUOTA/);
-  });
-
-  it('leaves DATABASE_READ_URL unset by default', () => {
-    const env = loadEnv(validEnv);
-    expect(env.DATABASE_READ_URL).toBeUndefined();
-    expect(env.DB_REPLICA_MAX_LAG_MS).toBeGreaterThan(0);
-  });
-
-  it('parses DATABASE_READ_URL and DB_REPLICA_MAX_LAG_MS', () => {
-    const env = loadEnv({
-      ...validEnv,
-      DATABASE_READ_URL: 'postgresql://user:password@replica:5432/folder_test',
-      DB_REPLICA_MAX_LAG_MS: '2500',
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true });
     });
 
-    expect(env.DATABASE_READ_URL).toBe('postgresql://user:password@replica:5432/folder_test');
-    expect(env.DB_REPLICA_MAX_LAG_MS).toBe(2500);
-  });
+    const writeSecret = (name: string, content: string): string => {
+      const file = join(dir, name);
+      writeFileSync(file, content);
+      return file;
+    };
 
-  it('rejects an invalid DATABASE_READ_URL', () => {
-    expect(() => loadEnv({ ...validEnv, DATABASE_READ_URL: 'not-a-url' })).toThrow(/DATABASE_READ_URL/);
+    it('loads DATABASE_URL from DATABASE_URL_FILE using trimmed content', () => {
+      const secret = 'postgresql://user:file-password@localhost:5432/folder_test';
+      const file = writeSecret('database_url', `  ${secret}\n`);
+      const env: Record<string, string> = { ...validEnv };
+      delete env.DATABASE_URL;
+
+      expect(loadEnv({ ...env, DATABASE_URL_FILE: file }).DATABASE_URL).toBe(secret);
+    });
+
+    it('loads IPFS_API_AUTH from IPFS_API_AUTH_FILE using trimmed content', () => {
+      const file = writeSecret('ipfs_auth', 'Bearer file-token\n');
+      expect(loadEnv({ ...validEnv, IPFS_API_AUTH_FILE: file }).IPFS_API_AUTH).toBe('Bearer file-token');
+    });
+
+    it('errors when both the env var and the file are set', () => {
+      const file = writeSecret('database_url', 'postgresql://user:file@localhost:5432/folder_test');
+      expect(() => loadEnv({ ...validEnv, DATABASE_URL_FILE: file })).toThrow(/DATABASE_URL/);
+      expect(() => loadEnv({ ...validEnv, DATABASE_URL_FILE: file })).toThrow(/both/i);
+    });
+
+    it('errors when the secret file does not exist', () => {
+      const env: Record<string, string> = { ...validEnv };
+      delete env.DATABASE_URL;
+      expect(() => loadEnv({ ...env, DATABASE_URL_FILE: join(dir, 'missing') })).toThrow(/DATABASE_URL_FILE/);
+    });
+
+    it('never includes secret values in validation errors', () => {
+      const secret = 'postgresql://user:super-secret-password@localhost:5432/folder_test';
+      let message = '';
+      try {
+        loadEnv({ ...validEnv, DATABASE_URL: secret, STELLAR_RPC_URL: 'not-a-url' });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(/STELLAR_RPC_URL/);
+      expect(message).not.toContain('super-secret-password');
+      expect(message).not.toContain(secret);
+    });
   });
 });

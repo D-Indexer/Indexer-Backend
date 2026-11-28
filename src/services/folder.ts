@@ -1,4 +1,4 @@
-import { getReadPool } from '../db/client';
+import type { Pool } from 'pg';
 import { Folder } from '../types';
 
 type FolderRow = {
@@ -7,6 +7,19 @@ type FolderRow = {
   template_id: string | null;
   claimed_at: Date;
   updated_at: Date;
+};
+
+type ModerationRow = {
+  state: string;
+};
+
+export type ModerationInfo = {
+  hidden: boolean;
+  state?: string;
+};
+
+export type FolderWithModeration = Folder & {
+  moderation?: ModerationInfo;
 };
 
 function mapFolder(row: FolderRow): Folder {
@@ -21,14 +34,23 @@ function mapFolder(row: FolderRow): Folder {
 
 const COLUMNS = 'owner, name, template_id, claimed_at, updated_at';
 
-export async function getFolderByAddress(owner: string, minLedger?: number): Promise<Folder | null> {
-  const pool = await getReadPool({ minLedger });
+/**
+ * Hot SQL queries exported as named constants so query-plan regression tests
+ * can run EXPLAIN against exactly the production SQL.
+ */
+export const FOLDER_BY_OWNER_QUERY = `SELECT ${COLUMNS} FROM folders WHERE owner = $1`;
+export const FOLDER_BY_NAME_QUERY = `SELECT ${COLUMNS} FROM folders WHERE name = $1`;
+export const FOLDER_BY_TEMPLATE_ID_QUERY = `SELECT ${COLUMNS} FROM folders WHERE template_id = $1`;
+export const FOLDER_BY_LEDGER_QUERY = `SELECT ${COLUMNS} FROM folders WHERE ledger = $1`;
+
+export async function getFolderByAddress(owner: string): Promise<Folder | null> {
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE owner = $1`, [owner]);
-  return rows[0] ? mapFolder(rows[0]) : null;
+  const row = rows[0];
+  return row ? mapFolder(row) : null;
 }
 
-export async function getFolderByName(name: string, minLedger?: number): Promise<Folder | null> {
-  const pool = await getReadPool({ minLedger });
+export async function getFolderByName(name: string): Promise<FolderWithModeration | null> {
   const { rows } = await pool.query<FolderRow>(`SELECT ${COLUMNS} FROM folders WHERE name = $1`, [name]);
-  return rows[0] ? mapFolder(rows[0]) : null;
+  const row = rows[0];
+  return row ? mapFolder(row) : null;
 }
