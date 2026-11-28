@@ -210,11 +210,77 @@ checking with backoff but doesn't move. Choose one:
    still has the missing ledgers (self-hosted with a larger retention window, or a provider
    with history), run `reset-cursor` to the first missing ledger, and let it catch up. Then
    switch back if you like.
-3. **Backfill from archives.** Not implemented yet (tracked as a GitHub issue). It would
+3. **Import a snapshot** taken by another environment that still has the events (see
+   [Bootstrapping from a snapshot](#bootstrapping-from-a-snapshot)). Import never rewinds a
+   cursor that is ahead of the snapshot, so it fills the gap and the indexer carries on.
+4. **Backfill from archives.** Not implemented yet (tracked as a GitHub issue). It would
    read the missing ledgers from history archives or Galexie data.
 
 On an empty database the indexer never halts: an `INDEXER_START_LEDGER` older than the window
 is clamped to the oldest retained ledger with a warning.
+
+### Bootstrapping from a snapshot
+
+A fresh indexer only sees what the RPC retains (~7 days). Without help, every new environment
+(staging, a community mirror, disaster recovery) starts with an incomplete read model.
+Snapshots carry the full `contract_events` history, raw XDR plus metadata, and the cursor from
+one environment to another.
+
+```bash
+# On an environment with full history (safe while its indexer runs: the export reads one
+# consistent REPEATABLE READ snapshot of events + cursor):
+npm run indexer -- export-snapshot ./folder-testnet.snapshot
+# in the container image:
+docker compose exec indexer node dist/indexer/cli.js export-snapshot /tmp/folder-testnet.snapshot
+
+# On the new environment, with its indexer STOPPED (import moves the cursor as it goes):
+npm run indexer -- import-snapshot ./folder-testnet.snapshot
+npm run indexer -- import-snapshot https://snapshots.example.org/folder-testnet-latest.snapshot
+```
+
+**Format.** A plain ustar archive (`tar -tf` lists it) holding:
+
+- `manifest.json`: `format`, `formatVersion`, `schemaVersion` (event record layout),
+  `networkPassphrase`, `contractId`, `ledgerRange`, `eventCount`, `cursor`, `lastLedger`,
+  `createdAt`, and the `sha256` and size of `events.ndjson.gz`.
+- `events.ndjson.gz`: one event per line in `(ledger, id)` order, exactly as the RPC returned
+  it (`id`, `ledger`, `ledgerClosedAt`, `txHash`, `contractId`, base64 `topic` / `value`).
+  Derived data (`data`, `status`, the read-model tables) is **not** in the snapshot. Import
+  re-derives it with the running code.
+
+**Import** (`src/indexer/snapshot.ts`) runs migrations first, then:
+
+1. Verifies the archive, the format/schema versions, and the sha256 and size of the events
+   before writing anything. A corrupted or tampered file is refused
+   (`snapshot checksum mismatch ...`).
+2. Refuses a snapshot whose network passphrase or contract id differs from this indexer's
+   `STELLAR_NETWORK_PASSPHRASE` / `FOLDER_CONTRACT_ID`. It also refuses a database that already
+   holds events for another contract, or that earlier imported another network's snapshot
+   (`indexer_state.network_passphrase` / `contract_id`).
+3. Re-applies the events in order through the indexer's normal page path (`processPage`).
+   Inserts are idempotent (already-stored events are skipped, not re-applied) and the read
+   model is rebuilt. Partitions are created for every ledger in the snapshot.
+4. Checkpoints progress in `indexer_state.snapshot_import` after every 500 events. Re-running
+   the same command after a crash resumes after the last checkpoint; re-running a finished
+   import changes nothing.
+5. Sets the cursor and `last_ledger` to the snapshot's, unless the database was already
+   further along. It records the import in `indexer_state.snapshot_imported`.
+
+Then start the indexer. It resumes from the snapshot's cursor, so the snapshot must be newer
+than the RPC's retention window allows you to miss (in practice: less than ~7 days old).
+
+**Publishing nightly snapshots (optional).** Any scheduler that can reach the database
+works, e.g. a cron job or CI schedule:
+
+```bash
+npm run indexer -- export-snapshot /tmp/folder-testnet.snapshot
+aws s3 cp /tmp/folder-testnet.snapshot s3://<bucket>/folder-testnet-$(date -u +%F).snapshot
+aws s3 cp /tmp/folder-testnet.snapshot s3://<bucket>/folder-testnet-latest.snapshot
+# or: ipfs add --cid-version=1 /tmp/folder-testnet.snapshot
+```
+
+The manifest's checksum guards against corruption in transit. It is not a signature, so
+import only snapshots from a source you trust (or verify the published sha256 out of band).
 
 ### Re-index from a ledger
 

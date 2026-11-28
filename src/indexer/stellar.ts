@@ -5,6 +5,16 @@ import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEve
 import { logger } from '../utils/logger';
 import { runWithContext } from '../utils/context';
 import { insertContractEvent, toStoredXdr } from './xdrStorage';
+import { ledgerFromCursor, readState, STATE, writeState } from './state';
+import { ensurePartitions } from './partitions';
+
+export { ledgerFromCursor, readState, STATE, writeState } from './state';
+export {
+  ensurePartitions,
+  PARTITION_LEDGER_SPAN,
+  PARTITION_LOOKAHEAD,
+  partitionNameForLedger,
+} from './partitions';
 
 /** Subscriber types that receive an outbox row for every applied event. */
 export const OUTBOX_SUBSCRIBERS = ['webhook', 'changes'] as const;
@@ -14,22 +24,6 @@ export type OutboxSubscriber = (typeof OUTBOX_SUBSCRIBERS)[number];
 export function outboxIdempotencyKey(eventId: string, subscriber: string): string {
   return `${eventId}:${subscriber}`;
 }
-
-/** Ledger span covered by each `contract_events` partition. */
-export const PARTITION_LEDGER_SPAN = 1_000_000;
-/** How many partitions beyond the current one to keep ready. */
-export const PARTITION_LOOKAHEAD = 2;
-
-/** indexer_state keys. */
-export const STATE = {
-  cursor: 'cursor',
-  startLedger: 'start_ledger',
-  lastLedger: 'last_ledger',
-  lastSuccessAt: 'last_success_at',
-  status: 'status',
-  lastError: 'last_error',
-  lastGap: 'last_gap',
-} as const;
 
 export type IndexerStatus = 'ok' | 'error' | 'retention_gap';
 export type RetentionGapPolicy = 'halt' | 'skip';
@@ -104,82 +98,11 @@ export class RetentionGapError extends Error {
   }
 }
 
-/** Ledger encoded in an RPC paging cursor / event id (a TOID: ledger << 32 | tx/op bits). */
-export function ledgerFromCursor(cursor: string): number {
-  const toid = BigInt(cursor.split('-')[0]);
-  return Number(toid >> 32n);
-}
-
 function scannedLedger(page: GetEventsResult): number {
   try {
     return ledgerFromCursor(page.cursor);
   } catch {
     return page.events.length ? page.events[page.events.length - 1].ledger : page.latestLedger;
-  }
-}
-
-export async function readState(db: Pick<Pool, 'query'>): Promise<Partial<Record<string, string>>> {
-  const { rows } = await db.query<{ key: string; value: string }>('SELECT key, value FROM indexer_state');
-  return Object.fromEntries(rows.map((row) => [row.key, row.value]));
-}
-
-/** Name of the partition covering `ledger` (range [start, start + span)). */
-export function partitionNameForLedger(ledger: number, span = PARTITION_LEDGER_SPAN): string {
-  const start = Math.floor(ledger / span) * span;
-  return `contract_events_p${start}`;
-}
-
-/**
- * Create the partition covering `ledger` (and the next `lookahead` ones) if
- * missing, plus the default partition as a safety net. Idempotent and safe to
- * call concurrently: CREATE TABLE IF NOT EXISTS + CREATE ... PARTITION OF are
- * guarded by the catalog, and duplicate-object races are ignored.
- */
-export async function ensurePartitions(
-  db: Pick<Pool, 'query'>,
-  ledger: number,
-  lookahead = PARTITION_LOOKAHEAD,
-  span = PARTITION_LEDGER_SPAN
-): Promise<void> {
-  if (!Number.isFinite(ledger) || ledger < 0) return;
-  const first = Math.floor(ledger / span) * span;
-  for (let i = 0; i <= lookahead; i++) {
-    const start = first + i * span;
-    const end = start + span;
-    const name = `contract_events_p${start}`;
-    try {
-      await db.query(
-        `CREATE TABLE IF NOT EXISTS ${name} PARTITION OF contract_events
-           FOR VALUES FROM (${start}) TO (${end})`
-      );
-    } catch (err) {
-      // 42P07 duplicate_table / 23505 unique_violation: another worker won the race.
-      const code = (err as { code?: unknown })?.code;
-      if (code !== '42P07' && code !== '23505') throw err;
-    }
-  }
-  try {
-    await db.query('CREATE TABLE IF NOT EXISTS contract_events_default PARTITION OF contract_events DEFAULT');
-  } catch (err) {
-    const code = (err as { code?: unknown })?.code;
-    if (code !== '42P07' && code !== '23505') throw err;
-  }
-}
-
-export async function writeState(
-  db: Pick<Pool, 'query'>,
-  entries: Partial<Record<string, string | null>>
-): Promise<void> {
-  for (const [key, value] of Object.entries(entries)) {
-    if (value === null || value === undefined) {
-      await db.query('DELETE FROM indexer_state WHERE key = $1', [key]);
-    } else {
-      await db.query(
-        `INSERT INTO indexer_state (key, value, updated_at) VALUES ($1, $2, NOW())
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-        [key, value]
-      );
-    }
   }
 }
 
