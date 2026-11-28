@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { createApp } from './app';
 import { createContainer } from './container';
+import type { ApiKeyAuth } from './middleware/apiKey';
 import { logger } from './utils/logger';
 import { installProcessHandlers } from './utils/process';
 import { initErrorReporter, getErrorReporter } from './utils/errorReporter';
@@ -50,6 +51,18 @@ async function shutdown(signal: string): Promise<void> {
       logger.error('HTTP server close failed', { error: err.message });
       clearTimeout(timeout);
       process.exit(1);
+    }
+
+    // Write out API key usage still aggregated in memory before the pool closes.
+    const apiKeyAuth = app.locals['apiKeyAuth'] as ApiKeyAuth | null;
+    if (apiKeyAuth) {
+      try {
+        await apiKeyAuth.stop();
+      } catch (flushErr) {
+        logger.warn('Final API key usage flush failed; pending counts are lost', {
+          error: flushErr instanceof Error ? flushErr.message : String(flushErr),
+        });
+      }
     }
 
     try {
