@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import * as folderService from '../services/folder';
 import { folderNameSchema, stellarAddressSchema } from '../validation/schemas';
 import { badRequest, notFound } from '../http/errors';
+import { cacheTags } from '../middleware/cacheTags';
 
 export const getByAddress = async (req: Request, res: Response): Promise<void> => {
   const address = req.params.address;

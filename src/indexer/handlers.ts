@@ -76,6 +76,30 @@ async function openRange(
 export type ApplyOutcome = 'applied' | 'orphaned';
 
 /**
+ * Surrogate keys (CDN cache tags) for the read model rows an event touches.
+ * The indexer purges these after the page commits; the API sends the same
+ * keys in `Surrogate-Key` / `Cache-Tag` headers (see docs/api.md).
+ */
+export function cacheTagsFor(event: DecodedEvent): string[] {
+  switch (event.topic) {
+    case 'init':
+    case 'adm_add':
+    case 'adm_rm':
+      return [];
+    case 'folder_cl':
+      return [`folder:${event.owner}`, `folder-name:${event.folderName}`];
+    case 'tmpl_reg':
+      return [`template:${event.templateId}`, 'templates'];
+    case 'tmpl_set':
+      return [`folder:${event.owner}`, `portfolio:${event.owner}`, `template:${event.templateId}`];
+    case 'port_mint':
+      return [`portfolio:${event.owner}`, `folder:${event.owner}`, `template:${event.templateId}`];
+    case 'port_upd':
+      return [`portfolio:${event.owner}`];
+  }
+}
+
+/**
  * Apply one decoded contract event to the read model. Runs inside the page
  * transaction (see processPage); `at` is the ledger close time of the event.
  * Each event id is applied at most once, so handlers don't need to be

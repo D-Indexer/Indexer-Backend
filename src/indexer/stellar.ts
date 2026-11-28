@@ -678,10 +678,10 @@ async function storeEvent(
     ]
   );
 
-  if (inserted.rowCount === 0) return 'duplicate';
+  if (inserted.rowCount === 0) return { outcome: 'duplicate', tags: [] };
   if (!decoded) {
     if (error) logger.warn('Rejected malformed contract event', { id: event.id, topic, error });
-    return status as 'ignored' | 'rejected';
+    return { outcome: status as 'ignored' | 'rejected', tags: [] };
   }
 
   // A deterministic DB error means the event contradicts the read model. Record
@@ -692,7 +692,7 @@ async function storeEvent(
     await applyEvent(client, decoded, new Date(event.ledgerClosedAt));
     await enqueueOutbox(client, event, decoded);
     await client.query('RELEASE SAVEPOINT apply_event');
-    return 'applied';
+    return { outcome: 'applied', tags: cacheTagsFor(decoded) };
   } catch (err) {
     if (!isDeterministicDbError(err)) throw err;
     await client.query('ROLLBACK TO SAVEPOINT apply_event');
@@ -704,7 +704,7 @@ async function storeEvent(
       network ? [network, event.id, message] : [event.id, message]
     );
     logger.warn('Rejected contract event the database refused', { id: event.id, topic, error: message });
-    return 'rejected';
+    return { outcome: 'rejected', tags: [] };
   }
 }
 
@@ -1045,7 +1045,13 @@ async function pollOnceInContext(
   const result = await processPage(deps.db, deps.config.contractId, page);
   assertRejectionRate(result, deps.config);
   if (page.events.length > 0) {
-    logger.info('Indexed events', { ...result, lastLedger: page.events[page.events.length - 1].ledger });
+    logger.info('Indexed events', {
+      applied: result.applied,
+      ignored: result.ignored,
+      rejected: result.rejected,
+      duplicates: result.duplicates,
+      lastLedger: page.events[page.events.length - 1].ledger,
+    });
   }
   // A page discarded by a concurrent reset must not be followed by another page
   // from the stale cursor; report it as caught up so the next tick re-reads state.
