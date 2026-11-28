@@ -18,6 +18,8 @@ x-app-env: &app-env
   # Testnet deployment ledger; clamped to the oldest retained ledger once it ages out.
   INDEXER_START_LEDGER: ${INDEXER_START_LEDGER:-5647760}
   INDEXER_ON_RETENTION_GAP: ${INDEXER_ON_RETENTION_GAP:-halt}
+  # Embedded health server port inside the indexer container.
+  INDEXER_HTTP_PORT: ${INDEXER_HTTP_PORT:-3001}
   IPFS_API_URL: http://ipfs:5001
   IPFS_GATEWAY: ${IPFS_GATEWAY:-https://ipfs.io/ipfs}
   CORS_ORIGIN: ${CORS_ORIGIN:-}
@@ -83,9 +85,17 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ['CMD', 'node', 'dist/indexer/cli.js', 'healthcheck']
+      # Probe the indexer's own embedded health server (single in-process HTTP
+      # request) instead of spawning a CLI process that opens a DB connection.
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:'+(process.env.INDEXER_HTTP_PORT||3001)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
       interval: 15s
-      timeout: 10s
+      timeout: 5s
       start_period: 60s
       retries: 5
 
@@ -168,3 +178,10 @@ services:
 volumes:
   postgres-data:
   ipfs-data:
+
+# Smoke check that the indexer container reaches the healthy state:
+#   docker compose up -d --build
+#   docker compose ps --format '{{.Service}} {{.Health}}' | grep '^indexer healthy$'
+# or wait for it explicitly:
+#   until [ "$(docker inspect -f '{{.State.Health.Status}}' \
+#     "$(docker compose ps -q indexer)")" = healthy ]; do sleep 2; done

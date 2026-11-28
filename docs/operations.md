@@ -32,9 +32,36 @@ composition root and entrypoints.
 
 - **API**: `GET /health` returns `200` when Postgres answers, `503` otherwise, and includes
   the indexer's status ([api.md](api.md#get-health)). The image's `HEALTHCHECK` uses it.
-- **Indexer**: `npm run indexer -- healthcheck` (or `node dist/indexer/cli.js healthcheck`
-  in the image) exits `1` if the indexer hasn't completed a poll within
-  `INDEXER_STALE_AFTER_MS`. docker-compose uses it as the indexer's healthcheck.
+- **Indexer**: the indexer process runs a small embedded HTTP server on
+  `INDEXER_HTTP_PORT` (default `9464`) with two endpoints. Probes are a single in-process
+  HTTP request: no Node/ts-node startup, no database connection.
+  - `GET /healthz` — `200` while the poll loop is alive and the last tick finished within
+    `INDEXER_HEALTH_TICK_WINDOW × INDEXER_POLL_INTERVAL_MS` (default window `3`). A stuck
+    tick makes it return `503` within that window. It does not depend on the database.
+  - `GET /readyz` — `200` when the last successful page was within
+    `INDEXER_STALE_AFTER_MS` and the indexer is not halted (retention gap); `503`
+    otherwise.
+  - Both return JSON in-memory state:
+
+```json
+{
+  "status": "ok",
+  "halted": false,
+  "lastTickAt": "2026-11-10T07:37:30.225Z",
+  "lastSuccessAt": "2026-11-10T07:37:30.225Z",
+  "currentPage": { "from": "5654242", "to": "5654299" },
+  "failures": 0,
+  "backoffMs": 0
+}
+```
+
+  docker-compose and the Dockerfile `HEALTHCHECK` for the indexer service probe `/healthz`
+  on this port. Set `INDEXER_HTTP_PORT=0` to disable the server (e.g. when running the
+  indexer as a library).
+- **CLI**: `npm run indexer -- healthcheck` (or `node dist/indexer/cli.js healthcheck` in
+  the image) is kept for manual use. It exits `1` if the indexer hasn't completed a poll
+  within `INDEXER_STALE_AFTER_MS`. It is expensive (starts a process and opens a DB
+  connection), so don't use it as a container healthcheck.
 - **State**: `npm run indexer -- status` prints `indexer_state`:
 
 ```json
@@ -86,6 +113,59 @@ What to alert on:
 - `/health` `indexer.stale` is `true`, or `indexer.status` is `retention_gap`
 - `Indexer poll failed` logged repeatedly (the `failures` count grows)
 - rows in `contract_events` with `status = 'rejected'`
+
+## Doctor
+
+`npm run doctor` diagnoses configuration and dependencies end to end. It runs each check
+with a timing and prints a table:
+
+```text
+CHECK              STATUS  TIME    DETAIL
+env                ok      3ms     12 variables, network testnet
+database           ok      18ms   connected, schema v3, role folder
+rpc                ok      142ms  version 21.0.0, passphrase matches
+contract           ok      96ms   found, retention window 120960 ledgers
+kubo               ok      11ms   version 0.29.0, auth ok
+indexer            warn    4ms    lag 42 ledgers, status ok, 0 open gaps, 2 rejected events
+```
+
+- `--json` prints a stable machine-readable document (one object per check with `name`,
+  `status` (`ok`/`warn`/`fail`), `durationMs`, `detail` and optional `hint`), suitable for
+  bug reports and scripts.
+- Exit codes: `0` when every check is `ok` or `warn`, `1` when any check is `fail`.
+- A failing check prints a `hint` naming the likely cause (wrong `STELLAR_NETWORK_PASSPHRASE`,
+  missing contract, unreachable Kubo, stale indexer, ...).
+- Secrets are never printed: RPC and IPFS URLs are redacted (credentials and query strings
+  removed) and keys/passwords are omitted.
+
+Run it before filing a bug and paste the `--json` output into the report template.
+
+## Canary
+
+`.github/workflows/canary.yml` runs every 30 minutes (configurable via the workflow's
+`schedule` and `CANARY_INTERVAL_MINUTES`) against testnet. `scripts/canary.ts`:
+
+1. Funds a throwaway account with Friendbot.
+2. Performs a cheap contract action (`set_user_template`), recording the submitted ledger.
+3. Polls `CANARY_API_URL` with `minLedger` until the change is visible.
+
+It reports latency for each stage (submit → ledger close → API visible) in the job summary
+and fails when the total exceeds `CANARY_THRESHOLD_MS` (default `120000`). Optionally set
+`CANARY_METRICS_URL` to push the result to a metrics endpoint. No secrets are required
+beyond the optional API URL.
+
+Cleanup: the throwaway account holds only testnet XLM and the template it sets is
+overwritten on the next run, so no persistent state accumulates. Friendbot rate limits are
+avoided by the 30-minute interval; don't run the canary more often than every 10 minutes.
+Run it locally with `npm run canary -- --dry-run` against the compose stack.
+
+## End-to-end tests
+
+`npm run test:e2e` starts a local `stellar/quickstart` network with RPC, deploys the pinned
+Folder contract wasm (verified by sha256), runs the scripted scenario (init, admins,
+templates, folders, mint, update, set template, including a multi-page scenario) and asserts
+the API read model. The same script runs in CI on every PR. Bump the contract version in one
+place (`scripts/e2e/config.ts`).
 
 ## Indexer recovery
 

@@ -4,6 +4,7 @@ import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
 import { redactUrl } from './rpc';
 import { createIndexer } from './stellar';
+import { createHealthServer } from './httpHealth';
 
 /** Indexer process entrypoint: `npm run start:indexer` (or `dev:indexer`). */
 async function main(): Promise<void> {
@@ -22,10 +23,13 @@ async function main(): Promise<void> {
   // if the LISTEN connection is down, cache staleness is bounded by the TTL.
   await startCacheListener();
 
+  health.start();
+
   const shutdown = async (signal: string) => {
     logger.info('Shutdown requested', { signal });
     const timeout = setTimeout(() => process.exit(1), env.SHUTDOWN_TIMEOUT_MS);
     timeout.unref();
+    await health.stop();
     await indexer.stop();
     await db.end();
     process.exit(0);

@@ -163,6 +163,116 @@ jobs:
       - name: Build dev container image
         run: docker build -f .devcontainer/Dockerfile -t folder-indexer-devcontainer:ci .devcontainer
 
+  e2e:
+    runs-on: ubuntu-latest
+    needs: check
+    # Keep the job under ~10 minutes: quickstart image and contract artifacts are cached.
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: folder
+          POSTGRES_PASSWORD: folder
+          POSTGRES_DB: folder_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U folder"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Contract version is pinned in scripts/e2e/contract-version.env (single source of truth).
+      E2E_CONTRACT_VERSION_FILE: scripts/e2e/contract-version.env
+      E2E_ARTIFACTS_DIR: ${{ github.workspace }}/.e2e-artifacts
+      TEST_DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_e2e
+      DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_e2e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Read pinned contract version
+        id: contract
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "$E2E_CONTRACT_VERSION_FILE"
+          echo "version=${FOLDER_CONTRACT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "wasm_url=${FOLDER_CONTRACT_WASM_URL}" >> "$GITHUB_OUTPUT"
+          echo "wasm_sha256=${FOLDER_CONTRACT_WASM_SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache quickstart image
+        id: quickstart-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.E2E_ARTIFACTS_DIR }}/quickstart-image.tar
+          key: quickstart-image-${{ runner.os }}-${{ hashFiles('scripts/e2e/quickstart-image.env') }}
+
+      - name: Load or pull quickstart image
+        run: |
+          set -euo pipefail
+          mkdir -p "$E2E_ARTIFACTS_DIR"
+          if [ -f "$E2E_ARTIFACTS_DIR/quickstart-image.tar" ]; then
+            docker load -i "$E2E_ARTIFACTS_DIR/quickstart-image.tar"
+          else
+            # shellcheck disable=SC1091
+            source scripts/e2e/quickstart-image.env
+            docker pull "$QUICKSTART_IMAGE"
+            docker save "$QUICKSTART_IMAGE" -o "$E2E_ARTIFACTS_DIR/quickstart-image.tar"
+          fi
+
+      - name: Cache contract wasm
+        id: wasm-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.E2E_ARTIFACTS_DIR }}/folder-contract.wasm
+          key: folder-contract-${{ steps.contract.outputs.version }}-${{ steps.contract.outputs.wasm_sha256 }}
+
+      - name: Download and verify contract wasm
+        run: |
+          set -euo pipefail
+          mkdir -p "$E2E_ARTIFACTS_DIR"
+          WASM="$E2E_ARTIFACTS_DIR/folder-contract.wasm"
+          if [ ! -f "$WASM" ]; then
+            curl -fsSL "${{ steps.contract.outputs.wasm_url }}" -o "$WASM"
+          fi
+          echo "${{ steps.contract.outputs.wasm_sha256 }}  $WASM" | sha256sum -c -
+
+      - name: Start quickstart network
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source scripts/e2e/quickstart-image.env
+          docker run -d --name stellar-quickstart \
+            -p 8000:8000 \
+            -e NETWORK=local \
+            -e ENABLE_SOROBAN_RPC=true \
+            "$QUICKSTART_IMAGE"
+          scripts/e2e/wait-for-rpc.sh
+
+      - name: Run e2e scenario
+        env:
+          STELLAR_RPC_URL: http://localhost:8000/soroban/rpc
+          STELLAR_NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
+          FOLDER_CONTRACT_WASM: ${{ env.E2E_ARTIFACTS_DIR }}/folder-contract.wasm
+        run: npm run test:e2e
+
+      - name: Dump quickstart logs on failure
+        if: failure()
+        run: docker logs stellar-quickstart || true
+
   docker:
     runs-on: ubuntu-latest
     needs: check
