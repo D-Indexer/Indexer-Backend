@@ -81,6 +81,8 @@ export function createApp(deps: AppDependencies) {
   const { env, featureFlags } = deps;
   const app = express();
 
+  const { middleware: overloadMiddleware } = createOverloadMiddleware(env);
+
   app.disable('x-powered-by');
   app.set('trust proxy', env.TRUST_PROXY);
   warnIfTrustProxyUnset(env);
@@ -104,6 +106,12 @@ export function createApp(deps: AppDependencies) {
   app.use(express.json({ limit: env.REQUEST_BODY_LIMIT }));
   const defaultNetworkPassphrase = env.API_NETWORK_DEFAULT || env.STELLAR_NETWORK_PASSPHRASE;
   app.use(networkMiddleware(defaultNetworkPassphrase));
+
+  // #188 – Shed load when event-loop lag is high (health probes are exempt).
+  app.use(overloadMiddleware);
+
+  // #187 – Shed load when the DB pool is saturated.
+  app.use(dbLoadShedding(pool, env));
 
   app.get('/', (_req, res) => {
     res.json({
