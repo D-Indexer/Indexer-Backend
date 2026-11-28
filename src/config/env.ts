@@ -241,6 +241,15 @@ export const envSchema = z
     DB_MAX_CONNECTIONS: z.coerce.number().int().positive().default(10),
     DB_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+    DATABASE_READ_URL: z
+      .union([z.literal('').transform(() => undefined), z.string().url('DATABASE_READ_URL must be a valid URL')])
+      .optional(),
+    DB_REPLICA_MAX_LAG_MS: z.coerce.number().int().positive().default(5000),
+    UPLOAD_DAILY_BYTES_QUOTA: optionalPositiveInt,
+    UPLOAD_DAILY_FILE_QUOTA: optionalPositiveInt,
+    UPLOAD_IP_HASH_SALT: z
+      .union([z.literal('').transform(() => undefined), z.string().min(1)])
+      .optional(),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
     PORTFOLIO_TRANSFERS_ENABLED: z
@@ -316,6 +325,21 @@ export type AppEnv = z.infer<typeof envSchema> & {
   /** Resolved Folder contract id (override or profile default). */
   FOLDER_CONTRACT_ID: string;
 };
+
+/** Upload abuse-control settings; `null` when quotas are disabled. */
+export interface UploadQuotaConfig {
+  dailyBytesQuota: number | null;
+  dailyFileQuota: number | null;
+  ipHashSalt: string | null;
+}
+
+export function getUploadQuotaConfig(env: AppEnv = getEnv()): UploadQuotaConfig {
+  return {
+    dailyBytesQuota: env.UPLOAD_DAILY_BYTES_QUOTA ?? null,
+    dailyFileQuota: env.UPLOAD_DAILY_FILE_QUOTA ?? null,
+    ipHashSalt: env.UPLOAD_IP_HASH_SALT ?? null,
+  };
+}
 
 let cachedEnv: AppEnv | null = null;
 

@@ -499,6 +499,7 @@ forwarding traffic, and `reset_peer` to drop connections. Run `scripts/chaos/smo
 starting the profile to confirm the proxies route traffic.
 
 ## Shutdown
+=======
 
 Both processes handle SIGTERM/SIGINT. The API stops accepting connections and closes the
 pool. The indexer finishes the in-flight page (one transaction) and stops. Either exits

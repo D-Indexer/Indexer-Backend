@@ -30,7 +30,8 @@ export async function listTemplates(): Promise<Template[]> {
   return rows.map(mapTemplate);
 }
 
-export async function getTemplate(id: number): Promise<Template | null> {
+export async function getTemplate(id: number, minLedger?: number): Promise<Template | null> {
+  const pool = await getReadPool(minLedger);
   const { rows } = await pool.query<TemplateRow>(`SELECT ${COLUMNS} FROM templates WHERE id = $1`, [id]);
   const row = rows[0];
   return row ? mapTemplate(row) : null;
