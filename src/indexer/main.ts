@@ -34,11 +34,18 @@ async function main(): Promise<void> {
     await db.end();
     process.exit(0);
   };
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
-  process.on('SIGINT', () => void shutdown('SIGINT'));
+
+  installProcessHandlers({
+    logger,
+    shutdown,
+    isProduction: env.NODE_ENV === 'production',
+  });
 }
 
 main().catch((err) => {
-  logger.error('Indexer failed to start', { error: err instanceof Error ? err.message : err });
+  logger.error('Indexer failed to start', {
+    error: err instanceof Error ? err.message : err,
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   process.exit(1);
 });

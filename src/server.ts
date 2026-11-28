@@ -2,6 +2,8 @@ import 'dotenv/config';
 import { createApp } from './app';
 import { createContainer } from './container';
 import { logger } from './utils/logger';
+import { installProcessHandlers } from './utils/process';
+import { initErrorReporter, getErrorReporter } from './utils/errorReporter';
 
 /**
  * API process entrypoint.
@@ -14,6 +16,13 @@ import { logger } from './utils/logger';
 const container = createContainer();
 const { env, pool } = container;
 const app = createApp(container.deps);
+
+const errorReporter = initErrorReporter({
+  dsn: env.ERROR_TRACKING_DSN,
+  environment: env.NODE_ENV,
+  release: env.RELEASE_VERSION,
+  logger,
+});
 
 const server = app.listen(env.PORT, () => {
   logger.info('Server started', { port: env.PORT, nodeEnv: env.NODE_ENV });
@@ -67,13 +76,11 @@ process.on('SIGINT', () => {
   void shutdown('SIGINT');
 });
 
-process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled promise rejection', { reason });
-});
-
-process.on('uncaughtException', (err) => {
-  logger.error('Uncaught exception', { error: err.message });
-  void shutdown('uncaughtException');
+installProcessHandlers({
+  logger,
+  shutdown,
+  errorReporter: getErrorReporter(),
+  isProduction: env.NODE_ENV === 'production',
 });
 
 export default app;

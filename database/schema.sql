@@ -4,9 +4,15 @@
 
 -- Every contract event the indexer has seen, keyed by the RPC event id
 -- (a TOID encoding ledger, transaction, operation and event index).
--- The primary key makes reprocessing a page a no-op.
+--
+-- Declaratively range-partitioned on `ledger` (one partition per
+-- CONTRACT_EVENTS_PARTITION_SIZE ledgers, see src/indexer/stellar.ts). The
+-- primary key must include the partition key, so it is (ledger, id); a
+-- separate unique index on `id` keeps idempotent inserts working via
+-- ON CONFLICT (id) DO NOTHING. A DEFAULT partition is the safety net for any
+-- ledger range that has not had a partition created ahead of time.
 CREATE TABLE IF NOT EXISTS contract_events (
-  id                TEXT PRIMARY KEY,
+  id                TEXT NOT NULL,
   ledger            INTEGER NOT NULL,
   ledger_closed_at  TIMESTAMPTZ NOT NULL,
   tx_hash           TEXT NOT NULL,
@@ -17,9 +23,16 @@ CREATE TABLE IF NOT EXISTS contract_events (
   data              JSONB,
   status            TEXT NOT NULL CHECK (status IN ('applied', 'ignored', 'rejected')),
   error             TEXT,
-  indexed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+  indexed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (ledger, id)
+) PARTITION BY RANGE (ledger);
 
+-- Safety net: rows whose ledger has no dedicated partition land here.
+CREATE TABLE IF NOT EXISTS contract_events_default
+  PARTITION OF contract_events DEFAULT;
+
+-- Unique lookup on id (the RPC event id) so duplicate events remain no-ops.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_events_id ON contract_events (id);
 CREATE INDEX IF NOT EXISTS idx_contract_events_ledger ON contract_events (ledger);
 CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
   ON contract_events (indexed_at) WHERE status = 'rejected';
