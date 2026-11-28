@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { Contract, xdr } from '@stellar/stellar-sdk';
 import { decodeEvent, decodeTopic, DecodedEvent, EventDecodeError } from './decode';
 import { applyEvent, reapplyOrphans } from './handlers';
 import { EventSource, GetEventsParams, GetEventsResult, LedgerRangeError, RawEvent } from './rpc';
@@ -108,6 +109,29 @@ export function buildIndexedNotification(lastLedger: number, keys: Iterable<stri
     if (Buffer.byteLength(candidate, 'utf8') <= MAX_NOTIFY_PAYLOAD_BYTES) return candidate;
   }
   return encode([], true);
+}
+
+/** Stellar closes a ledger roughly every 5 s; used when the RPC omits `ledgerClosedAt`. */
+export const DEFAULT_LEDGER_CLOSE_TIME_MS = 5000;
+
+/** How far behind the chain tip the indexer is, in ledgers. */
+export type ChainLag = { lagLedgers: number; latestLedger: number; scannedLedger: number };
+
+/**
+ * Delay before the next tick, adapted to how far the indexer is behind the
+ * chain tip. Caught up (or ahead) keeps the configured interval; behind, the
+ * delay shrinks in proportion to the lag so events become queryable sooner,
+ * but never below `minIntervalMs` and never above `pollIntervalMs`.
+ */
+export function adaptiveDelay(
+  config: Pick<IndexerConfig, 'pollIntervalMs' | 'catchUpIntervalMs' | 'ledgerCloseTimeMs'>,
+  lag: ChainLag | null
+): number {
+  const max = config.pollIntervalMs;
+  if (!lag || lag.lagLedgers <= 0) return max;
+  const closeTime = config.ledgerCloseTimeMs ?? DEFAULT_LEDGER_CLOSE_TIME_MS;
+  const min = Math.min(config.catchUpIntervalMs ?? max, max);
+  return Math.max(min, Math.min(max, lag.lagLedgers * closeTime));
 }
 
 export class RetentionGapError extends Error {
@@ -365,6 +389,83 @@ export async function markGapFilled(db: Pick<Pool, 'query'>, id: number): Promis
   return (rowCount ?? 0) > 0;
 }
 
+/** Thrown when the indexer refuses to start because of a network/contract mismatch. */
+export class StartupValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StartupValidationError';
+  }
+}
+
+/** Ledger key for a contract instance, as base64 XDR accepted by `getLedgerEntries`. */
+export function contractInstanceKey(contractId: string): string {
+  return xdr.LedgerKey.contractData(
+    new xdr.LedgerKeyContractData({
+      contract: new Contract(contractId).address().toScAddress(),
+      key: xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: xdr.ContractDataDurability.persistent(),
+    })
+  ).toXDR('base64');
+}
+
+/** WASM hash of a contract instance entry, or null when the entry is not a contract instance. */
+export function wasmHashFromEntry(entryXdr: string): string | null {
+  try {
+    const entry = xdr.LedgerEntryData.fromXDR(entryXdr, 'base64');
+    if (entry.switch().name !== 'contractData') return null;
+    const data = entry.contractData();
+    if (data.key().switch().name !== 'scvLedgerKeyContractInstance') return null;
+    const executable = data.val().instance().executable();
+    if (executable.switch().name !== 'contractExecutableWasm') return null;
+    return executable.wasmHash().toString('hex');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Startup checks: the RPC must serve the configured network, the contract must
+ * exist on it, and the database must not have been used with another network.
+ * Logs the network, protocol version and contract WASM hash on success.
+ */
+export async function validateStartup(deps: IndexerDependencies): Promise<void> {
+  const { contractId, networkPassphrase } = deps.config;
+  const network = await deps.rpc.getNetwork(deps.signal);
+
+  if (networkPassphrase && network.passphrase !== networkPassphrase) {
+    throw new StartupValidationError(
+      `RPC network passphrase "${network.passphrase}" does not match ` +
+        `STELLAR_NETWORK_PASSPHRASE "${networkPassphrase}". Refusing to index.`
+    );
+  }
+
+  const { entries } = await deps.rpc.getLedgerEntries([contractInstanceKey(contractId)], deps.signal);
+  const entry = entries?.[0];
+  if (!entry) {
+    throw new StartupValidationError(
+      `Contract ${contractId} was not found on network "${network.passphrase}". ` +
+        'Check FOLDER_CONTRACT_ID and STELLAR_RPC_URL.'
+    );
+  }
+
+  const state = await readState(deps.db);
+  const stored = state[STATE.networkPassphrase];
+  if (stored && stored !== network.passphrase) {
+    throw new StartupValidationError(
+      `Database was last used with network passphrase "${stored}", but the RPC serves ` +
+        `"${network.passphrase}". Refusing to start; use a database for this network or reset it.`
+    );
+  }
+  if (!stored) await writeState(deps.db, { [STATE.networkPassphrase]: network.passphrase });
+
+  logger.info('Indexer startup checks passed', {
+    network: network.passphrase,
+    protocolVersion: network.protocolVersion ?? null,
+    contractId,
+    wasmHash: entry.xdr ? wasmHashFromEntry(entry.xdr) : null,
+  });
+}
+
 /**
  * Postgres errors that are deterministic for a given event: data exceptions
  * (class 22, e.g. out of range) and constraint violations (class 23).
@@ -579,10 +680,11 @@ async function processPageInContext(db: Db, contractId: string, page: GetEventsR
     }
     return result;
   } catch (err) {
+    broken = true;
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;
   } finally {
-    client.release();
+    client.release(broken);
   }
 }
 
@@ -617,7 +719,7 @@ async function nextRequest(
     return { params: { ...filter, limit, startLedger }, fromConfig: true };
   }
 
-  const { oldestLedger } = await deps.rpc.getHealth();
+  const { oldestLedger } = await deps.rpc.getHealth(deps.signal);
   logger.warn(
     'No saved cursor and INDEXER_START_LEDGER is unset; starting at the oldest ledger the RPC retains. ' +
       'Events before it are not indexed.',
@@ -681,7 +783,8 @@ async function resumeAfterGap(
 
 /**
  * Fetch and persist one page. Returns the number of events in the page so the
- * caller can keep paging while it is full.
+ * caller can keep paging while it is full, plus how far behind the chain tip
+ * the page left the indexer.
  */
 export async function pollOnce(deps: IndexerDependencies): Promise<{ events: number; result: PageResult }> {
   const state = await readState(deps.db, deps.config.network);
@@ -698,7 +801,7 @@ async function pollOnceInContext(
 
   let page: GetEventsResult;
   try {
-    page = await deps.rpc.getEvents(params);
+    page = await deps.rpc.getEvents(params, deps.signal);
   } catch (err) {
     if (!(err instanceof LedgerRangeError)) throw err;
     const requested = requestedLedger(params);
@@ -767,21 +870,80 @@ export function backoffDelay(
   return Math.min(config.pollIntervalMs * 2 ** failures, config.maxBackoffMs);
 }
 
+/** Thrown when a tick exceeds `INDEXER_TICK_TIMEOUT_MS`. */
+export class TickTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Indexer tick exceeded its ${timeoutMs} ms deadline`);
+    this.name = 'TickTimeoutError';
+  }
+}
+
+/** Default tick deadline when `tickTimeoutMs` is not configured. */
+export const DEFAULT_TICK_TIMEOUT_MS = 30000;
+
+/**
+ * Run `work` with a hard deadline. On expiry the returned promise rejects with
+ * a `TickTimeoutError` and `onTimeout` runs (to release the DB client); the
+ * abandoned work keeps running in the background and its result is ignored.
+ */
+function withDeadline<T>(
+  work: () => Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => void
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        onTimeout();
+      } catch {
+        // releasing is best effort
+      }
+      reject(new TickTimeoutError(timeoutMs));
+    }, timeoutMs);
+    timer.unref?.();
+
+    work().then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 export function createIndexer(deps: IndexerDependencies): RunningIndexer {
   const maxPages = deps.config.maxPagesPerTick ?? 50;
+  const tickTimeoutMs = deps.config.tickTimeoutMs ?? DEFAULT_TICK_TIMEOUT_MS;
+  const shutdownTimeoutMs = deps.config.shutdownTimeoutMs ?? tickTimeoutMs;
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
   let failures = 0;
   let inFlight: Promise<void> = Promise.resolve();
+  let lag: ChainLag | null = null;
+  /** Set when a tick was abandoned at its deadline; the next tick waits for it. */
+  let abandoned: Promise<unknown> | null = null;
 
-  const tick = async () => {
+  const runTick = async () => {
     try {
       for (let page = 0; page < maxPages && !stopped; page++) {
-        const { events } = await pollOnce(deps);
-        if (events < deps.config.pageLimit) break; // caught up
+        const polled = await pollOnce(deps);
+        lag = polled.lag;
+        if (polled.events < deps.config.pageLimit) break; // caught up
       }
       failures = 0;
     } catch (err) {
+      if (isAbortError(err) || stopped) return; // shutting down: no error state, no retry
       failures++;
       const message = err instanceof Error ? err.message : String(err);
       if (err instanceof RetentionGapError) {
@@ -800,17 +962,55 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
     }
   };
 
+  const tick = async () => {
+    // A previous tick overran its deadline and may still hold a connection;
+    // wait for it so ticks never overlap.
+    if (abandoned) {
+      await abandoned.catch(() => undefined);
+      abandoned = null;
+    }
+    if (stopped) return;
+
+    const work = runTick();
+    try {
+      await withDeadline(
+        () => work,
+        tickTimeoutMs,
+        () => {
+          abandoned = work;
+        }
+      );
+    } catch (err) {
+      if (!(err instanceof TickTimeoutError)) throw err;
+      failures++;
+      logger.error('Indexer tick timed out', { timeoutMs: tickTimeoutMs, failures });
+      await writeState(deps.db, {
+        [STATE.status]: 'error',
+        [STATE.lastError]: err.message,
+      }).catch(() => undefined);
+    }
+  };
+
   const schedule = (delay: number) => {
     if (stopped) return;
     timer = setTimeout(() => {
-      inFlight = tick().then(() => schedule(backoffDelay(deps.config, failures)));
+      inFlight = tick().then(() =>
+        schedule(failures === 0 ? adaptiveDelay(deps.config, lag) : backoffDelay(deps.config, failures))
+      );
     }, delay);
   };
+
+  const onAbort = () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
+  deps.signal?.addEventListener('abort', onAbort, { once: true });
 
   logger.info('Indexer started', {
     contractId: deps.config.contractId,
     pollIntervalMs: deps.config.pollIntervalMs,
     pageLimit: deps.config.pageLimit,
+    maxPagesPerTick: maxPages,
   });
   schedule(0);
 
@@ -818,7 +1018,23 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
     stop: async () => {
       stopped = true;
       if (timer) clearTimeout(timer);
-      await inFlight;
+      deps.signal?.removeEventListener('abort', onAbort);
+      // A stuck tick must not block shutdown: wait at most shutdownTimeoutMs.
+      let deadline: NodeJS.Timeout | undefined;
+      const timedOut = await Promise.race([
+        inFlight.then(() => false),
+        new Promise<boolean>((resolve) => {
+          deadline = setTimeout(() => resolve(true), shutdownTimeoutMs);
+          deadline.unref?.();
+        }),
+      ]);
+      if (deadline) clearTimeout(deadline);
+      if (timedOut) {
+        logger.warn('Indexer stop timed out; abandoning in-flight tick', {
+          timeoutMs: shutdownTimeoutMs,
+        });
+        return;
+      }
       logger.info('Indexer stopped');
     },
   };

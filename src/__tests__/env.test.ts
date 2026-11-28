@@ -21,14 +21,37 @@ describe('environment configuration', () => {
     expect(env.PORT).toBe(3000);
     expect(env.NODE_ENV).toBe('test');
     expect(env.INDEXER_POLL_INTERVAL_MS).toBe(5000);
+    expect(env.INDEXER_MAX_PAGES_PER_TICK).toBe(50);
     expect(env.INDEXER_ON_RETENTION_GAP).toBe('halt');
     expect(env.INDEXER_MAX_GAP_RESUME_ATTEMPTS).toBe(5);
     expect(env.INDEXER_START_LEDGER).toBeUndefined();
     expect(env.IPFS_VERIFY_CID).toBe(true);
   });
 
-  it('rejects invalid urls', () => {
-    expect(() => loadEnv({ ...validEnv, STELLAR_RPC_URL: 'not-a-url' })).toThrow(/STELLAR_RPC_URL/);
+  it('validates the indexer tick and Postgres statement timeouts', () => {
+    expect(loadEnv({ ...validEnv, INDEXER_TICK_TIMEOUT_MS: '5000' }).INDEXER_TICK_TIMEOUT_MS).toBe(5000);
+    expect(() => loadEnv({ ...validEnv, INDEXER_TICK_TIMEOUT_MS: '0' })).toThrow(
+      /INDEXER_TICK_TIMEOUT_MS/
+    );
+    expect(() => loadEnv({ ...validEnv, DB_STATEMENT_TIMEOUT_MS: '-1' })).toThrow(
+      /DB_STATEMENT_TIMEOUT_MS/
+    );
+    expect(() => loadEnv({ ...validEnv, DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: '0' })).toThrow(
+      /DB_IDLE_IN_TRANSACTION_TIMEOUT_MS/
+    );
+  });
+
+  it('validates INDEXER_MAX_PAGES_PER_TICK', () => {
+    expect(loadEnv({ ...validEnv, INDEXER_MAX_PAGES_PER_TICK: '10' }).INDEXER_MAX_PAGES_PER_TICK).toBe(10);
+    expect(() => loadEnv({ ...validEnv, INDEXER_MAX_PAGES_PER_TICK: '0' })).toThrow(
+      /INDEXER_MAX_PAGES_PER_TICK/
+    );
+    expect(() => loadEnv({ ...validEnv, INDEXER_MAX_PAGES_PER_TICK: '1001' })).toThrow(
+      /INDEXER_MAX_PAGES_PER_TICK/
+    );
+  });
+
+  it('rejects invalid urls', () => {    expect(() => loadEnv({ ...validEnv, STELLAR_RPC_URL: 'not-a-url' })).toThrow(/STELLAR_RPC_URL/);
   });
 
   it.each(['FOLDER_CONTRACT_ID', 'STELLAR_RPC_URL'])('fails fast with a hint when %s is missing', (key) => {

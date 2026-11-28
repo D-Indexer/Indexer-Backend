@@ -188,6 +188,20 @@ place (`scripts/e2e/config.ts`).
 
 ## Indexer recovery
 
+### Startup checks
+
+Before polling, the indexer calls `getNetwork` and `getLedgerEntries` and exits with an error
+when:
+
+- the RPC's passphrase differs from `STELLAR_NETWORK_PASSPHRASE` (the message names both),
+- `FOLDER_CONTRACT_ID` has no contract instance on that network (the message names the
+  contract and the network),
+- `indexer_state.network_passphrase` records a different network (the database was used
+  elsewhere; point the indexer at the right database or reset it).
+
+On success it logs `Indexer startup checks passed` with the network passphrase, protocol
+version and the contract's WASM hash, and stores the passphrase in `indexer_state`.
+
 ### Retention gap
 
 Soroban RPC keeps only recent ledgers (testnet: about 7 days). If the indexer is down longer

@@ -121,16 +121,20 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
   const safeUrl = redactUrl(options.url);
   let nextId = 1;
 
-  async function callOnce<T>(method: string, params?: unknown): Promise<T> {
+  async function callOnce<T>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) throw new RpcAbortError();
     let response: Response;
     try {
       response = await fetchImpl(options.url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
-        signal: AbortSignal.timeout(options.timeoutMs),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs)])
+          : AbortSignal.timeout(options.timeoutMs),
       });
     } catch (err) {
+      if (signal?.aborted) throw new RpcAbortError();
       const reason = err instanceof Error ? err.name : 'unknown';
       throw new RpcError(`${method} to ${safeUrl} failed: ${reason}`, undefined, true);
     }
@@ -140,7 +144,7 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
       throw new RpcError(`${method} to ${safeUrl} returned HTTP ${response.status}`, undefined, retryable);
     }
 
-    const body = (await response.json()) as {
+    const body = (await abortable(response.json(), signal)) as {
       result?: T;
       error?: { code: number; message: string };
     };
@@ -159,20 +163,21 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     return body.result;
   }
 
-  async function call<T>(method: string, params?: unknown): Promise<T> {
+  async function call<T>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
     for (let attempt = 1; ; attempt++) {
       try {
-        return await callOnce<T>(method, params);
+        return await callOnce<T>(method, params, signal);
       } catch (err) {
+        if (signal?.aborted) throw new RpcAbortError();
         if (!(err instanceof RpcError) || !err.retryable || attempt >= maxAttempts) throw err;
         const delay = baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random() / 2);
-        await sleep(delay);
+        await abortable(sleep(delay), signal);
       }
     }
   }
 
   return {
-    getEvents(params) {
+    getEvents(params, signal) {
       const pagination =
         params.cursor !== undefined
           ? { cursor: params.cursor, limit: params.limit }
@@ -186,8 +191,8 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
         pagination,
       });
     },
-    getHealth() {
-      return call<HealthResult>('getHealth');
+    getLedgerEntries(keys, signal) {
+      return call<GetLedgerEntriesResult>('getLedgerEntries', { keys }, signal);
     },
     getLedgerEntries(params) {
       return call<GetLedgerEntriesResult>('getLedgerEntries', { keys: params.keys });
