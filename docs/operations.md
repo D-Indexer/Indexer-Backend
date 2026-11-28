@@ -14,51 +14,19 @@ Run exactly **one** indexer per database. Two would not corrupt data, since even
 deduplicate, but they would race on the cursor and waste RPC calls. The API can scale
 horizontally.
 
-## Container memory and the Node heap
+### Composition root
 
-The image runs `deploy/entrypoint.sh`, which sizes V8's old-space heap from the container's
-memory limit before starting the process. It reads the cgroup v2 limit
-(`/sys/fs/cgroup/memory.max`) or the v1 limit (`/sys/fs/cgroup/memory/memory.limit_in_bytes`)
-and sets `--max-old-space-size` to about 75% of it, leaving headroom for the rest of the
-process (buffers, native allocations, IPFS response bodies). Without this, older Node
-versions size the heap from host memory and the kernel OOM-kills the container before V8
-collects, producing abrupt restarts with no useful logs.
+Configuration and I/O are wired up explicitly in `src/container.ts`, the composition root.
+It reads the environment once, builds the config, the Postgres pool, the RPC client and the
+services, and passes them to `createApp(deps)` / `createIndexer(deps)`. Services are
+factories that take their dependencies (e.g. `createFolderService({ db })`).
 
-- The effective limit is logged at startup, e.g.
-  `INFO Node heap limit {"maxOldSpaceSizeMb":384,"source":"cgroup","limitMb":512}`.
-  `source` is `cgroup` when derived from the limit, `default` when no limit was found.
-- An explicit `NODE_OPTIONS=--max-old-space-size=<MB>` is respected and the entrypoint
-  leaves it untouched (logged with `source: "env"`). Use this to override the calculation.
-- `--max-old-space-size` only bounds the old generation; total RSS is higher. Keep the
-  container limit comfortably above the logged heap value.
-
-Recommended limits:
-
-| Process | Limit        | Notes                                                                 |
-| ------- | ------------ | --------------------------------------------------------------------- |
-| API     | 512 MB–1 GB  | Scale with `REQUEST_BODY_LIMIT` and concurrent uploads. Each buffered upload holds the body in memory, so budget roughly `REQUEST_BODY_LIMIT × concurrent uploads` on top of the base heap. |
-| Indexer | 256–512 MB   | Pages are bounded by `INDEXER_PAGE_SIZE`; 256 MB is enough for the default. |
-
-With a 512 MB limit the API gets a ~384 MB heap, leaving ~128 MB for buffers and native
-memory. If you raise `REQUEST_BODY_LIMIT` or expect many simultaneous uploads, raise the
-container limit rather than the heap fraction.
-
-### Smoke test
-
-Assert the logged heap value under a 512 MB limit:
-
-```bash
-docker build -f deploy/Dockerfile -t folder-api .
-docker run --rm --memory=512m folder-api 2>&1 | grep 'Node heap limit'
-# expect maxOldSpaceSizeMb below 512 (about 384) and source "cgroup"
-```
-
-To confirm an override is respected:
-
-```bash
-docker run --rm --memory=512m -e NODE_OPTIONS=--max-old-space-size=256 folder-api 2>&1 | grep 'Node heap limit'
-# expect maxOldSpaceSizeMb 256 and source "env"
-```
+Only the entrypoints (`src/server.ts`, `src/indexer/main.ts` and the CLI) read env and start
+I/O. Every other module under `src/` can be imported with an empty environment, which is
+what the tests rely on: they build the app with explicit dependencies instead of mutating
+`process.env`. If you need configuration in a new module, take it as a parameter rather
+than calling `getEnv()` — a test enforces that `getEnv()` is only called from the
+composition root and entrypoints.
 
 ## Health
 
@@ -195,6 +163,32 @@ is behind or misconfigured (wrong network).
 A new contract id means new events. Set `FOLDER_CONTRACT_ID` (and `INDEXER_START_LEDGER` to
 the deployment ledger), truncate the tables above, and restart the indexer.
 
+## Feature flags
+
+Some behaviour can be toggled at runtime without redeploying, for incident response. Flags
+live in the `feature_flags` table (`key`, `enabled`, `updated_by`, `updated_at`, `note`).
+The API and indexer read them with a short cache TTL (`FEATURE_FLAGS_CACHE_TTL_MS`, default
+a few seconds), so a change takes effect across all replicas within that TTL. Where the
+database supports it, a `NOTIFY` invalidates the cache immediately.
+
+Gated features: uploads, bundle uploads, webhook delivery, SSE and GraphQL. When a flag is
+disabled the endpoint returns `503` with a clear message naming the flag, so clients can
+retry later.
+
+List and set flags with the CLI:
+
+```bash
+npm run flags -- list
+npm run flags -- set uploads false --by alice --note "Kubo overloaded"
+npm run flags -- set uploads true --by alice
+# in the container image (no ts-node there):
+docker compose exec api node dist/cli/flags.js list
+```
+
+Every change is audited: `updated_by`, `updated_at` and `note` are stored on the row, and
+the CLI logs the change. Prefer setting a `note` explaining why during an incident, and
+re-enable the flag once the incident is over.
+
 ## Database
 
 - The schema is `database/schema.sql`. Every statement is `IF NOT EXISTS`, so applying it is
@@ -225,9 +219,98 @@ the deployment ledger), truncate the tables above, and restart the indexer.
 - Check a node: `docker compose exec ipfs ipfs id`. List pins:
   `docker compose exec ipfs ipfs pin ls --type=recursive`.
 
+## Network fault injection (chaos profile)
+
+To reproduce production network conditions locally, an optional compose profile puts
+[Toxiproxy](https://github.com/Shopify/toxiproxy) in front of Postgres, Kubo and the RPC:
+
+```bash
+docker compose --profile chaos up
+```
+
+With the profile enabled, the API and indexer connect through the proxies instead of the
+upstreams directly:
+
+| Proxy      | Listen (in compose network) | Upstream            | Used by                       |
+| ---------- | --------------------------- | ------------------- | ----------------------------- |
+| `postgres` | `toxiproxy:8666`            | `postgres:5432`     | API and indexer (`DATABASE_URL`) |
+| `kubo`     | `toxiproxy:8667`            | `ipfs:5001`         | API (`IPFS_API_URL`)          |
+| `rpc`      | `toxiproxy:8668`            | `STELLAR_RPC_URL`   | indexer (`STELLAR_RPC_URL`)   |
+
+The Toxiproxy admin API is on `127.0.0.1:8474`. Without the profile the stack behaves as
+before and connects to the upstreams directly.
+
+Scripts live in `scripts/chaos/`:
+
+- `apply.sh <proxy> <toxic> [args...]` adds a toxic to a proxy.
+- `restore.sh [proxy]` removes all toxics (all proxies if none is given).
+- `smoke.sh` verifies that every proxy routes traffic to its upstream.
+
+### Recipes
+
+Each recipe lists the command and the behaviour you should observe.
+
+**RPC 5 s latency** — indexer polls slow down and logs timeouts/backoff.
+
+```bash
+scripts/chaos/apply.sh rpc latency --latency 5000 --jitter 0
+```
+
+Expected: each RPC call takes about 5 s. Polls take longer, and once a call exceeds the
+client timeout the indexer logs `Indexer poll failed` and backs off exponentially (up to
+`INDEXER_MAX_BACKOFF_MS`). `/health` stays `200` while Postgres answers; the indexer's
+`last_success_at` stops advancing. Restore with `scripts/chaos/restore.sh rpc`.
+
+**Postgres drops connections** — indexer retries, no partial writes, cursor unchanged.
+
+```bash
+scripts/chaos/apply.sh postgres reset_peer --timeout 0
+```
+
+Expected: in-flight connections are reset. The API returns `503` from `/health` while the
+database is unreachable. The indexer retries with backoff; the interrupted page is rolled
+back, so no partial writes land and `indexer_state.cursor` does not move until a poll
+succeeds. Restore with `scripts/chaos/restore.sh postgres`.
+
+**Kubo slow upload** — `POST /upload` returns `504` after `IPFS_TIMEOUT_MS`.
+
+```bash
+scripts/chaos/apply.sh kubo latency --latency 30000 --jitter 0
+```
+
+Expected: uploads take longer than `IPFS_TIMEOUT_MS` (default 10 s), so `POST /upload`
+returns `504`. With a latency below the timeout the upload succeeds but slowly. Restore
+with `scripts/chaos/restore.sh kubo`.
+
+Other useful toxics: `bandwidth` (`--rate <KB/s>`) to throttle a proxy, `timeout` to stop
+forwarding traffic, and `reset_peer` to drop connections. Run `scripts/chaos/smoke.sh` after
+starting the profile to confirm the proxies route traffic.
+
 ## Shutdown
 
 Both processes handle SIGTERM/SIGINT. The API stops accepting connections and closes the
 pool. The indexer finishes the in-flight page (one transaction) and stops. Either exits
 non-zero after `SHUTDOWN_TIMEOUT_MS`. An interrupted page is rolled back and re-read on the
 next start.
+
+### Init process (PID 1)
+
+The image runs Node under `tini` as the entrypoint, so Node is not PID 1. `tini` forwards
+signals to Node and reaps orphaned/zombie child processes (healthcheck commands, future
+tools). Without it, signals sent before Node registers its handlers are ignored and
+`docker stop` falls back to SIGKILL after the timeout.
+
+`docker stop` on both the API and indexer containers should complete gracefully (exit 0)
+well before the kill timeout. A CI smoke step starts the container, sends SIGTERM and
+asserts the exit code and duration.
+
+### Kubernetes
+
+- Keep `tini` as the entrypoint; don't override `command`/`args` with a bare `node ...`
+  unless you also set `shareProcessNamespace: true` (or run under an init in the pod).
+- Set `terminationGracePeriodSeconds` comfortably above `SHUTDOWN_TIMEOUT_MS` (e.g. 30s
+  with a 10s shutdown timeout) so the graceful path finishes before SIGKILL.
+- The pod's `preStop` hook is not required, but if you add one keep it shorter than the
+  grace period.
+- Healthcheck commands run as children of the container process; `tini` reaps them, so
+  repeated probes don't accumulate zombies.

@@ -3,6 +3,11 @@
 # repo root (compose.yaml includes this file). Overrides come from your shell
 # or a root .env file, e.g. FOLDER_CONTRACT_ID=... docker compose up.
 
+# Single source of truth for the Kubo (IPFS) version. CI reads this same value
+# (see .github/workflows/ci.yml) so integration tests run against the exact
+# node version the local stack uses. Override with KUBO_VERSION=... if needed.
+x-kubo-version: &kubo-version ${KUBO_VERSION:-v0.29.0}
+
 x-app-env: &app-env
   NODE_ENV: development
   LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -16,6 +21,15 @@ x-app-env: &app-env
   IPFS_API_URL: http://ipfs:5001
   IPFS_GATEWAY: ${IPFS_GATEWAY:-https://ipfs.io/ipfs}
   CORS_ORIGIN: ${CORS_ORIGIN:-}
+
+# Chaos profile overrides (issue #251). When `--profile chaos` is active these
+# values win over x-app-env and route every upstream through Toxiproxy.
+# Toxiproxy proxies are created by scripts/chaos/init.sh; the proxy names are
+# postgres, ipfs and rpc.
+x-chaos-env: &chaos-env
+  DATABASE_URL: postgresql://folder:folder@toxiproxy:5433/folder
+  IPFS_API_URL: http://toxiproxy:5002
+  STELLAR_RPC_URL: http://toxiproxy:8545
 
 services:
   postgres:
@@ -37,7 +51,7 @@ services:
       retries: 10
 
   ipfs:
-    image: ipfs/kubo:v0.29.0
+    image: ipfs/kubo:${KUBO_VERSION:-v0.29.0}
     ports:
       # The Kubo RPC API is an admin interface: keep it on localhost.
       - '127.0.0.1:5001:5001'
@@ -55,8 +69,15 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     image: folder-indexer-backend:local
+    # The image's ENTRYPOINT is tini, which runs as PID 1, forwards SIGTERM to
+    # Node and reaps zombies. `init: true` is a belt-and-braces fallback for
+    # images built before tini was baked in; it is a no-op when tini is already
+    # PID 1. The command override is passed to tini as the child process.
+    init: true
     command: ['node', 'dist/indexer/main.js']
-    environment: *app-env
+    environment:
+      <<: *app-env
+      <<: *chaos-env
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,10 +94,16 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     image: folder-indexer-backend:local
+    # See the indexer service: tini is PID 1 via the image ENTRYPOINT, with
+    # `init: true` as a fallback so SIGTERM always reaches Node.
+    init: true
     command: ['node', 'dist/server.js']
     environment:
       <<: *app-env
+      <<: *chaos-env
       PORT: 3000
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
     ports:
       - '${API_PORT:-3000}:3000'
     depends_on:
@@ -98,6 +125,31 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Toxiproxy fronts Postgres, Kubo and the Stellar RPC so network faults can be
+  # injected locally. Only started with `docker compose --profile chaos up`.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    profiles: ['chaos']
+    command: ['-host', '0.0.0.0']
+    ports:
+      # Control API used by scripts/chaos/*.sh.
+      - '127.0.0.1:8474:8474'
+      # Proxy ports (one per upstream).
+      - '127.0.0.1:5433:5433'
+      - '127.0.0.1:5002:5002'
+      - '127.0.0.1:8545:8545'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ipfs:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:8474/version']
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   postgres-data:

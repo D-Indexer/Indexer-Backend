@@ -1,4 +1,4 @@
-import pool from '../db/client';
+import type { Pool } from 'pg';
 import { Portfolio } from '../types';
 
 type PortfolioRow = {
@@ -8,6 +8,9 @@ type PortfolioRow = {
   minted_at: Date;
   updated_at: Date;
 };
+
+export const GET_PORTFOLIO_SQL =
+  'SELECT owner, template_id, ipfs_cid, minted_at, updated_at FROM portfolios WHERE owner = $1';
 
 function mapPortfolio(row: PortfolioRow): Portfolio {
   return {
@@ -24,5 +27,6 @@ export async function getPortfolio(owner: string): Promise<Portfolio | null> {
     'SELECT owner, template_id, ipfs_cid, minted_at, updated_at FROM portfolios WHERE owner = $1',
     [owner]
   );
-  return rows[0] ? mapPortfolio(rows[0]) : null;
+  const row = rows[0];
+  return row ? mapPortfolio(row) : null;
 }

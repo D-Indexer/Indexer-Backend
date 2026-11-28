@@ -1,9 +1,19 @@
 import { Router } from 'express';
-import * as ctrl from '../controllers/template.controller';
+import { createTemplateController } from '../controllers/template.controller';
+import type { TemplateService } from '../services/template.service';
 
-const router = Router();
+export interface TemplateRoutesDeps {
+  templateService: TemplateService;
+}
 
-router.get('/', ctrl.list);
-router.get('/:id', ctrl.getOne);
+export function createTemplateRoutes(deps: TemplateRoutesDeps): Router {
+  const router = Router();
+  const ctrl = createTemplateController({ templateService: deps.templateService });
 
-export default router;
+  router.get('/', ctrl.list);
+  router.get('/:id', ctrl.getOne);
+
+  return router;
+}
+
+export default createTemplateRoutes;

@@ -39,8 +39,9 @@ function parseScVal(base64: string, what: string): xdr.ScVal {
 
 /** Returns topics[0] as a string, or null when it isn't a Symbol. */
 export function decodeTopic(event: Pick<RawEvent, 'topic'>): string | null {
-  if (event.topic.length === 0) return null;
-  const first = parseScVal(event.topic[0], 'topic[0]');
+  const firstTopic = event.topic[0];
+  if (firstTopic === undefined) return null;
+  const first = parseScVal(firstTopic, 'topic[0]');
   return first.switch().name === 'scvSymbol' ? first.sym().toString() : null;
 }
 
@@ -52,7 +53,7 @@ class Fields {
 
   private at(index: number, name: string): xdr.ScVal {
     const value = this.values[index];
-    if (!value) {
+    if (value === undefined) {
       throw new EventDecodeError(`${this.topic}: missing field ${index} (${name})`);
     }
     return value;
