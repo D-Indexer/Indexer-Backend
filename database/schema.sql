@@ -72,6 +72,12 @@ ALTER TABLE templates ADD COLUMN IF NOT EXISTS ttl_checked_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_templates_live_until
   ON templates (live_until_ledger) WHERE live_until_ledger IS NOT NULL;
 
+-- GET /creators/:address/templates (keyset by registered_at, id) and creator
+-- stats. Templates registered by contract versions whose tmpl_reg carried no
+-- creator have creator = NULL and are not attributable to anyone.
+CREATE INDEX IF NOT EXISTS idx_templates_creator_registered
+  ON templates (creator, registered_at, id);
+
 -- port_mint / port_upd / tmpl_set. No foreign key to folders: the indexer can
 -- start partway through history, so a portfolio may arrive before its folder.
 -- cid_normalized holds the CIDv1 base32 form for reverse lookups.
@@ -84,6 +90,43 @@ CREATE TABLE IF NOT EXISTS portfolios (
   updated_at      TIMESTAMPTZ NOT NULL,
   from_ledger     INTEGER,
   to_ledger       INTEGER
+);
+
+-- GET /templates/:id/portfolios: keyset pagination by (updated_at, owner) within a template.
+CREATE INDEX IF NOT EXISTS idx_portfolios_template_updated
+  ON portfolios (template_id, updated_at DESC, owner DESC);
+
+-- Number of portfolios currently using each template (usageCount). Maintained
+-- by the indexer in the page transaction (src/indexer/counters.ts) on
+-- port_mint and tmpl_set, so reads never aggregate over portfolios. Keyed by
+-- template id with no foreign key: a portfolio can reference a template the
+-- indexer hasn't seen registered (indexing started partway through history).
+-- The table is backfilled from portfolios only when it is first created, so
+-- re-running the migration never races the indexer's increments.
+DO $$
+BEGIN
+  IF to_regclass('template_usage') IS NULL THEN
+    CREATE TABLE template_usage (
+      template_id      BIGINT PRIMARY KEY,
+      portfolio_count  BIGINT NOT NULL DEFAULT 0
+    );
+    INSERT INTO template_usage (template_id, portfolio_count)
+      SELECT template_id, COUNT(*) FROM portfolios GROUP BY template_id;
+  END IF;
+END
+$$;
+
+-- Activity per UTC day of ledger close, for GET /stats and /stats/daily.
+-- Maintained by the indexer in the page transaction (src/indexer/counters.ts),
+-- so the request path never aggregates over the event or read-model tables.
+-- Rebuild from contract_events with `npm run indexer -- rebuild-stats`
+-- (required once after upgrading an existing database, which starts empty).
+CREATE TABLE IF NOT EXISTS daily_stats (
+  day                   DATE PRIMARY KEY,
+  folders_claimed       BIGINT NOT NULL DEFAULT 0,
+  portfolios_minted     BIGINT NOT NULL DEFAULT 0,
+  portfolio_updates     BIGINT NOT NULL DEFAULT 0,
+  templates_registered  BIGINT NOT NULL DEFAULT 0
 );
 
 -- Version history for portfolio content (port_mint / port_upd / tmpl_set).
@@ -132,6 +175,29 @@ CREATE TABLE IF NOT EXISTS indexer_state (
   key         TEXT PRIMARY KEY,
   value       TEXT NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- API keys for third-party integrators (src/services/apiKeys.ts). Only an
+-- HMAC-SHA256 of the key under API_KEY_HMAC_SECRET is stored; the plaintext is
+-- shown once by `npm run keys -- create` and never persisted or logged.
+-- monthly_quota is requests per UTC calendar month; NULL means no quota.
+CREATE TABLE IF NOT EXISTS api_keys (
+  id             BIGSERIAL PRIMARY KEY,
+  key_hash       TEXT NOT NULL UNIQUE,
+  name           TEXT NOT NULL,
+  contact        TEXT NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  revoked_at     TIMESTAMPTZ,
+  monthly_quota  BIGINT CHECK (monthly_quota IS NULL OR monthly_quota > 0)
+);
+
+-- Requests per key per UTC day. The API aggregates counts in memory and
+-- flushes them periodically as one upsert, so requests never wait on a write.
+CREATE TABLE IF NOT EXISTS api_key_usage (
+  key_id    BIGINT NOT NULL REFERENCES api_keys (id) ON DELETE CASCADE,
+  day       DATE NOT NULL,
+  requests  BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (key_id, day)
 );
 
 -- Runtime feature flags for incident response. Read by the API and indexer

@@ -2,6 +2,10 @@ import express, { RequestHandler } from 'express';
 import cors from 'cors';
 import { createFolderRoutes } from './routes/folder.routes';
 import { createTemplateRoutes } from './routes/template.routes';
+import { createCreatorRoutes } from './routes/creator.routes';
+import { createStatsRoutes } from './routes/stats.routes';
+import { createApiKeyAuth } from './middleware/apiKey';
+import { logger } from './utils/logger';
 import { createUploadRoutes } from './routes/upload.routes';
 import { createPortfolioRoutes } from './routes/portfolio.routes';
 import { createHealthRoutes } from './routes/health.routes';
@@ -12,6 +16,7 @@ import { requestId } from './middleware/requestId';
 import { securityHeaders } from './middleware/securityHeaders';
 import { AppEnv } from './config/env';
 import type { FeatureFlagKey, FeatureFlagService } from './featureFlags';
+import type { Queryable } from './db/types';
 
 /**
  * Dependencies required to build the HTTP app. Everything is passed in
@@ -38,10 +43,7 @@ const ROUTE_FLAGS: Record<string, FeatureFlagKey> = {
  * Builds middleware that rejects requests with 503 when the given feature flag
  * is disabled. The flag is evaluated per request (the service caches reads).
  */
-export function requireFeature(
-  featureFlags: FeatureFlagService,
-  flag: FeatureFlagKey,
-): RequestHandler {
+export function requireFeature(featureFlags: FeatureFlagService, flag: FeatureFlagKey): RequestHandler {
   return (_req, res, next) => {
     featureFlags
       .isEnabled(flag)
@@ -93,9 +95,31 @@ export function createApp(deps: AppDependencies) {
     });
   });
 
-  app.use('/folders', createFolderRoutes(deps));
-  app.use('/templates', createTemplateRoutes(deps));
-  app.use('/portfolios', createPortfolioRoutes(deps));
+  // Read-model routes query the database directly through an explicit handle.
+  const db = deps.db as Queryable;
+
+  // Optional API keys on read endpoints: anonymous requests keep working, a
+  // valid key attributes and counts usage, an invalid one gets 401. Disabled
+  // when API_KEY_HMAC_SECRET is unset.
+  const apiKeyAuth = env.API_KEY_HMAC_SECRET
+    ? createApiKeyAuth({
+        db,
+        secret: env.API_KEY_HMAC_SECRET,
+        onFlushError: (err) =>
+          logger.warn('API key usage flush failed; will retry', {
+            error: err instanceof Error ? err.message : String(err),
+          }),
+      })
+    : null;
+  // Exposed so the server can flush pending usage on shutdown.
+  app.locals['apiKeyAuth'] = apiKeyAuth;
+  const read: RequestHandler[] = apiKeyAuth ? [apiKeyAuth.middleware] : [];
+
+  app.use('/folders', ...read, createFolderRoutes(deps));
+  app.use('/templates', ...read, createTemplateRoutes({ db }));
+  app.use('/creators', ...read, createCreatorRoutes({ db }));
+  app.use('/stats', ...read, createStatsRoutes({ db }));
+  app.use('/portfolios', ...read, createPortfolioRoutes(deps));
   app.use('/upload', requireFeature(featureFlags, ROUTE_FLAGS.uploads), createUploadRoutes(deps));
   app.use('/health', createHealthRoutes(deps));
 

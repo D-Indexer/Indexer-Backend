@@ -222,12 +222,31 @@ is clamped to the oldest retained ledger with a warning.
 re-reads events and skips the ones already stored. To rebuild the read model from scratch:
 
 ```sql
-TRUNCATE contract_events, folders, templates, portfolios, admins, indexer_state;
+TRUNCATE contract_events, folders, templates, portfolios, admins, indexer_state,
+  template_usage, daily_stats;
 ```
+
+The derived counters (`template_usage`, `daily_stats`) must be truncated with the tables
+they are derived from, or re-indexing counts everything a second time.
 
 ```bash
 npm run indexer -- reset-cursor <first ledger to index>   # or leave state empty to use INDEXER_START_LEDGER
 ```
+
+### Daily stats
+
+`daily_stats` (served by `GET /stats` and `GET /stats/daily`) is maintained by the indexer
+in the same transaction that stores each event, so it can't drift during normal operation
+and replays never double count. Recompute it from `contract_events` with:
+
+```bash
+npm run indexer -- rebuild-stats
+```
+
+Run it once after upgrading a database that predates the table (it starts empty), or if
+the stats are ever suspected to be wrong. It is safe while the indexer runs: for the
+duration of the rebuild it locks `daily_stats` against indexer writes (not API reads), and
+every event is counted exactly once whichever side commits first.
 
 ### Rejected events
 

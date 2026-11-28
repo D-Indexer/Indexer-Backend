@@ -2,13 +2,16 @@ import 'dotenv/config';
 import { getEnv } from '../config/env';
 import pool from '../db/client';
 import { readState, STATE, writeState } from './stellar';
+import { rebuildDailyStats } from './counters';
 
 const USAGE = `Usage:
   npm run indexer -- status                 Print indexer state as JSON
   npm run indexer -- reset-cursor <ledger>  Re-index from <ledger> (already-stored events are skipped)
   npm run indexer -- healthcheck            Exit 1 if the indexer has not succeeded recently
                                             (manual use only; containers probe the embedded
-                                            /healthz and /readyz HTTP endpoints instead)`;
+                                            /healthz and /readyz HTTP endpoints instead)
+  npm run indexer -- rebuild-stats          Recompute daily_stats from contract_events
+                                            (safe while the indexer runs)`;
 
 export async function run(args: string[]): Promise<number> {
   const [command, arg] = args;
@@ -38,6 +41,16 @@ export async function run(args: string[]): Promise<number> {
       const fresh = Number.isFinite(last) && Date.now() - last < getEnv().INDEXER_STALE_AFTER_MS;
       if (!fresh) console.error(`indexer unhealthy: ${JSON.stringify(state)}`);
       return fresh ? 0 : 1;
+    }
+    case 'rebuild-stats': {
+      const client = await pool.connect();
+      try {
+        const { days } = await rebuildDailyStats(client);
+        console.log(`daily_stats rebuilt from contract_events: ${days} day(s) with activity.`);
+      } finally {
+        client.release();
+      }
+      return 0;
     }
     default:
       console.error(USAGE);

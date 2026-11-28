@@ -3,21 +3,79 @@
 Base URL locally: `http://localhost:3000`. All responses are JSON. Examples are real
 responses from the local stack indexing the testnet contract.
 
-| Method | Path                                             | Purpose                               |
-| ------ | ------------------------------------------------ | ------------------------------------- |
-| `GET`  | [`/`](#get-)                                     | Service banner                        |
-| `GET`  | [`/health`](#get-health)                         | API + database health, indexer status |
-| `GET`  | [`/folders/:address`](#get-foldersaddress)       | Folder claimed by an address          |
-| `GET`  | [`/folders/name/:name`](#get-foldersnamename)    | Folder by name                        |
-| `GET`  | [`/portfolios/:address`](#get-portfoliosaddress) | Portfolio NFT minted by an address    |
-| `GET`  | [`/portfolios/:address/versions`](#get-portfoliosaddressversions) | Portfolio version history |
-| `GET`  | [`/portfolios/by-cid/:cid`](#get-portfoliosby-cidcid) | Portfolios referencing a CID      |
-| `GET`  | [`/templates`](#get-templates)                   | All registered templates              |
-| `GET`  | [`/templates/:id`](#get-templatesid)             | One template                          |
-| `GET`  | [`/templates/:id/versions`](#get-templatesidversions) | Template metadata history         |
-| `POST` | [`/upload`](#post-upload)                        | Add and pin a file on IPFS            |
-| `GET`  | [`/.well-known/stellar.toml`](#get-well-knownstellartoml) | SEP-1 stellar.toml          |
-| `GET`  | [`/federation`](#get-federation)                 | SEP-2 federation lookup               |
+| Method | Path                                                              | Purpose                               |
+| ------ | ----------------------------------------------------------------- | ------------------------------------- |
+| `GET`  | [`/`](#get-)                                                      | Service banner                        |
+| `GET`  | [`/health`](#get-health)                                          | API + database health, indexer status |
+| `GET`  | [`/folders/:address`](#get-foldersaddress)                        | Folder claimed by an address          |
+| `GET`  | [`/folders/name/:name`](#get-foldersnamename)                     | Folder by name                        |
+| `GET`  | [`/portfolios/:address`](#get-portfoliosaddress)                  | Portfolio NFT minted by an address    |
+| `GET`  | [`/portfolios/:address/versions`](#get-portfoliosaddressversions) | Portfolio version history             |
+| `GET`  | [`/portfolios/by-cid/:cid`](#get-portfoliosby-cidcid)             | Portfolios referencing a CID          |
+| `GET`  | [`/templates`](#get-templates)                                    | All registered templates              |
+| `GET`  | [`/templates/:id`](#get-templatesid)                              | One template                          |
+| `GET`  | [`/templates/:id/portfolios`](#get-templatesidportfolios)         | Portfolios using a template           |
+| `GET`  | [`/templates/:id/versions`](#get-templatesidversions)             | Template metadata history             |
+| `GET`  | [`/creators/:address`](#get-creatorsaddress)                      | Template creator stats                |
+| `GET`  | [`/creators/:address/templates`](#get-creatorsaddresstemplates)   | Templates registered by a creator     |
+| `GET`  | [`/stats`](#get-stats)                                            | Activity totals                       |
+| `GET`  | [`/stats/daily`](#get-statsdaily)                                 | Daily activity time series            |
+| `POST` | [`/upload`](#post-upload)                                         | Add and pin a file on IPFS            |
+| `GET`  | [`/.well-known/stellar.toml`](#get-well-knownstellartoml)         | SEP-1 stellar.toml                    |
+| `GET`  | [`/federation`](#get-federation)                                  | SEP-2 federation lookup               |
+
+## API keys
+
+Read endpoints (`/folders`, `/portfolios`, `/templates`, `/creators`, `/stats`) work
+anonymously. Integrators such as explorers and wallets can be issued an API key so the
+operator can identify their traffic, contact them, and give them their own monthly quota.
+Send it as a bearer token:
+
+```bash
+curl -H "Authorization: Bearer fk_…" localhost:3000/templates
+```
+
+| Request                               | Result                                                              |
+| ------------------------------------- | ------------------------------------------------------------------- |
+| No `Authorization` header             | Served anonymously, as before                                       |
+| Valid key                             | Served; the request counts toward the key's usage                   |
+| Header not of the form `Bearer <key>` | `401` `Malformed Authorization header: expected "Bearer <API key>"` |
+| Token that isn't shaped like a key    | `401` `Malformed API key`                                           |
+| Unknown key                           | `401` `Invalid API key`                                             |
+| Revoked key                           | `401` `API key has been revoked`                                    |
+| Key over its monthly quota            | `429` (see below), with `Retry-After` in seconds                    |
+
+A key that is sent but invalid is rejected rather than served anonymously, so an
+integrator notices at once when their key stops working. Revocation takes effect within
+30 seconds (the API caches key lookups for that long).
+
+Quotas are requests per calendar month (UTC). Over quota the response is:
+
+```json
+{
+  "error": "Monthly quota of 100000 requests exceeded for this API key; it resets at 2026-12-01T00:00:00.000Z",
+  "requestId": "0b6f4c2e-5d1a-4c55-9a43-3b2a9f0e8d11"
+}
+```
+
+Usage is counted in memory per key and day and written to `api_key_usage` every 10
+seconds, so quota enforcement is approximate across several API replicas and a crash can
+lose up to one interval's counts.
+
+### Managing keys
+
+Requires `DATABASE_URL` and `API_KEY_HMAC_SECRET` (see
+[configuration](configuration.md#api-keys)); with the secret unset, API keys are disabled.
+
+```bash
+npm run keys -- create --name "Explorer Inc" --contact ops@explorer.example [--quota 100000]
+npm run keys -- list
+npm run keys -- revoke <id>
+```
+
+`create` prints the key once. Only an HMAC-SHA256 of it under `API_KEY_HMAC_SECRET` is
+stored, and the key is never logged, so a lost key can't be recovered: revoke it and
+create a new one.
 
 ## Moderation
 
@@ -85,16 +143,17 @@ Every error has the same shape:
 { "error": "Invalid Stellar address", "requestId": "0b6f4c2e-5d1a-4c55-9a43-3b2a9f0e8d11" }
 ```
 
-| Status | When                                                  | `error` examples                                                                                                                                                                                                                                                             |
-| ------ | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | Invalid path parameter, query parameter or upload     | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `Invalid CID`, `atLedger must be a number`, `atLedger is before the earliest indexed ledger`, `atLedger is after the last indexed ledger`, `Invalid cursor`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit` |
-| `404`  | Resource not indexed, or unknown route                | `Folder not found`, `Portfolio not found`, `Template not found`, `Route not found` (also includes `path`)                                                                                                                                                                    |
-| `410`  | `/changes` only: cursor expired or unknown            | `Cursor expired` (body includes `resync: true` and instructions)                                                                                                                                                                                                             |
-| `429`  | `/stream` only: too many concurrent connections       | `Too many stream connections`                                                                                                                                                                                                                                                |
-| `502`  | IPFS node unreachable or returned an error            | `IPFS node unreachable`, `IPFS add failed with status 500`                                                                                                                                                                                                                   |
-| `503`  | `/health` only: database unreachable; uploads: concurrency saturated | see below; uploads include a `Retry-After` header                                                                                                                                                                                                                            |
-| `504`  | IPFS node timed out (`IPFS_TIMEOUT_MS`)               | `IPFS node timed out`                                                                                                                                                                                                                                                        |
-| `500`  | Anything unexpected; details are logged, not returned | `Internal server error`                                                                                                                                                                                                                                                      |
+| Status | When                                                                       | `error` examples                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------ | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | Invalid path parameter, query parameter or upload                          | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `Invalid CID`, `atLedger must be a number`, `atLedger is before the earliest indexed ledger`, `atLedger is after the last indexed ledger`, `Invalid cursor`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit` |
+| `401`  | `Authorization` header sent with a malformed, unknown or revoked API key   | `Malformed API key`, `Invalid API key`, `API key has been revoked`                                                                                                                                                                                                                                                                                                                                                                        |
+| `404`  | Resource not indexed, or unknown route                                     | `Folder not found`, `Portfolio not found`, `Template not found`, `Route not found` (also includes `path`)                                                                                                                                                                                                                                                                                                                                 |
+| `410`  | `/changes` only: cursor expired or unknown                                 | `Cursor expired` (body includes `resync: true` and instructions)                                                                                                                                                                                                                                                                                                                                                                          |
+| `429`  | `/stream`: too many concurrent connections; API key over its monthly quota | `Too many stream connections`, `Monthly quota of … requests exceeded for this API key; …`                                                                                                                                                                                                                                                                                                                                                 |
+| `502`  | IPFS node unreachable or returned an error                                 | `IPFS node unreachable`, `IPFS add failed with status 500`                                                                                                                                                                                                                                                                                                                                                                                |
+| `503`  | `/health` only: database unreachable; uploads: concurrency saturated       | see below; uploads include a `Retry-After` header                                                                                                                                                                                                                                                                                                                                                                                         |
+| `504`  | IPFS node timed out (`IPFS_TIMEOUT_MS`)                                    | `IPFS node timed out`                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `500`  | Anything unexpected; details are logged, not returned                      | `Internal server error`                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 ### Request IDs
 
@@ -417,6 +476,18 @@ cannot be removed, only the content behind it is no longer served or pinned.
 
 All registered templates (`tmpl_reg`), ordered by id. Not paginated yet.
 
+| Query  | Values          | Default |
+| ------ | --------------- | ------- |
+| `sort` | `id`, `popular` | `id`    |
+
+`sort=popular` orders by `usageCount` descending, then id. Any other value returns `400`
+`sort must be 'id' or 'popular'`.
+
+`usageCount` is the number of minted portfolios currently using the template. The
+indexer maintains it as a counter in the same transaction that applies `port_mint` and
+`tmpl_set` (a `tmpl_set` on a minted portfolio moves it from the old template to the
+new one), so reading it never aggregates over portfolios.
+
 ```json
 [
   {
@@ -424,6 +495,7 @@ All registered templates (`tmpl_reg`), ordered by id. Not paginated yet.
     "metadataUri": "ipfs://bafkreiejxg6d3gqvi3737mcwxkv4u7gismaraxgv5zfoqtfuc3nbdgve7i",
     "creator": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
     "registeredAt": "2026-11-09T22:14:42.000Z",
+    "usageCount": 12,
     "archival": { "liveUntilLedger": 5658123, "archived": false }
   }
 ]
@@ -435,6 +507,136 @@ One template, same shape as a list item.
 
 Errors: `400` invalid id, `404` `Template not found`.
 
+## `GET /templates/:id/portfolios`
+
+Portfolios currently using the template, most recently updated first (ties broken by
+owner). Keyset paginated (see [Pagination](#pagination)): `limit` 1–100, default 20.
+
+```bash
+curl "localhost:3000/templates/1/portfolios?limit=2"
+```
+
+```json
+{
+  "portfolios": [
+    {
+      "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+      "templateId": 1,
+      "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
+      "mintedAt": "2026-11-09T22:23:07.000Z",
+      "updatedAt": "2026-11-09T22:23:52.000Z"
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+Errors: `400` invalid id, `limit` or cursor; `404` `Template not found`.
+
+## `GET /creators/:address`
+
+Aggregate stats for a template creator: how many templates `tmpl_reg` attributes to the
+address and their combined `usageCount`. Creators aren't registered anywhere, so an
+address with no templates returns zeros, not `404`.
+
+```json
+{
+  "address": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
+  "templateCount": 2,
+  "totalUsage": 14
+}
+```
+
+Errors: `400` `Invalid Stellar address`.
+
+## `GET /creators/:address/templates`
+
+Templates registered by `address`, oldest registration first (ties broken by id), in the
+same shape as [`GET /templates`](#get-templates). Keyset paginated (see
+[Pagination](#pagination)): `limit` 1–100, default 20. An address with no templates
+returns `{ "templates": [], "nextCursor": null }`, not `404`.
+
+```json
+{
+  "templates": [
+    {
+      "id": 1,
+      "metadataUri": "ipfs://bafkreiejxg6d3gqvi3737mcwxkv4u7gismaraxgv5zfoqtfuc3nbdgve7i",
+      "creator": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
+      "registeredAt": "2026-11-09T22:14:42.000Z",
+      "usageCount": 12
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+Templates registered by older contract versions, whose `tmpl_reg` event carried no
+creator, are indexed with `"creator": null`. They are not attributable to any address and
+never appear under `/creators`.
+
+Errors: `400` `Invalid Stellar address`, invalid `limit` or cursor.
+
+## `GET /stats`
+
+All-time totals:
+
+```json
+{ "foldersClaimed": 412, "portfoliosMinted": 230, "portfolioUpdates": 1871, "templatesRegistered": 9 }
+```
+
+| Field                 | Counts                                                     |
+| --------------------- | ---------------------------------------------------------- |
+| `foldersClaimed`      | Owners' first `folder_cl` (a re-claim doesn't count again) |
+| `portfoliosMinted`    | Owners' first `port_mint` (a re-mint doesn't count again)  |
+| `portfolioUpdates`    | Every `port_upd`                                           |
+| `templatesRegistered` | Templates' first `tmpl_reg` (re-registration doesn't)      |
+
+Only applied events count; rejected events never do. The indexer maintains these counters
+per day as it stores events, so requests never aggregate over the event tables.
+
+## `GET /stats/daily`
+
+The same counters per UTC calendar day of ledger close, for every day in the range
+(days without activity are returned with zeros).
+
+| Query  | Format       | Default                              |
+| ------ | ------------ | ------------------------------------ |
+| `from` | `YYYY-MM-DD` | 29 days before `to`                  |
+| `to`   | `YYYY-MM-DD` | today (UTC), or 29 days after `from` |
+
+Both ends are inclusive; the range may cover at most 366 days.
+
+```bash
+curl "localhost:3000/stats/daily?from=2026-11-09&to=2026-11-10"
+```
+
+```json
+{
+  "from": "2026-11-09",
+  "to": "2026-11-10",
+  "days": [
+    {
+      "day": "2026-11-09",
+      "foldersClaimed": 3,
+      "portfoliosMinted": 1,
+      "portfolioUpdates": 4,
+      "templatesRegistered": 1
+    },
+    {
+      "day": "2026-11-10",
+      "foldersClaimed": 0,
+      "portfoliosMinted": 0,
+      "portfolioUpdates": 0,
+      "templatesRegistered": 0
+    }
+  ]
+}
+```
+
+Errors: `400` `from must be a date in YYYY-MM-DD format` (same for `to`), `from must not be
+after to`, `Date range must be at most 366 days`.
+
 ## Archival
 
 Soroban persistent storage entries have a TTL and are archived when it expires unless it
@@ -444,10 +646,10 @@ and archival is not announced by contract events, so the indexer periodically qu
 
 Every folder, portfolio and template response includes an `archival` object:
 
-| Field             | Meaning                                                                                                                       |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `liveUntilLedger` | The ledger at which the entity's storage entry expires, or `null` if it hasn't been checked yet.                              |
-| `archived`        | `true` when the entry is no longer live (its TTL has passed or the key is missing on-chain).                                  |
+| Field             | Meaning                                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------------------ |
+| `liveUntilLedger` | The ledger at which the entity's storage entry expires, or `null` if it hasn't been checked yet. |
+| `archived`        | `true` when the entry is no longer live (its TTL has passed or the key is missing on-chain).     |
 
 An archived entry must be restored (via `RestoreFootprint`) before the contract can read
 or write it, so treat `archived: true` as "not currently usable on-chain" even though the
