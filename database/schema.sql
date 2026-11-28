@@ -177,6 +177,29 @@ CREATE TABLE IF NOT EXISTS indexer_state (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- API keys for third-party integrators (src/services/apiKeys.ts). Only an
+-- HMAC-SHA256 of the key under API_KEY_HMAC_SECRET is stored; the plaintext is
+-- shown once by `npm run keys -- create` and never persisted or logged.
+-- monthly_quota is requests per UTC calendar month; NULL means no quota.
+CREATE TABLE IF NOT EXISTS api_keys (
+  id             BIGSERIAL PRIMARY KEY,
+  key_hash       TEXT NOT NULL UNIQUE,
+  name           TEXT NOT NULL,
+  contact        TEXT NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  revoked_at     TIMESTAMPTZ,
+  monthly_quota  BIGINT CHECK (monthly_quota IS NULL OR monthly_quota > 0)
+);
+
+-- Requests per key per UTC day. The API aggregates counts in memory and
+-- flushes them periodically as one upsert, so requests never wait on a write.
+CREATE TABLE IF NOT EXISTS api_key_usage (
+  key_id    BIGINT NOT NULL REFERENCES api_keys (id) ON DELETE CASCADE,
+  day       DATE NOT NULL,
+  requests  BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (key_id, day)
+);
+
 -- Runtime feature flags for incident response. Read by the API and indexer
 -- with a short cache TTL; changes are audited via updated_by / updated_at /
 -- note. Rows are upserted by the `flags set` CLI command.

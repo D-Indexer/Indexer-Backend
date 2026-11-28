@@ -24,6 +24,59 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/.well-known/stellar.toml`](#get-well-knownstellartoml)         | SEP-1 stellar.toml                    |
 | `GET`  | [`/federation`](#get-federation)                                  | SEP-2 federation lookup               |
 
+## API keys
+
+Read endpoints (`/folders`, `/portfolios`, `/templates`, `/creators`, `/stats`) work
+anonymously. Integrators such as explorers and wallets can be issued an API key so the
+operator can identify their traffic, contact them, and give them their own monthly quota.
+Send it as a bearer token:
+
+```bash
+curl -H "Authorization: Bearer fk_…" localhost:3000/templates
+```
+
+| Request                               | Result                                                              |
+| ------------------------------------- | ------------------------------------------------------------------- |
+| No `Authorization` header             | Served anonymously, as before                                       |
+| Valid key                             | Served; the request counts toward the key's usage                   |
+| Header not of the form `Bearer <key>` | `401` `Malformed Authorization header: expected "Bearer <API key>"` |
+| Token that isn't shaped like a key    | `401` `Malformed API key`                                           |
+| Unknown key                           | `401` `Invalid API key`                                             |
+| Revoked key                           | `401` `API key has been revoked`                                    |
+| Key over its monthly quota            | `429` (see below), with `Retry-After` in seconds                    |
+
+A key that is sent but invalid is rejected rather than served anonymously, so an
+integrator notices at once when their key stops working. Revocation takes effect within
+30 seconds (the API caches key lookups for that long).
+
+Quotas are requests per calendar month (UTC). Over quota the response is:
+
+```json
+{
+  "error": "Monthly quota of 100000 requests exceeded for this API key; it resets at 2026-12-01T00:00:00.000Z",
+  "requestId": "0b6f4c2e-5d1a-4c55-9a43-3b2a9f0e8d11"
+}
+```
+
+Usage is counted in memory per key and day and written to `api_key_usage` every 10
+seconds, so quota enforcement is approximate across several API replicas and a crash can
+lose up to one interval's counts.
+
+### Managing keys
+
+Requires `DATABASE_URL` and `API_KEY_HMAC_SECRET` (see
+[configuration](configuration.md#api-keys)); with the secret unset, API keys are disabled.
+
+```bash
+npm run keys -- create --name "Explorer Inc" --contact ops@explorer.example [--quota 100000]
+npm run keys -- list
+npm run keys -- revoke <id>
+```
+
+`create` prints the key once. Only an HMAC-SHA256 of it under `API_KEY_HMAC_SECRET` is
+stored, and the key is never logged, so a lost key can't be recovered: revoke it and
+create a new one.
+
 ## Moderation
 
 On-chain data can't be removed, but the API can choose what it promotes. Entries
@@ -90,16 +143,17 @@ Every error has the same shape:
 { "error": "Invalid Stellar address", "requestId": "0b6f4c2e-5d1a-4c55-9a43-3b2a9f0e8d11" }
 ```
 
-| Status | When                                                                 | `error` examples                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ------ | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | Invalid path parameter, query parameter or upload                    | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `Invalid CID`, `atLedger must be a number`, `atLedger is before the earliest indexed ledger`, `atLedger is after the last indexed ledger`, `Invalid cursor`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit` |
-| `404`  | Resource not indexed, or unknown route                               | `Folder not found`, `Portfolio not found`, `Template not found`, `Route not found` (also includes `path`)                                                                                                                                                                                                                                                                                                                                 |
-| `410`  | `/changes` only: cursor expired or unknown                           | `Cursor expired` (body includes `resync: true` and instructions)                                                                                                                                                                                                                                                                                                                                                                          |
-| `429`  | `/stream` only: too many concurrent connections                      | `Too many stream connections`                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `502`  | IPFS node unreachable or returned an error                           | `IPFS node unreachable`, `IPFS add failed with status 500`                                                                                                                                                                                                                                                                                                                                                                                |
-| `503`  | `/health` only: database unreachable; uploads: concurrency saturated | see below; uploads include a `Retry-After` header                                                                                                                                                                                                                                                                                                                                                                                         |
-| `504`  | IPFS node timed out (`IPFS_TIMEOUT_MS`)                              | `IPFS node timed out`                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `500`  | Anything unexpected; details are logged, not returned                | `Internal server error`                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Status | When                                                                       | `error` examples                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------ | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | Invalid path parameter, query parameter or upload                          | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `Invalid CID`, `atLedger must be a number`, `atLedger is before the earliest indexed ledger`, `atLedger is after the last indexed ledger`, `Invalid cursor`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit` |
+| `401`  | `Authorization` header sent with a malformed, unknown or revoked API key   | `Malformed API key`, `Invalid API key`, `API key has been revoked`                                                                                                                                                                                                                                                                                                                                                                        |
+| `404`  | Resource not indexed, or unknown route                                     | `Folder not found`, `Portfolio not found`, `Template not found`, `Route not found` (also includes `path`)                                                                                                                                                                                                                                                                                                                                 |
+| `410`  | `/changes` only: cursor expired or unknown                                 | `Cursor expired` (body includes `resync: true` and instructions)                                                                                                                                                                                                                                                                                                                                                                          |
+| `429`  | `/stream`: too many concurrent connections; API key over its monthly quota | `Too many stream connections`, `Monthly quota of … requests exceeded for this API key; …`                                                                                                                                                                                                                                                                                                                                                 |
+| `502`  | IPFS node unreachable or returned an error                                 | `IPFS node unreachable`, `IPFS add failed with status 500`                                                                                                                                                                                                                                                                                                                                                                                |
+| `503`  | `/health` only: database unreachable; uploads: concurrency saturated       | see below; uploads include a `Retry-After` header                                                                                                                                                                                                                                                                                                                                                                                         |
+| `504`  | IPFS node timed out (`IPFS_TIMEOUT_MS`)                                    | `IPFS node timed out`                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `500`  | Anything unexpected; details are logged, not returned                      | `Internal server error`                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 ### Request IDs
 

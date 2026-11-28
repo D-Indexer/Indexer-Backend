@@ -4,6 +4,8 @@ import { createFolderRoutes } from './routes/folder.routes';
 import { createTemplateRoutes } from './routes/template.routes';
 import { createCreatorRoutes } from './routes/creator.routes';
 import { createStatsRoutes } from './routes/stats.routes';
+import { createApiKeyAuth } from './middleware/apiKey';
+import { logger } from './utils/logger';
 import { createUploadRoutes } from './routes/upload.routes';
 import { createPortfolioRoutes } from './routes/portfolio.routes';
 import { createHealthRoutes } from './routes/health.routes';
@@ -93,13 +95,31 @@ export function createApp(deps: AppDependencies) {
     });
   });
 
-  app.use('/folders', createFolderRoutes(deps));
   // Read-model routes query the database directly through an explicit handle.
   const db = deps.db as Queryable;
-  app.use('/templates', createTemplateRoutes({ db }));
-  app.use('/creators', createCreatorRoutes({ db }));
-  app.use('/stats', createStatsRoutes({ db }));
-  app.use('/portfolios', createPortfolioRoutes(deps));
+
+  // Optional API keys on read endpoints: anonymous requests keep working, a
+  // valid key attributes and counts usage, an invalid one gets 401. Disabled
+  // when API_KEY_HMAC_SECRET is unset.
+  const apiKeyAuth = env.API_KEY_HMAC_SECRET
+    ? createApiKeyAuth({
+        db,
+        secret: env.API_KEY_HMAC_SECRET,
+        onFlushError: (err) =>
+          logger.warn('API key usage flush failed; will retry', {
+            error: err instanceof Error ? err.message : String(err),
+          }),
+      })
+    : null;
+  // Exposed so the server can flush pending usage on shutdown.
+  app.locals['apiKeyAuth'] = apiKeyAuth;
+  const read: RequestHandler[] = apiKeyAuth ? [apiKeyAuth.middleware] : [];
+
+  app.use('/folders', ...read, createFolderRoutes(deps));
+  app.use('/templates', ...read, createTemplateRoutes({ db }));
+  app.use('/creators', ...read, createCreatorRoutes({ db }));
+  app.use('/stats', ...read, createStatsRoutes({ db }));
+  app.use('/portfolios', ...read, createPortfolioRoutes(deps));
   app.use('/upload', requireFeature(featureFlags, ROUTE_FLAGS.uploads), createUploadRoutes(deps));
   app.use('/health', createHealthRoutes(deps));
 
