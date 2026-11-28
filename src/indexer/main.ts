@@ -1,46 +1,37 @@
 import 'dotenv/config';
-import { getEnv } from '../config/env';
-import pool, { waitForDatabase } from '../db/client';
+import { createContainer } from '../container';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
-import { initErrorReporter } from '../utils/errorReporter';
-import { installProcessHandlers } from '../utils/process';
-import { createRpcClient, redactUrl } from './rpc';
+import { redactUrl } from './rpc';
 import { createIndexer } from './stellar';
+import { createHealthServer } from './httpHealth';
 
 /** Indexer process entrypoint: `npm run start:indexer` (or `dev:indexer`). */
 async function main(): Promise<void> {
-  const env = getEnv();
-  initErrorReporter({ dsn: env.ERROR_TRACKING_DSN, environment: env.NODE_ENV, release: env.RELEASE_VERSION });
+  const container = createContainer();
+  const { db, env } = container;
 
-  await waitForDatabase(pool, {
-    timeoutMs: env.DB_WAIT_TIMEOUT_MS,
-    maxDelayMs: env.DB_WAIT_MAX_DELAY_MS,
-  });
-  await migrate(pool);
+  await migrate(db);
 
-  const rpc = createRpcClient({ url: env.STELLAR_RPC_URL, timeoutMs: env.STELLAR_RPC_TIMEOUT_MS });
   logger.info('Connecting indexer', { rpc: redactUrl(env.STELLAR_RPC_URL) });
 
-  const indexer = createIndexer({
-    db: pool,
-    rpc,
-    config: {
-      contractId: env.FOLDER_CONTRACT_ID,
-      pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
-      pageLimit: env.INDEXER_PAGE_LIMIT,
-      startLedger: env.INDEXER_START_LEDGER,
-      onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
-      maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
-    },
-  });
+  const indexer = createIndexer(container.deps);
+
+  // Start the cache LISTEN connection so this process receives NOTIFY messages
+  // and invalidates its in-process cache. The indexer publishes NOTIFY messages
+  // after applying events (see the publish point in src/indexer/stellar.ts);
+  // if the LISTEN connection is down, cache staleness is bounded by the TTL.
+  await startCacheListener();
+
+  health.start();
 
   const shutdown = async (signal: string) => {
     logger.info('Shutdown requested', { signal });
     const timeout = setTimeout(() => process.exit(1), env.SHUTDOWN_TIMEOUT_MS);
     timeout.unref();
+    await health.stop();
     await indexer.stop();
-    await pool.end();
+    await db.end();
     process.exit(0);
   };
 

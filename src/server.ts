@@ -1,14 +1,21 @@
 import 'dotenv/config';
 import { createApp } from './app';
-import { getEnv } from './config/env';
-import pool from './db/client';
+import { createContainer } from './container';
 import { logger } from './utils/logger';
 import { installProcessHandlers } from './utils/process';
 import { initErrorReporter, getErrorReporter } from './utils/errorReporter';
 
-/** API process entrypoint. The indexer runs separately: see src/indexer/main.ts. */
-const env = getEnv();
-const app = createApp(env);
+/**
+ * API process entrypoint.
+ *
+ * This is one of the only modules allowed to read environment variables and
+ * start I/O. Everything else receives its dependencies explicitly from the
+ * composition root (`src/container.ts`). The indexer runs separately: see
+ * `src/indexer/main.ts`.
+ */
+const container = createContainer();
+const { env, pool } = container;
+const app = createApp(container.deps);
 
 const errorReporter = initErrorReporter({
   dsn: env.ERROR_TRACKING_DSN,
@@ -21,7 +28,15 @@ const server = app.listen(env.PORT, () => {
   logger.info('Server started', { port: env.PORT, nodeEnv: env.NODE_ENV });
 });
 
+let shuttingDown = false;
+
 async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) {
+    logger.info('Shutdown already in progress', { signal });
+    return;
+  }
+  shuttingDown = true;
+
   logger.info('Shutdown requested', { signal });
 
   const timeout = setTimeout(() => {
@@ -37,7 +52,16 @@ async function shutdown(signal: string): Promise<void> {
       process.exit(1);
     }
 
-    await pool.end();
+    try {
+      await pool.end();
+    } catch (poolErr) {
+      logger.error('Pool shutdown failed', {
+        error: poolErr instanceof Error ? poolErr.message : String(poolErr),
+      });
+      clearTimeout(timeout);
+      process.exit(1);
+    }
+
     clearTimeout(timeout);
     logger.info('Shutdown complete');
     process.exit(0);

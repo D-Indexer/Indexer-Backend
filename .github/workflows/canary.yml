@@ -1,0 +1,114 @@
+name: Indexing Latency Canary
+
+# End-to-end indexing latency canary.
+#
+# Periodically funds a throwaway account via Friendbot, performs a cheap
+# contract action, records the ledger, and polls the deployed API until the
+# change is visible. Reports per-stage latency (submit -> ledger close -> API
+# visible) and fails the job if total latency exceeds the configured threshold.
+#
+# See docs/operations.md for details and cleanup notes.
+
+on:
+  schedule:
+    # Every 30 minutes by default. Adjust the cron expression to change the
+    # cadence (e.g. "0 * * * *" for hourly). GitHub may delay scheduled runs
+    # during periods of high load.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: "Target API base URL (overrides CANARY_API_URL)"
+        required: false
+        default: ""
+      threshold_ms:
+        description: "Fail if total latency exceeds this many milliseconds"
+        required: false
+        default: "120000"
+      dry_run:
+        description: "Dry run: skip on-chain submission and API polling"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  # Never run two canaries at once; a stuck run should not pile up.
+  group: canary
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Indexing latency canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      # Optional. If unset, the script falls back to its default target.
+      CANARY_API_URL: ${{ github.event.inputs.api_url || vars.CANARY_API_URL }}
+      CANARY_THRESHOLD_MS: ${{ github.event.inputs.threshold_ms || vars.CANARY_THRESHOLD_MS || '120000' }}
+      CANARY_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+      # Optional metrics endpoint. No secrets are required for the canary to
+      # run; this is only used to push latency samples when configured.
+      CANARY_METRICS_URL: ${{ vars.CANARY_METRICS_URL }}
+      # Network used for Friendbot funding and contract submission.
+      CANARY_NETWORK: ${{ vars.CANARY_NETWORK || 'testnet' }}
+      CANARY_FRIENDBOT_URL: ${{ vars.CANARY_FRIENDBOT_URL || 'https://friendbot.stellar.org' }}
+      CANARY_RPC_URL: ${{ vars.CANARY_RPC_URL || 'https://soroban-testnet.stellar.org' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run canary
+        id: canary
+        run: |
+          set -o pipefail
+          npx tsx scripts/canary.ts 2>&1 | tee canary-output.log
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Indexing latency canary"
+            echo ""
+            echo "- Target API: \`${CANARY_API_URL:-<default>}\`"
+            echo "- Network: \`${CANARY_NETWORK}\`"
+            echo "- Threshold: \`${CANARY_THRESHOLD_MS} ms\`"
+            echo "- Dry run: \`${CANARY_DRY_RUN}\`"
+            echo ""
+            if [ -f canary-output.log ]; then
+              echo "### Canary output"
+              echo ""
+              echo '```'
+              cat canary-output.log
+              echo '```'
+            fi
+            echo ""
+            echo "### Cleanup"
+            echo ""
+            echo "Each run uses a freshly generated throwaway account funded via"
+            echo "Friendbot. No persistent state is created on the API side; the"
+            echo "account is abandoned after the run and requires no manual cleanup."
+            echo "See docs/operations.md for details."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload canary log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-log
+          path: canary-output.log
+          if-no-files-found: ignore
+          retention-days: 7
