@@ -46,6 +46,14 @@ export const envVarMeta: Record<keyof AppEnv, EnvVarMeta> = {
     secret: true,
     required: true,
   },
+  DATABASE_DIRECT_URL: {
+    description:
+      'Direct (non-pooled) PostgreSQL connection string for session-scoped work: LISTEN, ' +
+      'migrations and any session-level locks. Set this when DATABASE_URL points at PgBouncer ' +
+      'in transaction mode. Falls back to DATABASE_URL. See docs/database-connections.md.',
+    example: 'postgres://postgres:postgres@db-primary:5432/folder',
+    secret: true,
+  },
   STELLAR_RPC_URL: {
     description: 'Soroban RPC endpoint used to read contract state and events.',
     example: TESTNET_RPC_URL,
@@ -199,6 +207,13 @@ export const envSchema = z
       .string()
       .min(1, 'DATABASE_URL is required')
       .describe(envVarMeta.DATABASE_URL.description),
+    DATABASE_DIRECT_URL: z
+      .union([
+        z.literal('').transform(() => undefined),
+        z.string().regex(/^postgres(ql)?:\/\//, 'DATABASE_DIRECT_URL must be a postgres:// URL'),
+      ])
+      .optional()
+      .describe(envVarMeta.DATABASE_DIRECT_URL.description),
     STELLAR_RPC_URL: z
       .string({ required_error: `STELLAR_RPC_URL is required (testnet: ${TESTNET_RPC_URL})` })
       .url('STELLAR_RPC_URL must be a valid URL')
@@ -353,6 +368,18 @@ export function getApiDatabaseUrl(env: AppEnv): string {
 /** Connection string for the indexer process (falls back to DATABASE_URL). */
 export function getIndexerDatabaseUrl(env: AppEnv): string {
   return env.INDEXER_DATABASE_URL ?? env.DATABASE_URL;
+}
+
+/**
+ * Connection string for session-required connections (LISTEN, migrations,
+ * session-level advisory locks). These must never go through a transaction-
+ * mode pooler. Falls back to DATABASE_URL when no direct URL is configured.
+ * See docs/database-connections.md.
+ */
+export function getDirectDatabaseUrl(
+  env: Pick<AppEnv, 'DATABASE_URL' | 'DATABASE_DIRECT_URL'>
+): string {
+  return env.DATABASE_DIRECT_URL ?? env.DATABASE_URL;
 }
 
 /** Split a comma-separated endpoint list, dropping blanks and duplicates. */

@@ -1,5 +1,5 @@
 import { Pool, type PoolConfig } from 'pg';
-import { getEnv } from '../config/env';
+import { getEnv, getDirectDatabaseUrl } from '../config/env';
 import cache from '../cache';
 
 export type PoolEnv = Pick<
@@ -101,7 +101,9 @@ async function connectListener(): Promise<void> {
     return;
   }
 
-  const client = new Client({ connectionString: env.DATABASE_URL });
+  // LISTEN is session state: it must use a direct connection, never a
+  // transaction-mode PgBouncer (see docs/database-connections.md).
+  const client = new Client({ connectionString: getDirectDatabaseUrl(env) });
   listenClient = client;
 
   client.on('notification', (msg) => {

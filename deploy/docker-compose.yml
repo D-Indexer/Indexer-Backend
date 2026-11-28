@@ -191,6 +191,33 @@ services:
       timeout: 5s
       retries: 10
 
+  # PgBouncer in transaction mode in front of Postgres, mirroring managed
+  # deployments. Only started with `docker compose --profile pgbouncer up`.
+  # Point DATABASE_URL at pgbouncer:6432 and DATABASE_DIRECT_URL at
+  # postgres:5432 to reproduce production pooling locally; see
+  # docs/database-connections.md for which connections need the direct URL.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.23.1-p3
+    profiles: ['pgbouncer']
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: folder
+      # Local-only default; the profile is for development and testing.
+      DB_PASSWORD: ${PGBOUNCER_DB_PASSWORD:-folder}
+      DB_NAME: folder
+      POOL_MODE: transaction
+      AUTH_TYPE: scram-sha-256
+      # Small pool so session-state bugs surface (clients share server conns).
+      DEFAULT_POOL_SIZE: 5
+      MAX_CLIENT_CONN: 200
+    ports:
+      - '127.0.0.1:6432:5432'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   ipfs-data:

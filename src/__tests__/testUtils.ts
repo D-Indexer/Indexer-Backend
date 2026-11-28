@@ -51,6 +51,18 @@ function getDatabaseUrl(): string {
   );
 }
 
+/**
+ * Direct (non-pooled) URL for DDL: schema creation/teardown must not go
+ * through a transaction-mode PgBouncer. Falls back to the regular URL.
+ */
+function getDirectDatabaseUrl(): string {
+  return (
+    process.env.TEST_DATABASE_DIRECT_URL ||
+    process.env.DATABASE_DIRECT_URL ||
+    getDatabaseUrl()
+  );
+}
+
 function quoteIdent(ident: string): string {
   return `"${ident.replace(/"/g, '""')}"`;
 }
@@ -61,7 +73,7 @@ function quoteIdent(ident: string): string {
  */
 export async function setupWorkerSchema(): Promise<string> {
   const schema = getWorkerSchemaName();
-  const client = new Client({ connectionString: getDatabaseUrl() });
+  const client = new Client({ connectionString: getDirectDatabaseUrl() });
   await client.connect();
   try {
     await client.query(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`);
@@ -80,7 +92,7 @@ export async function setupWorkerSchema(): Promise<string> {
  */
 export async function teardownWorkerSchema(): Promise<void> {
   const schema = getWorkerSchemaName();
-  const client = new Client({ connectionString: getDatabaseUrl() });
+  const client = new Client({ connectionString: getDirectDatabaseUrl() });
   await client.connect();
   try {
     await client.query(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`);
@@ -99,7 +111,10 @@ export function createWorkerPool(extraConfig: Record<string, unknown> = {}): Poo
     connectionString: getDatabaseUrl(),
     ...extraConfig,
   });
-  // Ensure every new connection uses the worker schema.
+  // Ensure every new connection uses the worker schema. NOTE: this is a
+  // session-level SET, which does not stick behind PgBouncer in transaction
+  // mode; the `pgbouncer` CI job sets the schema as a role default instead
+  // (ALTER ROLE ... SET search_path). See docs/database-connections.md.
   pool.on('connect', (client: PoolClient) => {
     client.query(`SET search_path TO ${quoteIdent(schema)}`).catch(() => {
       /* surfaced on first real query */

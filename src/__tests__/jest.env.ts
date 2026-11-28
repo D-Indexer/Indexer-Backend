@@ -14,6 +14,12 @@ const baseDatabaseUrl =
 process.env.DATABASE_URL = baseDatabaseUrl;
 process.env.TEST_DATABASE_URL = baseDatabaseUrl;
 
+// Optional direct (non-pooled) URL used for DDL and LISTEN when the suite runs
+// through PgBouncer in transaction mode (see the `pgbouncer` CI job).
+if (process.env.TEST_DATABASE_DIRECT_URL) {
+  process.env.DATABASE_DIRECT_URL = process.env.TEST_DATABASE_DIRECT_URL;
+}
+
 // The schema name is derived from the Jest worker id by the global setup.
 // Expose the worker id (when available) so test utilities can build the
 // per-worker schema name consistently.

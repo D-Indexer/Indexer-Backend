@@ -60,11 +60,15 @@ export async function migrate(db: Pick<Pool, 'query'>): Promise<void> {
 if (require.main === module) {
   // Imported lazily so loading this module (e.g. in tests) doesn't need env.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const pool: Pool = require('./client').default;
+  const { Pool: PgPool } = require('pg');
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { waitForDatabase } = require('./client');
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { env } = require('../config/env');
+  const { getEnv, getDirectDatabaseUrl } = require('../config/env');
+  const env = getEnv();
+  // Migrations run multi-statement DDL and must not go through a
+  // transaction-mode pooler: use the direct URL (falls back to DATABASE_URL).
+  const pool: Pool = new PgPool({ connectionString: getDirectDatabaseUrl(env), max: 1 });
   waitForDatabase(pool, {
     timeoutMs: env.DB_WAIT_TIMEOUT_MS,
     maxDelayMs: env.DB_WAIT_MAX_DELAY_MS,

@@ -373,6 +373,14 @@ re-enable the flag once the incident is over.
 
 ## Database
 
+### Connection pooling (PgBouncer)
+
+If `DATABASE_URL` goes through PgBouncer in transaction mode, set
+`DATABASE_DIRECT_URL` to a direct Postgres URL. LISTEN connections, the indexer
+lock and migrations use that URL. See
+[database-connections.md](database-connections.md) for the full audit and the
+rules for new code.
+
 ### Startup and waiting for Postgres
 
 The indexer and the migrate script wait for Postgres instead of crashing when it isn't up

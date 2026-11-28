@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { Client, Pool } from 'pg';
+import { getDirectDatabaseUrl } from '../config/env';
 import { createContainer } from '../container';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
@@ -11,7 +13,14 @@ async function main(): Promise<void> {
   const container = createContainer();
   const { db, env } = container;
 
-  await migrate(db);
+  // Migrations are session-required: run them on a short-lived direct
+  // connection, never through a transaction-mode pooler.
+  const migrationPool = new Pool({ connectionString: getDirectDatabaseUrl(env), max: 1 });
+  try {
+    await migrate(migrationPool);
+  } finally {
+    await migrationPool.end();
+  }
 
   logger.info('Connecting indexer', { rpc: redactUrl(env.STELLAR_RPC_URL) });
 
@@ -26,10 +35,14 @@ async function main(): Promise<void> {
   health.start();
 
   // Hold the indexer lock for the life of the process so `retry-rejected`
-  // refuses to write the read model concurrently.
-  const lockClient = await pool.connect();
+  // refuses to write the read model concurrently. This is a session-level
+  // lock, so it needs a dedicated direct connection: through PgBouncer in
+  // transaction mode the lock would land on a shared server connection and
+  // either leak to other clients or vanish. See docs/database-connections.md.
+  const lockClient = new Client({ connectionString: getDirectDatabaseUrl(env) });
+  await lockClient.connect();
   if (!(await tryLockIndexer(lockClient))) {
-    lockClient.release();
+    await lockClient.end();
     throw new Error('Another indexer process holds the indexer lock');
   }
 
@@ -40,6 +53,7 @@ async function main(): Promise<void> {
     await health.stop();
     await indexer.stop();
     await db.end();
+    await lockClient.end().catch(() => undefined);
     process.exit(0);
   };
 
