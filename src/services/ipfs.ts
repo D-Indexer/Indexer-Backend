@@ -1,4 +1,5 @@
 import { HttpError } from '../http/errors';
+import { getContext, recordTiming } from '../utils/context';
 
 export interface IpfsServiceDeps {
   apiUrl: string;

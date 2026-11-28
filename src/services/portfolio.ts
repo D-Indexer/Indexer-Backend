@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import { Portfolio } from '../types';
 
 type PortfolioRow = {
+  token_id: string | number;
   owner: string;
   template_id: string;
   ipfs_cid: string;
@@ -14,6 +15,7 @@ export const GET_PORTFOLIO_SQL =
 
 function mapPortfolio(row: PortfolioRow): Portfolio {
   return {
+    tokenId: Number(row.token_id),
     owner: row.owner,
     templateId: Number(row.template_id),
     ipfsCid: row.ipfs_cid,
@@ -67,7 +69,7 @@ function decodeVersionCursor(cursor: string): number {
 
 export async function getPortfolio(owner: string): Promise<Portfolio | null> {
   const { rows } = await pool.query<PortfolioRow>(
-    'SELECT owner, template_id, ipfs_cid, minted_at, updated_at FROM portfolios WHERE owner = $1',
+    'SELECT token_id, owner, template_id, ipfs_cid, minted_at, updated_at FROM portfolios WHERE owner = $1',
     [owner]
   );
   const row = rows[0];

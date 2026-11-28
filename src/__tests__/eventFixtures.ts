@@ -5,6 +5,7 @@ import fixture from './fixtures/testnet-events.json';
 export const TESTNET_CONTRACT = 'CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV';
 export const OWNER = 'GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM';
 export const ADMIN = 'GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ';
+export const RECIPIENT = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
 
 /** Real events emitted by the deployed testnet contract. */
 export const testnetEvents: RawEvent[] = fixture.events;

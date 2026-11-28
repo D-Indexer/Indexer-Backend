@@ -242,6 +242,10 @@ export const envSchema = z
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+    PORTFOLIO_TRANSFERS_ENABLED: z
+      .enum(['true', 'false', '1', '0'])
+      .default('false')
+      .transform((value) => value === 'true' || value === '1'),
   })
   .superRefine((env, ctx) => {
     const corsOrigin = env.CORS_ORIGIN;

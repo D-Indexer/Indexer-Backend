@@ -25,9 +25,27 @@ export type DecodedEvent =
   | { topic: 'tmpl_reg'; templateId: number; metadataUri: string; creator: string | null }
   | { topic: 'tmpl_set'; owner: string; templateId: number }
   | { topic: 'port_mint'; owner: string; templateId: number; ipfsCid: string }
-  | { topic: 'port_upd'; owner: string; ipfsCid: string };
+  | { topic: 'port_upd'; owner: string; ipfsCid: string }
+  | { topic: 'port_transfer'; tokenId: number; from: string; to: string };
 
 export type KnownTopic = DecodedEvent['topic'];
+
+/**
+ * Feature flag for portfolio ownership transfers (issue #265).
+ *
+ * The transfer event shape is still being agreed with Indexer-Contract; until
+ * it is finalised the decoder is gated so the event is stored as `ignored`
+ * rather than risking a mis-decoded ownership change. Set
+ * `PORTFOLIO_TRANSFERS_ENABLED=true` (or `1`) to enable it.
+ */
+export function portfolioTransfersEnabled(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  const raw = env.PORTFOLIO_TRANSFERS_ENABLED;
+  if (raw === undefined) return false;
+  const value = raw.trim().toLowerCase();
+  return value === 'true' || value === '1';
+}
 
 function parseScVal(base64: string, what: string): xdr.ScVal {
   try {

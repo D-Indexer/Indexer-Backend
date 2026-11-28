@@ -16,6 +16,8 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/templates/:id`](#get-templatesid)             | One template                          |
 | `GET`  | [`/templates/:id/versions`](#get-templatesidversions) | Template metadata history         |
 | `POST` | [`/upload`](#post-upload)                        | Add and pin a file on IPFS            |
+| `GET`  | [`/.well-known/stellar.toml`](#get-well-knownstellartoml) | SEP-1 stellar.toml          |
+| `GET`  | [`/federation`](#get-federation)                 | SEP-2 federation lookup               |
 
 ## Moderation
 
