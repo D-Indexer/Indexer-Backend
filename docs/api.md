@@ -7,8 +7,11 @@ responses from the local stack indexing the testnet contract.
 | ------ | ------------------------------------------------ | ------------------------------------- |
 | `GET`  | [`/`](#get-)                                     | Service banner                        |
 | `GET`  | [`/health`](#get-health)                         | API + database health, indexer status |
+| `GET`  | [`/folders`](#get-folders)                       | Folders ordered by claim time         |
 | `GET`  | [`/folders/:address`](#get-foldersaddress)       | Folder claimed by an address          |
 | `GET`  | [`/folders/name/:name`](#get-foldersnamename)    | Folder by name                        |
+| `POST` | [`/folders/lookup`](#post-folderslookup)         | Batch folder lookup by address        |
+| `GET`  | [`/portfolios`](#get-portfolios)                 | Portfolios ordered by mint/update time |
 | `GET`  | [`/portfolios/:address`](#get-portfoliosaddress) | Portfolio NFT minted by an address    |
 | `GET`  | [`/portfolios/:address/versions`](#get-portfoliosaddressversions) | Portfolio version history |
 | `GET`  | [`/portfolios/by-cid/:cid`](#get-portfoliosby-cidcid) | Portfolios referencing a CID      |
@@ -141,6 +144,38 @@ Pages are ordered newest version first. An invalid `cursor` returns `400`
 { "name": "D-Indexer-Backend", "status": "ok", "docs": "/health" }
 ```
 
+## `GET /health/live`
+
+Liveness probe: `200` whenever the process is up and the event loop answers. It
+performs no I/O, so a database or Kubo outage never makes an orchestrator restart
+a healthy pod. The image's `HEALTHCHECK` uses it.
+
+```json
+{ "status": "ok", "requestId": "03a1e532-cabc-4f9a-bfd7-b7242bb46db2" }
+```
+
+## `GET /health/ready`
+
+Readiness probe: `200` only when the API can serve traffic — not shutting down,
+the database answers within `HEALTHCHECK_DATABASE_TIMEOUT_MS`, and the Kubo node
+answers `/api/v0/version` within `HEALTHCHECK_IPFS_TIMEOUT_MS`. Results are cached
+for `HEALTHCHECK_CACHE_MS` (~1 s) so frequent probes cannot storm dependencies.
+
+```json
+{
+  "status": "ok",
+  "dependencies": {
+    "db": { "status": "ok", "latencyMs": 3 },
+    "ipfs": { "status": "ok", "latencyMs": 11 }
+  },
+  "requestId": "03a1e532-cabc-4f9a-bfd7-b7242bb46db2"
+}
+```
+
+`503` when a dependency is unreachable (`status: "degraded"`, the failing entry
+reports `"status": "unreachable"`), and `503` with `status: "shutting_down"` once
+the process received `SIGTERM`/`SIGINT` (dependencies are reported as `skipped`).
+
 ## `GET /health`
 
 `200` when the database responds. The `indexer` block is informational and doesn't
@@ -154,18 +189,30 @@ change the status code; the indexer process has its own healthcheck
   "indexer": {
     "status": "ok",
     "stale": false,
+    "lagSeconds": 12.4,
     "lastLedger": 5654521,
     "lastSuccessAt": "2026-11-10T07:37:30.225Z",
-    "lastError": null
+    "lastError": null,
+    "leader": {
+      "instanceId": "indexer-1:42",
+      "since": "2026-11-10T07:30:00.000Z",
+      "heartbeatAt": "2026-11-10T07:37:30.225Z"
+    }
   },
   "requestId": "03a1e532-cabc-4f9a-bfd7-b7242bb46db2"
 }
 ```
 
 - `indexer.status`: `ok`, `error` (last poll failed, retrying with backoff),
-  `retention_gap` (halted, [needs an operator](operations.md#retention-gap)) or `not_started`.
+  `retention_gap` (halted, [needs an operator](operations.md#retention-gap)),
+  `cursor_invalid` (halted, [needs an operator](operations.md#invalid-cursor)) or `not_started`.
 - `indexer.stale`: no successful poll within `INDEXER_STALE_AFTER_MS`.
+- `indexer.lagSeconds`: seconds since the last successful poll, computed by the
+  database (`NOW() - updated_at`), so a skewed API host clock cannot change it.
+  `null` when the indexer has never succeeded.
 - `indexer.lastLedger`: the ledger the indexer has scanned up to.
+- `indexer.cursorRecovered`: `null`, or `{ invalidCursor, resumedAt, at }` when the indexer
+  replaced a corrupt saved cursor with a replay from `last_ledger`.
 
 `503` when the database is unreachable:
 
@@ -176,6 +223,7 @@ change the status code; the indexer process has its own healthcheck
   "indexer": {
     "status": "not_started",
     "stale": true,
+    "lagSeconds": null,
     "lastLedger": null,
     "lastSuccessAt": null,
     "lastError": null
@@ -183,6 +231,10 @@ change the status code; the indexer process has its own healthcheck
   "requestId": "…"
 }
 ```
+
+`503` with `status: "shutting_down"` once the process received `SIGTERM`/`SIGINT`:
+readiness fails immediately so load balancers stop routing new requests, while
+in-flight requests (e.g. an upload) finish before `SHUTDOWN_FORCE_CLOSE_MS`.
 
 ## `GET /folders/:address`
 
@@ -217,6 +269,58 @@ curl localhost:3000/folders/name/smoke-1794262900.folder
 
 Errors: `400` invalid name, `404` `Folder not found`. Hidden entries are still returned,
 with `moderation: { hidden: true }`.
+
+## `GET /folders`
+
+Keyset-paginated list of folders ordered by `claimed_at` (ascending, ties broken by owner).
+Hidden (moderated) folders are excluded.
+
+Query params:
+
+- `order` — only `claimed_at` (default).
+- `limit` — 1–100, default 20.
+- `cursor` — opaque cursor from the previous page's `nextCursor`.
+
+```bash
+curl 'localhost:3000/folders?limit=2'
+```
+
+```json
+{
+  "items": [
+    {
+      "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+      "name": "smoke-1794262900.folder",
+      "templateId": 1,
+      "claimedAt": "2026-11-09T22:22:27.000Z",
+      "updatedAt": "2026-11-09T22:23:07.000Z"
+    }
+  ],
+  "nextCursor": "djE6Y2xhaW1lZF9hdDoyMDI2LTExLTA5VDIyOjIyOjI3LjAwMFo6R0FQQU1UVFZIQjdSWjVEUUhFSU5aTjNHUVlSQ1hYV05DUU5RU1k1WUFVNktSUVVZWDJRSlQyQ00"
+}
+```
+
+Pass `nextCursor` back as `cursor` to get the next page; `nextCursor` is `null` on the last
+page. Cursors are opaque and versioned: a tampered, malformed, or wrong-`order` cursor
+returns `400 Invalid cursor`. Pagination is stable under concurrent inserts (no duplicates
+or gaps) because the cursor is a strict `(claimed_at, owner)` comparison.
+
+Errors: `400` invalid `order`, `limit`, or `cursor`.
+
+## `GET /portfolios`
+
+Keyset-paginated list of portfolios ordered by `minted_at` (default) or `updated_at`
+(ascending, ties broken by owner). Hidden (moderated) portfolios are excluded.
+
+Query params: `order` (`minted_at` | `updated_at`), `limit` (1–100, default 20), `cursor`.
+Response shape is `{ "items": [...], "nextCursor": "…" | null }` with the same item shape as
+[`GET /portfolios/:address`](#get-portfoliosaddress).
+
+```bash
+curl 'localhost:3000/portfolios?order=updated_at&limit=20'
+```
+
+Errors: `400` invalid `order`, `limit`, or `cursor`.
 
 ## `GET /portfolios/:address`
 
@@ -412,6 +516,68 @@ the response still includes the CID but adds `"contentRemoved": true`:
 
 The flag is only present when `true`. The CID is never rewritten: the on-chain reference
 cannot be removed, only the content behind it is no longer served or pinned.
+
+## `POST /folders/lookup`
+
+Resolve up to 100 folder owners in one request. The body takes `addresses`: an array of
+1–100 Stellar addresses (`G...` or `C...`). Duplicates are removed before the lookup, and
+all owners are resolved with a single SQL query. The response is a map keyed by address;
+owners without a folder map to `null`.
+
+```bash
+curl -X POST localhost:3000/folders/lookup \
+  -H 'content-type: application/json' \
+  -d '{"addresses":["GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM","GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"]}'
+```
+
+```json
+{
+  "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM": {
+    "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+    "name": "smoke-1794262900.folder",
+    "templateId": 1,
+    "claimedAt": "2026-11-09T22:22:27.000Z",
+    "updatedAt": "2026-11-09T22:23:07.000Z"
+  },
+  "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5": null
+}
+```
+
+Errors: `400` when `addresses` is missing, empty, longer than 100, or contains invalid
+entries. Every invalid entry is reported individually in `details`:
+
+```json
+{
+  "error": "Invalid Stellar address",
+  "details": [{ "index": 1, "address": "not-an-address", "message": "Invalid Stellar address" }],
+  "requestId": "…"
+}
+```
+
+## `POST /portfolios/lookup`
+
+Same contract as [`POST /folders/lookup`](#post-folderslookup), returning portfolios keyed
+by owner address with `null` for owners without a minted portfolio.
+
+```bash
+curl -X POST localhost:3000/portfolios/lookup \
+  -H 'content-type: application/json' \
+  -d '{"addresses":["GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM"]}'
+```
+
+```json
+{
+  "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM": {
+    "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+    "templateId": 1,
+    "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
+    "mintedAt": "2026-11-09T22:23:07.000Z",
+    "updatedAt": "2026-11-09T22:23:52.000Z"
+  }
+}
+```
+
+Errors: `400` as above.
 
 ## `GET /templates`
 

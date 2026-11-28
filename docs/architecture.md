@@ -38,7 +38,7 @@ the API never talks to the RPC.
 
 | Path                                            | Responsibility                                                                                                    |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `src/indexer/rpc.ts`                            | JSON-RPC client for `getEvents` / `getHealth`: timeouts, retries with backoff, URL redaction                      |
+| `src/indexer/rpc.ts`                            | JSON-RPC client for `getEvents` / `getHealth` / `getVersionInfo`: timeouts, retries with backoff, URL redaction |
 | `src/indexer/decode.ts`                         | Decode raw events (Symbol topic, ScVec data) into typed objects                                                   |
 | `src/indexer/handlers.ts`                       | Apply one decoded event to the read model                                                                         |
 | `src/indexer/stellar.ts`                        | Poll loop, page transactions, cursor, retention-gap handling                                                      |
@@ -60,9 +60,9 @@ position; trailing fields are ignored because the contract only appends.
 
 | Topic       | Data (in order)                                                    | Effect                                                 |
 | ----------- | ------------------------------------------------------------------ | ------------------------------------------------------ |
-| `init`      | `admin`                                                            | insert into `admins`                                   |
-| `adm_add`   | `admin`, `new_admin`                                               | insert `new_admin` into `admins`                       |
-| `adm_rm`    | `admin`, `target`                                                  | delete `target` from `admins`                          |
+| `init`      | `admin`                                                            | insert into `admins`; append `admin_changes`           |
+| `adm_add`   | `admin`, `new_admin`                                               | insert `new_admin` into `admins`; append `admin_changes` |
+| `adm_rm`    | `admin`, `target`                                                  | delete `target` from `admins`; append `admin_changes`  |
 | `folder_cl` | `owner`, `folder_name`                                             | upsert `folders`                                       |
 | `tmpl_reg`  | `template_id: u32`, `metadata_uri`, `creator` (appended; optional) | upsert `templates`; append `template_versions`         |
 | `tmpl_set`  | `owner`, `template_id: u32`                                        | set `folders.template_id` and `portfolios.template_id` |
@@ -89,6 +89,11 @@ To support a new event: add a case to `decode.ts` and `handlers.ts`, a table or 
    model. For each applied event, one `outbox` row is written per registered subscriber
    type. The new cursor is written in the same transaction.
 4. **Repeat** while pages are full, then sleep `INDEXER_POLL_INTERVAL_MS`.
+5. **Enrich transactions** (unless `INDEXER_ENRICH_TRANSACTIONS=false`). After each tick,
+   up to `INDEXER_ENRICH_BATCH_SIZE` `tx_hash` values in `contract_events` that have no
+   `transactions` row are fetched with `getTransaction`, decoded with the SDK (fee-bump and
+   muxed sources included) and stored. `indexer_state.enrichment_cursor` tracks the last
+   hash processed. Enrichment failures never affect event indexing.
 
 What this guarantees:
 
@@ -166,8 +171,9 @@ events. The outbox is the delivery path for external systems.
 
 | Table             | Key                     | Source                                                                                         |
 | ----------------- | ----------------------- | ---------------------------------------------------------------------------------------------- |
-| `contract_events` | RPC event id            | every event: ledger, close time, tx hash, raw topic/value XDR, decoded data, status, error     |
+| `contract_events` | RPC event id            | every event: ledger, close time, tx hash, raw topic/value XDR, decoded data, status, error, TOID (`toid`, `tx_order`, `op_order`, `event_index`) |
 | `folders`         | `owner` (unique `name`) | `folder_cl`, `tmpl_set`, `port_mint`                                                           |
+| `folder_name_history` | `(name, owner, claimed_at)` | `folder_cl` (every claim, including names later moved to another owner)                  |
 | `templates`       | `id`                    | `tmpl_reg`                                                                                     |
 | `portfolios`      | `owner`                 | `port_mint`, `port_upd`, `tmpl_set`                                                            |
 | `portfolio_versions` | `(owner, version)`   | `port_mint`, `port_upd`: owner, version number, cid, template id, event id, time               |
@@ -201,6 +207,17 @@ the earliest indexed ledger or after `last_ledger` are rejected with `400`.
 
 ## Design decisions
 
+- **Network isolation.** Each process derives a SHA-256 network id from
+  `STELLAR_NETWORK_PASSPHRASE`. Database primary keys for events and read-model rows include
+  that network id. API selection uses `X-Stellar-Network`, then a `testnet` subdomain/path
+  prefix, then `API_NETWORK_DEFAULT`; every read is filtered by the selected network.
+- **Multiple contracts.** `FOLDER_CONTRACT_IDS` is an ordered, comma-separated contract list.
+  `FOLDER_CONTRACT_IDS=C1:ledger,C2:ledger` and `FOLDER_CONTRACT_START_LEDGERS=C1=ledger,C2=ledger`
+  provide per-contract starting ledgers. The RPC receives all contracts in one filter and
+  uses one shared paging cursor. `contract_id` is stored on events and read-model rows;
+  for conflicting redeploy state, events are applied in RPC ledger order, so the latest
+  ledger-close event wins.
+
 - **The ledger is the source of truth.** Postgres is a rebuildable read model. Every
   applied event is kept in `contract_events` with its raw XDR.
 - **Side effects go through the outbox.** Nothing is emitted directly from the indexing
@@ -213,3 +230,6 @@ the earliest indexed ledger or after `last_ledger` are rejected with `400`.
 - **Graceful shutdown.** On SIGTERM the indexer waits for the in-flight page before closing
   the pool, and the API stops accepting connections first. Both stop after
   `SHUTDOWN_TIMEOUT_MS`.
+- **Bounded ticks.** Each indexer tick runs under `INDEXER_TICK_TIMEOUT_MS`; on expiry the
+  client is released, status becomes `error` and the next tick backs off. Indexer connections
+  set Postgres `statement_timeout` and `idle_in_transaction_session_timeout`.

@@ -68,6 +68,38 @@ async function openRange(
 }
 
 /**
+ * Outcome of applying one event. `orphaned` means the event updates a row that
+ * does not exist yet (the indexer started partway through history, or the
+ * parent event is later in the same page); it is stored and re-applied when the
+ * parent row arrives.
+ */
+export type ApplyOutcome = 'applied' | 'orphaned';
+
+/**
+ * Surrogate keys (CDN cache tags) for the read model rows an event touches.
+ * The indexer purges these after the page commits; the API sends the same
+ * keys in `Surrogate-Key` / `Cache-Tag` headers (see docs/api.md).
+ */
+export function cacheTagsFor(event: DecodedEvent): string[] {
+  switch (event.topic) {
+    case 'init':
+    case 'adm_add':
+    case 'adm_rm':
+      return [];
+    case 'folder_cl':
+      return [`folder:${event.owner}`, `folder-name:${event.folderName}`];
+    case 'tmpl_reg':
+      return [`template:${event.templateId}`, 'templates'];
+    case 'tmpl_set':
+      return [`folder:${event.owner}`, `portfolio:${event.owner}`, `template:${event.templateId}`];
+    case 'port_mint':
+      return [`portfolio:${event.owner}`, `folder:${event.owner}`, `template:${event.templateId}`];
+    case 'port_upd':
+      return [`portfolio:${event.owner}`];
+  }
+}
+
+/**
  * Apply one decoded contract event to the read model. Runs inside the page
  * transaction (see processPage); `at` is the ledger close time of the event.
  * Each event id is applied at most once, so handlers don't need to be
@@ -78,27 +110,48 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
   currentLedger = event.ledger;
   switch (event.topic) {
     case 'init':
+      await recordAdminChange(db, eventId, ledger, 'init', null, event.admin, at);
       await db.query(
-        'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
-        [event.admin, at]
+        network
+          ? 'INSERT INTO admins (network, contract_id, address, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT (network, address) DO NOTHING'
+          : 'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
+        network ? [network, contractId, event.admin, at] : [event.admin, at]
       );
-      return;
+      return 'applied';
 
     case 'adm_add':
+      await recordAdminChange(db, eventId, ledger, 'add', event.admin, event.newAdmin, at);
       await db.query(
-        'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
-        [event.newAdmin, at]
+        network
+          ? 'INSERT INTO admins (network, contract_id, address, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT (network, address) DO NOTHING'
+          : 'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
+        network ? [network, contractId, event.newAdmin, at] : [event.newAdmin, at]
       );
-      return;
+      return 'applied';
 
     case 'adm_rm':
+      await recordAdminChange(db, eventId, ledger, 'remove', event.admin, event.target, at);
       await db.query('DELETE FROM admins WHERE address = $1', [event.target]);
-      return;
+      return 'applied';
 
     case 'folder_cl':
+      // A name belongs to exactly one owner: drop it from any previous owner
+      // (and record the move) before the claiming owner takes it.
+      await db.query(
+        `INSERT INTO folder_name_history (name, owner, claimed_at)
+         SELECT name, owner, claimed_at FROM folders WHERE name = $1 AND owner <> $2
+         ON CONFLICT (name, owner, claimed_at) DO NOTHING`,
+        [event.folderName, event.owner]
+      );
+      await db.query('DELETE FROM folders WHERE name = $1 AND owner <> $2', [
+        event.folderName,
+        event.owner,
+      ]);
       await db.query(
         `INSERT INTO folders (owner, name, claimed_at, updated_at) VALUES ($1, $2, $3, $3)
-         ON CONFLICT (owner) DO UPDATE SET name = EXCLUDED.name, updated_at = EXCLUDED.updated_at`,
+         ON CONFLICT (owner) DO UPDATE
+           SET name = EXCLUDED.name, claimed_at = EXCLUDED.claimed_at,
+               updated_at = EXCLUDED.updated_at`,
         [event.owner, event.folderName, at]
       );
       await openRange(db, 'folder_versions', 'owner', event.owner, event.ledger, ['name'], [
@@ -108,10 +161,17 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
 
     case 'tmpl_reg':
       await db.query(
-        `INSERT INTO templates (id, metadata_uri, creator, registered_at) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (id) DO UPDATE
-           SET metadata_uri = EXCLUDED.metadata_uri, creator = EXCLUDED.creator`,
-        [event.templateId, event.metadataUri, event.creator, at]
+        network
+          ? `INSERT INTO templates (network, contract_id, id, metadata_uri, creator, registered_at) VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (network, id) DO UPDATE
+               SET metadata_uri = EXCLUDED.metadata_uri, creator = EXCLUDED.creator,
+                   contract_id = EXCLUDED.contract_id`
+          : `INSERT INTO templates (id, metadata_uri, creator, registered_at) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO UPDATE
+               SET metadata_uri = EXCLUDED.metadata_uri, creator = EXCLUDED.creator`,
+        network
+          ? [network, contractId, event.templateId, event.metadataUri, event.creator, at]
+          : [event.templateId, event.metadataUri, event.creator, at]
       );
       // Dense, replay-stable version number: count of prior versions + 1.
       await db.query(
@@ -138,7 +198,7 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
       );
       return;
 
-    case 'tmpl_set':
+    case 'tmpl_set': {
       // set_user_template also re-points an already-minted portfolio.
       await db.query('UPDATE folders SET template_id = $2, updated_at = $3 WHERE owner = $1', [
         event.owner,
@@ -250,4 +310,5 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
       throw new Error(`unhandled event topic: ${JSON.stringify(unhandled)}`);
     }
   }
+  return reapplied;
 }

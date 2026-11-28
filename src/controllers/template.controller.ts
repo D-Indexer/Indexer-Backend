@@ -5,6 +5,16 @@ import { templateIdSchema } from '../validation/schemas';
 
 export const list = async (_req: Request, res: Response): Promise<void> => {
   const templates = await templateService.listTemplates();
+  const newest = templates.reduce<Date | null>(
+    (acc, template) => (acc === null || template.registeredAt > acc ? template.registeredAt : acc),
+    null
+  );
+  conditionalGet(
+    collectionEtag(templates.map((template) => ({ marker: template.registeredAt }))),
+    newest,
+    req,
+    res
+  );
   res.json(templates);
 };
 
@@ -35,5 +45,6 @@ export const getOne = async (req: Request, res: Response): Promise<void> => {
   }
 
   if (!template) throw notFound('Template not found');
+  conditionalGet(resourceEtag(template.registeredAt), template.registeredAt, req, res);
   res.json(template);
 };

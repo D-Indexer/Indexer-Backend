@@ -69,7 +69,8 @@ composition root and entrypoints.
   "cursor": "0024284788768636927-4294967295",
   "last_ledger": "5654242",
   "last_success_at": "2026-11-10T07:37:30.225Z",
-  "status": "ok"
+  "status": "ok",
+  "active_endpoint": "https://soroban-testnet.stellar.org"
 }
 ```
 
@@ -126,9 +127,12 @@ traces and route names.
 
 What to alert on:
 
-- `/health` `indexer.stale` is `true`, or `indexer.status` is `retention_gap`
+- `/health` `indexer.stale` is `true`, or `indexer.status` is `retention_gap` or `cursor_invalid`
 - `Indexer poll failed` logged repeatedly (the `failures` count grows)
 - rows in `contract_events` with `status = 'rejected'`
+- rows in `contract_events` with `status = 'orphaned'` (an UPDATE-type event whose parent row
+  has not arrived yet; `npm run indexer -- orphans` prints them as JSON). They are re-applied
+  automatically once the parent row is indexed.
 
 ## Doctor
 
@@ -185,6 +189,20 @@ place (`scripts/e2e/config.ts`).
 
 ## Indexer recovery
 
+### Startup checks
+
+Before polling, the indexer calls `getNetwork` and `getLedgerEntries` and exits with an error
+when:
+
+- the RPC's passphrase differs from `STELLAR_NETWORK_PASSPHRASE` (the message names both),
+- `FOLDER_CONTRACT_ID` has no contract instance on that network (the message names the
+  contract and the network),
+- `indexer_state.network_passphrase` records a different network (the database was used
+  elsewhere; point the indexer at the right database or reset it).
+
+On success it logs `Indexer startup checks passed` with the network passphrase, protocol
+version and the contract's WASM hash, and stores the passphrase in `indexer_state`.
+
 ### Retention gap
 
 Soroban RPC keeps only recent ledgers (testnet: about 7 days). If the indexer is down longer
@@ -205,7 +223,34 @@ checking with backoff but doesn't move. Choose one:
    docker compose exec indexer node dist/indexer/cli.js reset-cursor <ledger>
    ```
    Or set `INDEXER_ON_RETENTION_GAP=skip` and restart. It does the same automatically
-   now and in future, recording the gap in `indexer_state.last_gap`.
+   now and in future, recording the gap in `index_gaps` (and `indexer_state.last_gap`).
+
+   The indexer resumes at the RPC's `oldestLedger` itself, not `oldestLedger + 1`:
+   `getEvents` treats `startLedger` as inclusive, so the oldest retained ledger is
+   still indexed. `last_gap` records the exact missing range
+   (`missedFrom`..`missedTo`) and the ledger it actually resumed at (`resumedAt`).
+   If the retention window moves forward while resuming, it retries from the new
+   `oldestLedger`, bounded by `INDEXER_MAX_GAP_RESUME_ATTEMPTS` (default 5).
+
+   Every gap is also a row in `index_gaps` (`reason`, `missed_from`, `missed_to`,
+   `resumed_at`, `detected_at`, nullable `filled_at`), written in the same
+   transaction as the resume. `reason` is `retention` for a skipped cursor,
+   `config` when `INDEXER_START_LEDGER` is older than the window, and `manual`
+   for operator-recorded gaps. Ranges never overlap: a new range that starts at
+   or before the newest row's `missed_to` is merged into it. `last_gap` is always
+   derived from the newest row. List them with:
+
+   ```bash
+   npm run indexer -- gaps          # all gaps, newest first, as JSON
+   npm run indexer -- gaps --open   # only gaps with filled_at IS NULL
+   ```
+
+   Once a range has been backfilled, mark it filled:
+
+   ```bash
+   npm run indexer -- fill-gap <id>
+   # or: UPDATE index_gaps SET filled_at = NOW() WHERE id = <id>;
+   ```
 2. **Rebuild from an RPC with longer retention.** Point `STELLAR_RPC_URL` at an RPC that
    still has the missing ledgers (self-hosted with a larger retention window, or a provider
    with history), run `reset-cursor` to the first missing ledger, and let it catch up. Then
@@ -216,18 +261,59 @@ checking with backoff but doesn't move. Choose one:
 On an empty database the indexer never halts: an `INDEXER_START_LEDGER` older than the window
 is clamped to the oldest retained ledger with a warning.
 
+### Invalid cursor
+
+The saved cursor is validated on every read. If it is corrupt (not a `<TOID>-<op>` paging
+cursor) the indexer recovers on its own when `last_ledger` is valid: it clears the cursor,
+resumes from `last_ledger` (already-stored events are skipped, so nothing is missed) and
+records `indexer_state.cursor_recovered` (`{ invalidCursor, resumedAt, at }`, also shown as
+`indexer.cursorRecovered` in `/health`).
+
+If `last_ledger` is missing or invalid too, the indexer halts:
+
+```text
+ERROR Indexer halted: invalid cursor {"error":"Saved cursor \"garbage\" is not a valid RPC paging cursor ..."}
+```
+
+`/health` then shows `"indexer": {"status": "cursor_invalid", ...}`. Recover with:
+
+```bash
+npm run indexer -- reset-cursor <ledger to resume from>
+# in the container image:
+docker compose exec indexer node dist/indexer/cli.js reset-cursor <ledger>
+```
+
 ### Re-index from a ledger
 
 `reset-cursor` is safe at any time because events are deduplicated by id. Rewinding
 re-reads events and skips the ones already stored. To rebuild the read model from scratch:
 
 ```sql
-TRUNCATE contract_events, folders, templates, portfolios, admins, indexer_state;
+TRUNCATE contract_events, folders, templates, portfolios, admins, admin_changes, indexer_state;
 ```
 
 ```bash
 npm run indexer -- reset-cursor <first ledger to index>   # or leave state empty to use INDEXER_START_LEDGER
 ```
+
+### Retry rejected events
+
+Events the indexer could not decode (or the database refused) are stored with
+`status = 'rejected'` and their raw XDR. After fixing the decoder, re-decode them:
+
+```bash
+npm run indexer -- retry-rejected [--topic <t>] [--since-ledger <n>] [--dry-run]
+```
+
+- `--topic` limits the run to one event topic (e.g. `port_mint`).
+- `--since-ledger` limits the run to events at or after that ledger.
+- `--dry-run` prints what would change without writing anything.
+
+Events are retried in ledger/TOID order, each applied under a savepoint, and
+`status`, `data`, `error`, `retry_count` and `last_retry_at` are updated. The
+command takes the indexer advisory lock, so stop the indexer process first (it
+holds the lock while running). It is idempotent: events that still fail stay
+rejected, and applied events are no longer selected.
 
 ### Rejected events
 
@@ -428,6 +514,9 @@ running large `DELETE`s.
   pinning-provider interface is a tracked issue.
 - Check a node: `docker compose exec ipfs ipfs id`. List pins:
   `docker compose exec ipfs ipfs pin ls --type=recursive`.
+- Run `npm run ipfs -- reconcile` to immediately check and repair all portfolio/template CIDs.
+- Run `npm run ipfs -- gc --older-than 7d --dry-run` before unpinning unreferenced uploads;
+  omit `--dry-run` to apply the pin removals. CIDs referenced on-chain are never GC'd.
 
 ## Network fault injection (chaos profile)
 

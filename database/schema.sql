@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS contract_events (
   topic_xdr         TEXT[] NOT NULL,
   value_xdr         TEXT NOT NULL,
   data              JSONB,
-  status            TEXT NOT NULL CHECK (status IN ('applied', 'ignored', 'rejected')),
+  status            TEXT NOT NULL CHECK (status IN ('applied', 'ignored', 'rejected', 'orphaned')),
   error             TEXT,
   indexed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (ledger, id)
@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS contract_events_default
 -- Unique lookup on id (the RPC event id) so duplicate events remain no-ops.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_events_id ON contract_events (id);
 CREATE INDEX IF NOT EXISTS idx_contract_events_ledger ON contract_events (ledger);
+-- Canonical event ordering: matches RPC getEvents delivery order.
+CREATE INDEX IF NOT EXISTS idx_contract_events_toid_event_index
+  ON contract_events (toid, event_index);
 CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
   ON contract_events (indexed_at) WHERE status = 'rejected';
 CREATE INDEX IF NOT EXISTS idx_contract_events_topic_ledger
@@ -43,11 +46,95 @@ CREATE INDEX IF NOT EXISTS idx_contract_events_topic_ledger
 -- live_until_ledger is the TTL of the folder's persistent storage entry as
 -- reported by getLedgerEntries; NULL means not yet probed.
 CREATE TABLE IF NOT EXISTS folders (
-  owner        TEXT PRIMARY KEY,
-  name         TEXT UNIQUE NOT NULL,
-  template_id  BIGINT,
+  owner          TEXT PRIMARY KEY,
+  name           TEXT UNIQUE NOT NULL,
+  template_id    BIGINT,
+  claimed_at     TIMESTAMPTZ NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
+);
+
+-- Moderation: a hidden folder/portfolio is excluded from the listing endpoints.
+-- Rows are keyed by the same key as the listed table (folders.owner / portfolios.owner).
+CREATE TABLE IF NOT EXISTS hidden_folders (
+  owner      TEXT PRIMARY KEY,
+  hidden_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS hidden_portfolios (
+  owner      TEXT PRIMARY KEY,
+  hidden_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Keyset listing indexes. The trailing owner column makes each ordering total,
+-- so a cursor on (timestamp, owner) never repeats or skips a row.
+CREATE INDEX IF NOT EXISTS idx_folders_claimed_at ON folders (claimed_at, owner);
+CREATE INDEX IF NOT EXISTS idx_portfolios_minted_at ON portfolios (minted_at, owner);
+CREATE INDEX IF NOT EXISTS idx_portfolios_updated_at ON portfolios (updated_at, owner);
+
+-- tmpl_reg
+CREATE TABLE IF NOT EXISTS templates (
+  id             BIGINT PRIMARY KEY,
+  metadata_uri   TEXT NOT NULL,
+  creator        TEXT,
+  registered_at  TIMESTAMPTZ NOT NULL,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
+);
+
+-- port_mint / port_upd / tmpl_set. No foreign key to folders: the indexer can
+-- start partway through history, so a portfolio may arrive before its folder.
+CREATE TABLE IF NOT EXISTS portfolios (
+  owner          TEXT PRIMARY KEY,
+  template_id    BIGINT NOT NULL,
+  ipfs_cid       TEXT NOT NULL,
+  minted_at      TIMESTAMPTZ NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
+);
+
+-- init / adm_add / adm_rm. `removed_at` is set by adm_rm instead of deleting the
+-- row, so the removal keeps its provenance and a stale adm_add can't resurrect it.
+CREATE TABLE IF NOT EXISTS admins (
+  address        TEXT PRIMARY KEY,
+  added_at       TIMESTAMPTZ NOT NULL,
+  removed_at     TIMESTAMPTZ,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
+);
+
+-- Upgrade a database created before last_event_id existed. Rows written by the old
+-- indexer have no provenance, so they are dropped and rebuilt from contract_events
+-- on the next replay (docs/operations.md). The tables are recreated above.
+DO $$
+DECLARE
+  t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['folders', 'templates', 'portfolios', 'admins'] LOOP
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name = t AND column_name = 'last_event_id'
+    ) THEN
+      EXECUTE format('DROP TABLE %I CASCADE', t);
+    END IF;
+  END LOOP;
+END
+$$;
+
+-- folder_cl (owner <-> folder_name); template_id tracks tmpl_set / port_mint.
+CREATE TABLE IF NOT EXISTS folders (
+  owner          TEXT PRIMARY KEY,
+  name           TEXT UNIQUE NOT NULL,
+  template_id    BIGINT,
+  claimed_at     TIMESTAMPTZ NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
+);
+
+-- Every folder_cl claim, including names later moved to another owner.
+CREATE TABLE IF NOT EXISTS folder_name_history (
+  name         TEXT NOT NULL,
+  owner        TEXT NOT NULL,
   claimed_at   TIMESTAMPTZ NOT NULL,
-  updated_at   TIMESTAMPTZ NOT NULL
+  PRIMARY KEY (name, owner, claimed_at)
 );
 
 ALTER TABLE folders ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;
@@ -58,7 +145,9 @@ CREATE INDEX IF NOT EXISTS idx_folders_live_until
 
 -- tmpl_reg
 CREATE TABLE IF NOT EXISTS templates (
-  id             BIGINT PRIMARY KEY,
+  network        TEXT NOT NULL DEFAULT '',
+  contract_id    TEXT,
+  id             BIGINT NOT NULL,
   metadata_uri   TEXT NOT NULL,
   creator        TEXT,
   registered_at  TIMESTAMPTZ NOT NULL,
@@ -123,14 +212,28 @@ CREATE INDEX IF NOT EXISTS idx_portfolios_live_until
 
 -- init / adm_add / adm_rm
 CREATE TABLE IF NOT EXISTS admins (
-  address   TEXT PRIMARY KEY,
-  added_at  TIMESTAMPTZ NOT NULL
+  address        TEXT PRIMARY KEY,
+  added_at       TIMESTAMPTZ NOT NULL,
+  removed_at     TIMESTAMPTZ,
+  last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
 );
 
+-- Membership as of the end of `ledger`: the last change per address at or
+-- before that ledger, keeping only addresses whose last change was an add.
+CREATE OR REPLACE VIEW admins_at_ledger AS
+SELECT DISTINCT ON (target) target AS address, ledger, action, actor, at
+FROM admin_changes
+WHERE ledger <= $1
+ORDER BY target, ledger DESC, event_id DESC;
+
 -- Indexer cursor and status, written in the same transaction as event data.
+-- `version` is bumped by every write; a page only commits its cursor if the
+-- version it read is still current, so a concurrent `reset-cursor` wins.
 CREATE TABLE IF NOT EXISTS indexer_state (
-  key         TEXT PRIMARY KEY,
+  network     TEXT NOT NULL DEFAULT '',
+  key         TEXT NOT NULL,
   value       TEXT NOT NULL,
+  version     BIGINT NOT NULL DEFAULT 0,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

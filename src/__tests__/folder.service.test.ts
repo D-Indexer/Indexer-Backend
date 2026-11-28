@@ -38,7 +38,9 @@ describe('folder service', () => {
     const result = await folderService.getFolderByName('alice.folder');
 
     expect(result?.templateId).toBeNull();
-    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('WHERE name = $1'), ['alice.folder']);
+    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('WHERE lower(name) = lower($1)'), [
+      'alice.folder',
+    ]);
   });
 });
 

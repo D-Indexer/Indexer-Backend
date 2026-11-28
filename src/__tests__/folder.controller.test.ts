@@ -8,7 +8,10 @@ jest.mock('../services/folder');
 jest.mock('../services/portfolio');
 
 const mockFolderService = folderService as jest.Mocked<typeof folderService>;
-const validAddress = `G${'A'.repeat(55)}`;
+// Valid Ed25519 public key with correct CRC16 checksum
+const validAddress = 'GDVHQJSV2UKJANHLNPKGOKNVGDGEOFBC4WQODHWVPQXBR3SJF6JYHHFO';
+// Valid contract address with correct CRC16 checksum
+const contractAddress = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526';
 
 describe('folder controller', () => {
   afterEach(() => jest.clearAllMocks());
@@ -45,14 +48,13 @@ describe('folder controller', () => {
   });
 
   it('validates folder names', async () => {
-    const { next } = await invokeHandler(getByName, { params: { name: 'bad name' } });
+    const { next } = await invokeHandler(getByName, { params: { name: 'bad name!' } });
 
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400 }));
   });
 
   it('accepts contract (C...) owner addresses', async () => {
     mockFolderService.getFolderByAddress.mockResolvedValue(null);
-    const contractAddress = `C${'A'.repeat(55)}`;
 
     await invokeHandler(getByAddress, { params: { address: contractAddress } });
 

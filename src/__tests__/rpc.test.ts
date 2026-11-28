@@ -17,6 +17,12 @@ function client(fetchImpl: jest.Mock) {
 }
 
 describe('rpc client', () => {
+  it('sends one filter for multiple contracts', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(jsonResponse(ok));
+    await client(fetchImpl).getEvents({ contractIds: ['CONE', 'CTWO'], limit: 50, cursor: 'cur' });
+    const body = JSON.parse(fetchImpl.mock.calls[0][1].body);
+    expect(body.params.filters).toEqual([{ type: 'contract', contractIds: ['CONE', 'CTWO'] }]);
+  });
   it('sends a contract-filtered getEvents request', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(jsonResponse(ok));
     await client(fetchImpl).getEvents({ contractId: 'CABC', limit: 50, cursor: 'cur' });
@@ -68,6 +74,29 @@ describe('rpc client', () => {
       .catch((e) => e);
     expect(err).toBeInstanceOf(LedgerRangeError);
     expect(err).toMatchObject({ oldestLedger: 5533280, latestLedger: 5654239 });
+  });
+
+  it('sends configured headers on every request and keeps them out of errors', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(jsonResponse({}, 500));
+    const rpc = createRpcClient({
+      url: 'https://rpc.example/v1',
+      timeoutMs: 1000,
+      headers: { Authorization: 'Bearer super-secret-token', 'X-Api-Key': 'key-123' },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      sleep: async () => undefined,
+    });
+
+    const err = await rpc.getEvents(params).catch((e) => e);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    for (const call of fetchImpl.mock.calls) {
+      expect(call[1].headers).toMatchObject({
+        'content-type': 'application/json',
+        Authorization: 'Bearer super-secret-token',
+        'X-Api-Key': 'key-123',
+      });
+    }
+    expect(err.message).not.toContain('super-secret-token');
+    expect(err.message).not.toContain('key-123');
   });
 
   it('never puts credentials or query strings in error messages', async () => {
