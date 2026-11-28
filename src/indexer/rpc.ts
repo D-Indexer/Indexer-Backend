@@ -172,6 +172,8 @@ export type RpcClientOptions = {
   baseDelayMs?: number;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  /** Extra HTTP headers sent with every request (e.g. paid provider API keys). Never logged. */
+  headers?: Record<string, string>;
 };
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -192,6 +194,7 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
   const maxAttempts = options.maxAttempts ?? 3;
   const baseDelayMs = options.baseDelayMs ?? 500;
   const safeUrl = redactUrl(options.url);
+  const headers: Record<string, string> = { 'content-type': 'application/json', ...options.headers };
   let nextId = 1;
 
   async function callOnce<T>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
@@ -200,7 +203,7 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     try {
       response = await fetchImpl(options.url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers,
         body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
         signal: signal
           ? AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs)])
@@ -303,6 +306,140 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     },
     getVersionInfo() {
       return call<VersionInfo>('getVersionInfo');
+    },
+    getTransaction(hash) {
+      return call<GetTransactionResult>('getTransaction', { hash });
+    },
+  };
+}
+
+export type FailoverOptions = {
+  /** Endpoint URLs, primary first. */
+  urls: string[];
+  timeoutMs: number;
+  /** Consecutive failures before an endpoint is skipped for the cool-down. */
+  failureThreshold?: number;
+  /** How long a failed endpoint is skipped before it is retried. */
+  cooldownMs?: number;
+  /** Ledger the indexer has already scanned; endpoints behind it are skipped. */
+  cursorLedger?: () => number | undefined;
+  now?: () => number;
+  /** Extra HTTP headers sent with every request to every endpoint. Never logged. */
+  headers?: Record<string, string>;
+  createClient?: (url: string) => EventSource;
+};
+
+type EndpointState = {
+  url: string;
+  client: EventSource;
+  failures: number;
+  /** Timestamp until which the endpoint is skipped after hitting the threshold. */
+  cooldownUntil: number;
+  /** Latest ledger reported by the endpoint's last health check, if any. */
+  latestLedger?: number;
+};
+
+/**
+ * EventSource that spreads requests over several RPC endpoints.
+ *
+ * An endpoint is skipped after `failureThreshold` consecutive failures until
+ * `cooldownMs` elapses, and endpoints whose `latestLedger` is behind the saved
+ * cursor are skipped so a lagging replica cannot stall indexing.
+ */
+export function createFailoverEventSource(options: FailoverOptions): EventSource {
+  const threshold = options.failureThreshold ?? 3;
+  const cooldownMs = options.cooldownMs ?? 60000;
+  const now = options.now ?? Date.now;
+  const createClient =
+    options.createClient ??
+    ((url: string) => createRpcClient({ url, timeoutMs: options.timeoutMs, headers: options.headers }));
+  const endpoints: EndpointState[] = options.urls.map((url) => ({
+    url,
+    client: createClient(url),
+    failures: 0,
+    cooldownUntil: 0,
+  }));
+  let active = 0;
+
+  function available(endpoint: EndpointState): boolean {
+    if (endpoint.cooldownUntil > now()) return false;
+    const cursor = options.cursorLedger?.();
+    if (cursor !== undefined && endpoint.latestLedger !== undefined && endpoint.latestLedger < cursor) {
+      return false;
+    }
+    return true;
+  }
+
+  /** Endpoints to try, starting at the active one and wrapping around. */
+  function candidates(): EndpointState[] {
+    const ordered = [...endpoints.slice(active), ...endpoints.slice(0, active)];
+    const usable = ordered.filter(available);
+    // Everything is cooling down or behind the cursor: try them all rather than stall.
+    return usable.length > 0 ? usable : ordered;
+  }
+
+  function succeeded(endpoint: EndpointState): void {
+    endpoint.failures = 0;
+    endpoint.cooldownUntil = 0;
+    active = endpoints.indexOf(endpoint);
+  }
+
+  function failed(endpoint: EndpointState): void {
+    endpoint.failures++;
+    if (endpoint.failures >= threshold) {
+      endpoint.cooldownUntil = now() + cooldownMs;
+      logger.warn('RPC endpoint failed; cooling down', {
+        endpoint: redactUrl(endpoint.url),
+        failures: endpoint.failures,
+        cooldownMs,
+      });
+    }
+  }
+
+  async function attempt<T>(method: string, run: (client: EventSource) => Promise<T>): Promise<T> {
+    const tried = candidates();
+    let lastError: unknown;
+    for (const endpoint of tried) {
+      try {
+        const result = await run(endpoint.client);
+        succeeded(endpoint);
+        return result;
+      } catch (err) {
+        lastError = err;
+        // A ledger-range error is a valid answer from a healthy endpoint.
+        if (err instanceof LedgerRangeError) {
+          succeeded(endpoint);
+          throw err;
+        }
+        failed(endpoint);
+        logger.warn('RPC endpoint request failed', {
+          method,
+          endpoint: redactUrl(endpoint.url),
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    throw lastError;
+  }
+
+  return {
+    get activeEndpoint() {
+      return redactUrl(endpoints[active].url);
+    },
+    getEvents(params) {
+      return attempt('getEvents', (client) => client.getEvents(params));
+    },
+    async getHealth() {
+      const health = await attempt('getHealth', (client) => client.getHealth());
+      const endpoint = endpoints[active];
+      if (endpoint) endpoint.latestLedger = health.latestLedger;
+      return health;
+    },
+    getTransaction(hash) {
+      return attempt('getTransaction', (client) => {
+        if (!client.getTransaction) throw new RpcError('getTransaction is not supported', undefined, false);
+        return client.getTransaction(hash);
+      });
     },
   };
 }

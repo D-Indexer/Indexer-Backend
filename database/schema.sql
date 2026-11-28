@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS contract_events_default
 -- Unique lookup on id (the RPC event id) so duplicate events remain no-ops.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_events_id ON contract_events (id);
 CREATE INDEX IF NOT EXISTS idx_contract_events_ledger ON contract_events (ledger);
+-- Canonical event ordering: matches RPC getEvents delivery order.
+CREATE INDEX IF NOT EXISTS idx_contract_events_toid_event_index
+  ON contract_events (toid, event_index);
 CREATE INDEX IF NOT EXISTS idx_contract_events_rejected
   ON contract_events (indexed_at) WHERE status = 'rejected';
 CREATE INDEX IF NOT EXISTS idx_contract_events_topic_ledger

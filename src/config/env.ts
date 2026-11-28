@@ -354,7 +354,95 @@ export function getIndexerDatabaseUrl(env: AppEnv): string {
   return env.INDEXER_DATABASE_URL ?? env.DATABASE_URL;
 }
 
+/** Split a comma-separated endpoint list, dropping blanks and duplicates. */
+export function parseRpcUrls(value: string | undefined): string[] {
+  if (!value) return [];
+  const urls = value
+    .split(',')
+    .map((url) => url.trim())
+    .filter((url) => url.length > 0);
+  return [...new Set(urls)];
+}
+
+const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const FORBIDDEN_HEADERS = new Set(['host', 'content-length', 'connection', 'transfer-encoding']);
+
+export type RpcHeadersResult = { ok: true; headers: Record<string, string> } | { ok: false; error: string };
+
+/**
+ * Parse a JSON object of RPC headers. Error messages never include header
+ * values, so a malformed config cannot leak an API key into logs.
+ */
+export function parseRpcHeaders(raw: string): RpcHeadersResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, error: 'must be a JSON object of header name/value pairs' };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'must be a JSON object of header name/value pairs' };
+  }
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!HEADER_NAME_RE.test(name)) {
+      return { ok: false, error: `contains an invalid header name: ${JSON.stringify(name)}` };
+    }
+    if (FORBIDDEN_HEADERS.has(name.toLowerCase())) {
+      return { ok: false, error: `must not set the ${name} header` };
+    }
+    if (typeof value !== 'string' || value.trim() === '') {
+      return { ok: false, error: `header ${name} must have a non-empty string value` };
+    }
+    if (/[\r\n]/.test(value)) {
+      return { ok: false, error: `header ${name} must not contain line breaks` };
+    }
+    headers[name] = value;
+  }
+  return { ok: true, headers };
+}
+
+/** All configured RPC endpoints, primary first. */
+export function rpcUrls(env: Pick<AppEnv, 'STELLAR_RPC_URL' | 'STELLAR_RPC_URLS'>): string[] {
+  const urls = parseRpcUrls(env.STELLAR_RPC_URLS);
+  if (urls.length > 0) return urls;
+  return env.STELLAR_RPC_URL ? [env.STELLAR_RPC_URL] : [];
+}
+
 let cachedEnv: AppEnv | null = null;
+
+/**
+ * Resolve the headers sent with every RPC request: STELLAR_RPC_HEADERS merged
+ * with the JSON file at STELLAR_RPC_HEADERS_FILE (file wins). Throws without
+ * echoing header values when the configuration is invalid.
+ */
+export function rpcHeaders(
+  env: Pick<AppEnv, 'STELLAR_RPC_HEADERS' | 'STELLAR_RPC_HEADERS_FILE'>,
+  readFile: (path: string) => string = (path) => readFileSync(path, 'utf8')
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const sources: Array<[string, string | undefined]> = [
+    ['STELLAR_RPC_HEADERS', env.STELLAR_RPC_HEADERS],
+    ['STELLAR_RPC_HEADERS_FILE', env.STELLAR_RPC_HEADERS_FILE],
+  ];
+  for (const [key, raw] of sources) {
+    if (raw === undefined || raw.trim() === '') continue;
+    let content = raw;
+    if (key === 'STELLAR_RPC_HEADERS_FILE') {
+      try {
+        content = readFile(raw.trim());
+      } catch {
+        throw new Error(`Invalid environment configuration: ${key} could not be read. See docs/configuration.md`);
+      }
+    }
+    const result = parseRpcHeaders(content);
+    if (!result.ok) {
+      throw new Error(`Invalid environment configuration: ${key} ${result.error}. See docs/configuration.md`);
+    }
+    Object.assign(headers, result.headers);
+  }
+  return headers;
+}
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   const { env, issues } = resolveSecretFiles(source);

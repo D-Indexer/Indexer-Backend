@@ -89,6 +89,11 @@ To support a new event: add a case to `decode.ts` and `handlers.ts`, a table or 
    model. For each applied event, one `outbox` row is written per registered subscriber
    type. The new cursor is written in the same transaction.
 4. **Repeat** while pages are full, then sleep `INDEXER_POLL_INTERVAL_MS`.
+5. **Enrich transactions** (unless `INDEXER_ENRICH_TRANSACTIONS=false`). After each tick,
+   up to `INDEXER_ENRICH_BATCH_SIZE` `tx_hash` values in `contract_events` that have no
+   `transactions` row are fetched with `getTransaction`, decoded with the SDK (fee-bump and
+   muxed sources included) and stored. `indexer_state.enrichment_cursor` tracks the last
+   hash processed. Enrichment failures never affect event indexing.
 
 What this guarantees:
 
@@ -166,7 +171,7 @@ events. The outbox is the delivery path for external systems.
 
 | Table             | Key                     | Source                                                                                         |
 | ----------------- | ----------------------- | ---------------------------------------------------------------------------------------------- |
-| `contract_events` | RPC event id            | every event: ledger, close time, tx hash, raw topic/value XDR, decoded data, status, error     |
+| `contract_events` | RPC event id            | every event: ledger, close time, tx hash, raw topic/value XDR, decoded data, status, error, TOID (`toid`, `tx_order`, `op_order`, `event_index`) |
 | `folders`         | `owner` (unique `name`) | `folder_cl`, `tmpl_set`, `port_mint`                                                           |
 | `folder_name_history` | `(name, owner, claimed_at)` | `folder_cl` (every claim, including names later moved to another owner)                  |
 | `templates`       | `id`                    | `tmpl_reg`                                                                                     |

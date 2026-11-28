@@ -69,7 +69,8 @@ composition root and entrypoints.
   "cursor": "0024284788768636927-4294967295",
   "last_ledger": "5654242",
   "last_success_at": "2026-11-10T07:37:30.225Z",
-  "status": "ok"
+  "status": "ok",
+  "active_endpoint": "https://soroban-testnet.stellar.org"
 }
 ```
 
