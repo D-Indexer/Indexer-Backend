@@ -87,15 +87,19 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
   switch (event.topic) {
     case 'init':
       await db.query(
-        'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
-        [event.admin, at]
+        network
+          ? 'INSERT INTO admins (network, contract_id, address, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT (network, address) DO NOTHING'
+          : 'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
+        network ? [network, contractId, event.admin, at] : [event.admin, at]
       );
       return 'applied';
 
     case 'adm_add':
       await db.query(
-        'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
-        [event.newAdmin, at]
+        network
+          ? 'INSERT INTO admins (network, contract_id, address, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT (network, address) DO NOTHING'
+          : 'INSERT INTO admins (address, added_at) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING',
+        network ? [network, contractId, event.newAdmin, at] : [event.newAdmin, at]
       );
       return 'applied';
 
@@ -130,10 +134,17 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
 
     case 'tmpl_reg':
       await db.query(
-        `INSERT INTO templates (id, metadata_uri, creator, registered_at) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (id) DO UPDATE
-           SET metadata_uri = EXCLUDED.metadata_uri, creator = EXCLUDED.creator`,
-        [event.templateId, event.metadataUri, event.creator, at]
+        network
+          ? `INSERT INTO templates (network, contract_id, id, metadata_uri, creator, registered_at) VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (network, id) DO UPDATE
+               SET metadata_uri = EXCLUDED.metadata_uri, creator = EXCLUDED.creator,
+                   contract_id = EXCLUDED.contract_id`
+          : `INSERT INTO templates (id, metadata_uri, creator, registered_at) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO UPDATE
+               SET metadata_uri = EXCLUDED.metadata_uri, creator = EXCLUDED.creator`,
+        network
+          ? [network, contractId, event.templateId, event.metadataUri, event.creator, at]
+          : [event.templateId, event.metadataUri, event.creator, at]
       );
       // Dense, replay-stable version number: count of prior versions + 1.
       await db.query(

@@ -124,7 +124,9 @@ CREATE INDEX IF NOT EXISTS idx_folders_live_until
 
 -- tmpl_reg
 CREATE TABLE IF NOT EXISTS templates (
-  id             BIGINT PRIMARY KEY,
+  network        TEXT NOT NULL DEFAULT '',
+  contract_id    TEXT,
+  id             BIGINT NOT NULL,
   metadata_uri   TEXT NOT NULL,
   creator        TEXT,
   registered_at  TIMESTAMPTZ NOT NULL,
@@ -199,7 +201,8 @@ CREATE TABLE IF NOT EXISTS admins (
 -- `version` is bumped by every write; a page only commits its cursor if the
 -- version it read is still current, so a concurrent `reset-cursor` wins.
 CREATE TABLE IF NOT EXISTS indexer_state (
-  key         TEXT PRIMARY KEY,
+  network     TEXT NOT NULL DEFAULT '',
+  key         TEXT NOT NULL,
   value       TEXT NOT NULL,
   version     BIGINT NOT NULL DEFAULT 0,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()

@@ -26,7 +26,8 @@ export type GetEventsResult = {
 };
 
 export type GetEventsParams = {
-  contractId: string;
+  contractId?: string;
+  contractIds?: string[];
   limit: number;
 } & ({ startLedger: number; cursor?: never } | { cursor: string; startLedger?: never });
 
@@ -178,7 +179,10 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
           : { limit: params.limit };
       return call<GetEventsResult>('getEvents', {
         ...(params.startLedger !== undefined ? { startLedger: params.startLedger } : {}),
-        filters: [{ type: 'contract', contractIds: [params.contractId] }],
+        filters: [{
+          type: 'contract',
+          contractIds: params.contractIds ?? (params.contractId ? [params.contractId] : []),
+        }],
         pagination,
       });
     },

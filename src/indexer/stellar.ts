@@ -38,7 +38,10 @@ export type RetentionGapPolicy = 'halt' | 'skip';
 export type Db = Pick<Pool, 'connect' | 'query'>;
 
 export type IndexerConfig = {
-  contractId: string;
+  contractId?: string;
+  contractIds?: string[];
+  network?: string;
+  startLedgers?: Record<string, number>;
   pollIntervalMs: number;
   pageLimit: number;
   /** First ledger to index when there is no saved cursor. Defaults to the RPC's oldest ledger. */
@@ -140,8 +143,11 @@ function scannedLedger(page: GetEventsResult): number {
   }
 }
 
-export async function readState(db: Pick<Pool, 'query'>): Promise<Partial<Record<string, string>>> {
-  const { rows } = await db.query<{ key: string; value: string }>('SELECT key, value FROM indexer_state');
+export async function readState(db: Pick<Pool, 'query'>, network?: string): Promise<Partial<Record<string, string>>> {
+  const { rows } = await db.query<{ key: string; value: string }>(
+    network ? 'SELECT key, value FROM indexer_state WHERE network = $1' : 'SELECT key, value FROM indexer_state',
+    network ? [network] : undefined
+  );
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
 }
 
@@ -190,11 +196,15 @@ export async function ensurePartitions(
 
 export async function writeState(
   db: Pick<Pool, 'query'>,
-  entries: Partial<Record<string, string | null>>
+  entries: Partial<Record<string, string | null>>,
+  network?: string
 ): Promise<void> {
   for (const [key, value] of Object.entries(entries)) {
     if (value === null || value === undefined) {
-      await db.query('DELETE FROM indexer_state WHERE key = $1', [key]);
+      await db.query(
+        network ? 'DELETE FROM indexer_state WHERE network = $1 AND key = $2' : 'DELETE FROM indexer_state WHERE key = $1',
+        network ? [network, key] : [key]
+      );
     } else {
       await db.query(
         `INSERT INTO indexer_state (key, value, version, updated_at) VALUES ($1, $2, 1, NOW())
@@ -353,10 +363,12 @@ async function storeEvent(
     if (!isDeterministicDbError(err)) throw err;
     await client.query('ROLLBACK TO SAVEPOINT apply_event');
     const message = err instanceof Error ? err.message : String(err);
-    await client.query("UPDATE contract_events SET status = 'rejected', error = $2 WHERE id = $1", [
-      event.id,
-      message,
-    ]);
+    await client.query(
+      network
+        ? "UPDATE contract_events SET status = 'rejected', error = $3 WHERE network = $1 AND id = $2"
+        : "UPDATE contract_events SET status = 'rejected', error = $2 WHERE id = $1",
+      network ? [network, event.id, message] : [event.id, message]
+    );
     logger.warn('Rejected contract event the database refused', { id: event.id, topic, error: message });
     return 'rejected';
   }
@@ -486,15 +498,25 @@ async function nextRequest(
   deps: IndexerDependencies,
   state: Partial<Record<string, string>>
 ): Promise<NextRequest> {
-  const { contractId, pageLimit: limit } = deps.config;
+  const { contractId, contractIds, startLedgers, pageLimit: limit } = deps.config;
+  const ids = contractIds?.length ? contractIds : (contractId ? [contractId] : []);
+  const filter = ids.length > 1 ? { contractIds: ids } : { contractId: ids[0] };
+  const firstStartLedger = ids.map((id) => startLedgers?.[id]).find((value) => value && value > 0);
+  if (ids.length > 1) {
+    const contractCursor = ids.map((id) => state[`cursor:${id}`]).find(Boolean);
+    if (contractCursor) {
+      return { params: { ...filter, limit, cursor: contractCursor }, fromConfig: false };
+    }
+  }
   if (state[STATE.cursor]) {
-    return { params: { contractId, limit, cursor: state[STATE.cursor]! }, fromConfig: false };
+    return { params: { ...filter, limit, cursor: state[STATE.cursor]! }, fromConfig: false };
   }
 
   const fromState = Number(state[STATE.startLedger]);
-  if (fromState > 0) return { params: { contractId, limit, startLedger: fromState }, fromConfig: false };
-  if (deps.config.startLedger) {
-    return { params: { contractId, limit, startLedger: deps.config.startLedger }, fromConfig: true };
+  if (fromState > 0) return { params: { ...filter, limit, startLedger: fromState }, fromConfig: false };
+  if (deps.config.startLedger || firstStartLedger) {
+    const startLedger = firstStartLedger ?? deps.config.startLedger!;
+    return { params: { ...filter, limit, startLedger }, fromConfig: true };
   }
 
   const { oldestLedger } = await deps.rpc.getHealth();
@@ -503,7 +525,7 @@ async function nextRequest(
       'Events before it are not indexed.',
     { startLedger: oldestLedger }
   );
-  return { params: { contractId, limit, startLedger: oldestLedger }, fromConfig: true };
+  return { params: { ...filter, limit, startLedger: oldestLedger }, fromConfig: true };
 }
 
 function requestedLedger(params: GetEventsParams): number {
@@ -515,7 +537,7 @@ function requestedLedger(params: GetEventsParams): number {
  * caller can keep paging while it is full.
  */
 export async function pollOnce(deps: IndexerDependencies): Promise<{ events: number; result: PageResult }> {
-  const state = await readState(deps.db);
+  const state = await readState(deps.db, deps.config.network);
   const { params, fromConfig } = await nextRequest(deps, state);
   const pageId = params.cursor ?? `start:${params.startLedger}`;
   return runWithContext({ pageId, cursor: params.cursor }, () => pollOnceInContext(deps, params, fromConfig));
@@ -539,7 +561,7 @@ async function pollOnceInContext(
     // On an empty database nothing indexed is being lost, so INDEXER_START_LEDGER
     // being older than the window just means "as far back as possible".
     if (deps.config.onRetentionGap === 'halt' && !fromConfig) {
-      await writeState(deps.db, { [STATE.status]: 'retention_gap', [STATE.lastError]: gap.message });
+      await writeState(deps.db, { [STATE.status]: 'retention_gap', [STATE.lastError]: gap.message }, deps.config.network);
       throw gap;
     }
 
@@ -557,9 +579,9 @@ async function pollOnceInContext(
         resumedAt: resumeAt,
         at: new Date().toISOString(),
       }),
-    });
+    }, deps.config.network);
     page = await deps.rpc.getEvents({
-      contractId: params.contractId,
+      ...(params.contractIds ? { contractIds: params.contractIds } : { contractId: params.contractId }),
       limit: params.limit,
       startLedger: resumeAt,
     });
@@ -613,7 +635,7 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
         logger.error('Indexer halted: retention gap', { error: message });
       } else {
         logger.error('Indexer poll failed', { error: message, failures });
-        await writeState(deps.db, { [STATE.status]: 'error', [STATE.lastError]: message }).catch(
+        await writeState(deps.db, { [STATE.status]: 'error', [STATE.lastError]: message }, deps.config.network).catch(
           () => undefined
         );
       }

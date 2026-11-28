@@ -84,6 +84,8 @@ export function createApp(deps: AppDependencies) {
   app.use(securityHeaders);
   app.use(cors({ origin: corsOrigin(env) }));
   app.use(express.json({ limit: env.REQUEST_BODY_LIMIT }));
+  const defaultNetworkPassphrase = env.API_NETWORK_DEFAULT || env.STELLAR_NETWORK_PASSPHRASE;
+  app.use(networkMiddleware(defaultNetworkPassphrase));
 
   app.get('/', (_req, res) => {
     res.json({
