@@ -116,6 +116,19 @@ BEGIN
 END
 $$;
 
+-- Activity per UTC day of ledger close, for GET /stats and /stats/daily.
+-- Maintained by the indexer in the page transaction (src/indexer/counters.ts),
+-- so the request path never aggregates over the event or read-model tables.
+-- Rebuild from contract_events with `npm run indexer -- rebuild-stats`
+-- (required once after upgrading an existing database, which starts empty).
+CREATE TABLE IF NOT EXISTS daily_stats (
+  day                   DATE PRIMARY KEY,
+  folders_claimed       BIGINT NOT NULL DEFAULT 0,
+  portfolios_minted     BIGINT NOT NULL DEFAULT 0,
+  portfolio_updates     BIGINT NOT NULL DEFAULT 0,
+  templates_registered  BIGINT NOT NULL DEFAULT 0
+);
+
 -- Version history for portfolio content (port_mint / port_upd / tmpl_set).
 -- Version numbers are dense per owner and stable under replay: the handler
 -- derives the next version from the current max inside the page transaction.

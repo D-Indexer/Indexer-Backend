@@ -18,7 +18,7 @@ const C = 'GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
  */
 async function apply(db: Queryable, event: DecodedEvent, at: string): Promise<void> {
   await db.query('BEGIN');
-  await updateCounters(db, event);
+  await updateCounters(db, event, new Date(at));
   if (event.topic === 'port_mint') {
     await db.query(
       `INSERT INTO portfolios (owner, template_id, ipfs_cid, minted_at, updated_at) VALUES ($1, $2, $3, $4, $4)

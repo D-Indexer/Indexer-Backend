@@ -79,7 +79,7 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
   currentLedger = event.ledger;
   // Derived counters read the pre-event state, so they must run before the
   // read model below is mutated.
-  await updateCounters(db, event);
+  await updateCounters(db, event, at);
   switch (event.topic) {
     case 'init':
       await db.query(

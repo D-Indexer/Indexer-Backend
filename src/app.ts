@@ -3,6 +3,7 @@ import cors from 'cors';
 import { createFolderRoutes } from './routes/folder.routes';
 import { createTemplateRoutes } from './routes/template.routes';
 import { createCreatorRoutes } from './routes/creator.routes';
+import { createStatsRoutes } from './routes/stats.routes';
 import { createUploadRoutes } from './routes/upload.routes';
 import { createPortfolioRoutes } from './routes/portfolio.routes';
 import { createHealthRoutes } from './routes/health.routes';
@@ -97,6 +98,7 @@ export function createApp(deps: AppDependencies) {
   const db = deps.db as Queryable;
   app.use('/templates', createTemplateRoutes({ db }));
   app.use('/creators', createCreatorRoutes({ db }));
+  app.use('/stats', createStatsRoutes({ db }));
   app.use('/portfolios', createPortfolioRoutes(deps));
   app.use('/upload', requireFeature(featureFlags, ROUTE_FLAGS.uploads), createUploadRoutes(deps));
   app.use('/health', createHealthRoutes(deps));

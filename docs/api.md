@@ -18,6 +18,8 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/templates/:id/versions`](#get-templatesidversions)             | Template metadata history             |
 | `GET`  | [`/creators/:address`](#get-creatorsaddress)                      | Template creator stats                |
 | `GET`  | [`/creators/:address/templates`](#get-creatorsaddresstemplates)   | Templates registered by a creator     |
+| `GET`  | [`/stats`](#get-stats)                                            | Activity totals                       |
+| `GET`  | [`/stats/daily`](#get-statsdaily)                                 | Daily activity time series            |
 | `POST` | [`/upload`](#post-upload)                                         | Add and pin a file on IPFS            |
 | `GET`  | [`/.well-known/stellar.toml`](#get-well-knownstellartoml)         | SEP-1 stellar.toml                    |
 | `GET`  | [`/federation`](#get-federation)                                  | SEP-2 federation lookup               |
@@ -520,6 +522,66 @@ creator, are indexed with `"creator": null`. They are not attributable to any ad
 never appear under `/creators`.
 
 Errors: `400` `Invalid Stellar address`, invalid `limit` or cursor.
+
+## `GET /stats`
+
+All-time totals:
+
+```json
+{ "foldersClaimed": 412, "portfoliosMinted": 230, "portfolioUpdates": 1871, "templatesRegistered": 9 }
+```
+
+| Field                 | Counts                                                     |
+| --------------------- | ---------------------------------------------------------- |
+| `foldersClaimed`      | Owners' first `folder_cl` (a re-claim doesn't count again) |
+| `portfoliosMinted`    | Owners' first `port_mint` (a re-mint doesn't count again)  |
+| `portfolioUpdates`    | Every `port_upd`                                           |
+| `templatesRegistered` | Templates' first `tmpl_reg` (re-registration doesn't)      |
+
+Only applied events count; rejected events never do. The indexer maintains these counters
+per day as it stores events, so requests never aggregate over the event tables.
+
+## `GET /stats/daily`
+
+The same counters per UTC calendar day of ledger close, for every day in the range
+(days without activity are returned with zeros).
+
+| Query  | Format       | Default                              |
+| ------ | ------------ | ------------------------------------ |
+| `from` | `YYYY-MM-DD` | 29 days before `to`                  |
+| `to`   | `YYYY-MM-DD` | today (UTC), or 29 days after `from` |
+
+Both ends are inclusive; the range may cover at most 366 days.
+
+```bash
+curl "localhost:3000/stats/daily?from=2026-11-09&to=2026-11-10"
+```
+
+```json
+{
+  "from": "2026-11-09",
+  "to": "2026-11-10",
+  "days": [
+    {
+      "day": "2026-11-09",
+      "foldersClaimed": 3,
+      "portfoliosMinted": 1,
+      "portfolioUpdates": 4,
+      "templatesRegistered": 1
+    },
+    {
+      "day": "2026-11-10",
+      "foldersClaimed": 0,
+      "portfoliosMinted": 0,
+      "portfolioUpdates": 0,
+      "templatesRegistered": 0
+    }
+  ]
+}
+```
+
+Errors: `400` `from must be a date in YYYY-MM-DD format` (same for `to`), `from must not be
+after to`, `Date range must be at most 366 days`.
 
 ## Archival
 
