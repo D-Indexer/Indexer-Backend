@@ -50,6 +50,42 @@ describe('environment configuration', () => {
     expect(() => loadEnv({ ...validEnv, INDEXER_ON_RETENTION_GAP: 'ignore' })).toThrow();
   });
 
+  it('applies upload and pdf parsing defaults', () => {
+    const env = loadEnv(validEnv);
+
+    expect(env.UPLOAD_MAX_IMAGE_PIXELS).toBe(40_000_000);
+    expect(env.UPLOAD_MAX_IMAGE_SIDE).toBe(10_000);
+    expect(env.UPLOAD_MAX_CONCURRENT).toBeGreaterThan(0);
+    expect(env.UPLOAD_BUNDLE_MAX_FILES).toBeGreaterThan(0);
+    expect(env.UPLOAD_BUNDLE_MAX_BYTES).toBeGreaterThan(0);
+    expect(env.PDF_PARSE_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it('parses upload and pdf parsing overrides', () => {
+    const env = loadEnv({
+      ...validEnv,
+      UPLOAD_MAX_IMAGE_PIXELS: '1000000',
+      UPLOAD_MAX_IMAGE_SIDE: '4096',
+      UPLOAD_MAX_CONCURRENT: '2',
+      UPLOAD_BUNDLE_MAX_FILES: '5',
+      UPLOAD_BUNDLE_MAX_BYTES: '1048576',
+      PDF_PARSE_TIMEOUT_MS: '1500',
+    });
+
+    expect(env.UPLOAD_MAX_IMAGE_PIXELS).toBe(1_000_000);
+    expect(env.UPLOAD_MAX_IMAGE_SIDE).toBe(4096);
+    expect(env.UPLOAD_MAX_CONCURRENT).toBe(2);
+    expect(env.UPLOAD_BUNDLE_MAX_FILES).toBe(5);
+    expect(env.UPLOAD_BUNDLE_MAX_BYTES).toBe(1_048_576);
+    expect(env.PDF_PARSE_TIMEOUT_MS).toBe(1500);
+  });
+
+  it('rejects non-positive upload limits', () => {
+    expect(() => loadEnv({ ...validEnv, UPLOAD_MAX_CONCURRENT: '0' })).toThrow(/UPLOAD_MAX_CONCURRENT/);
+    expect(() => loadEnv({ ...validEnv, UPLOAD_MAX_IMAGE_PIXELS: '-1' })).toThrow(/UPLOAD_MAX_IMAGE_PIXELS/);
+    expect(() => loadEnv({ ...validEnv, PDF_PARSE_TIMEOUT_MS: '0' })).toThrow(/PDF_PARSE_TIMEOUT_MS/);
+  });
+
   it('requires CORS_ORIGIN in production', () => {
     expect(() => loadEnv({ ...validEnv, NODE_ENV: 'production' })).toThrow(/CORS_ORIGIN is required/);
     expect(

@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import { pinFile } from '../services/ipfs';
 import { uploadFileSchema } from '../validation/schemas';
 import { sniffContentType } from '../validation/fileType';
+import { validateImageDimensions } from '../validation/imageDimensions';
+import { validatePdf } from '../validation/pdf';
 import { badRequest } from '../http/errors';
 
 export const upload = async (req: Request, res: Response): Promise<void> => {
@@ -14,9 +16,7 @@ export const upload = async (req: Request, res: Response): Promise<void> => {
     throw badRequest(firstError ? firstError.message : 'Invalid file');
   }
 
-  if (sniffContentType(file.buffer) !== file.mimetype) {
-    throw badRequest('File content does not match its declared type');
-  }
+  await validateFileContent(file.buffer, file.mimetype, file.originalname);
 
   const cid = await pinFile(file.buffer, file.originalname);
   res.json({ cid });

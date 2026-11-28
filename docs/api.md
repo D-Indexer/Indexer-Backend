@@ -92,7 +92,7 @@ Every error has the same shape:
 | `410`  | `/changes` only: cursor expired or unknown            | `Cursor expired` (body includes `resync: true` and instructions)                                                                                                                                                                                                             |
 | `429`  | `/stream` only: too many concurrent connections       | `Too many stream connections`                                                                                                                                                                                                                                                |
 | `502`  | IPFS node unreachable or returned an error            | `IPFS node unreachable`, `IPFS add failed with status 500`                                                                                                                                                                                                                   |
-| `503`  | `/health` only: database unreachable                  | see below                                                                                                                                                                                                                                                                    |
+| `503`  | `/health` only: database unreachable; uploads: concurrency saturated | see below; uploads include a `Retry-After` header                                                                                                                                                                                                                            |
 | `504`  | IPFS node timed out (`IPFS_TIMEOUT_MS`)               | `IPFS node timed out`                                                                                                                                                                                                                                                        |
 | `500`  | Anything unexpected; details are logged, not returned | `Internal server error`                                                                                                                                                                                                                                                      |
 
@@ -362,6 +362,19 @@ Kubo node with `pin=true` and its CID (v1) returned.
 - Allowed types: `image/jpeg`, `image/png`, `image/webp`, `application/pdf`.
 - The declared type must match the file's leading bytes.
 - Maximum size: 10 MB. One file per request.
+- Images are checked from their headers without full decoding. Images above
+  `UPLOAD_MAX_IMAGE_PIXELS` (default 40 MP) or with a side longer than
+  `UPLOAD_MAX_IMAGE_SIDE` are rejected with `400 Image dimensions exceed limit`.
+- PDFs are parsed (not rendered) and rejected with `400` if they contain active
+  content: JavaScript (`/JS`, `/JavaScript`), auto-actions (`/OpenAction`, `/AA`),
+  launch actions (`/Launch`), embedded files (`/EmbeddedFile`) or rich media
+  (`/RichMedia`). The `error` message names the reason, e.g.
+  `PDF contains active content: JavaScript`. Encrypted PDFs are rejected with
+  `400 Encrypted PDF not allowed` because their content can't be inspected.
+  Parsing is time- and memory-bounded; a parser failure is treated as a rejection.
+- At most `UPLOAD_MAX_CONCURRENT` uploads are buffered at once. When saturated,
+  the request is rejected immediately with `503` and a `Retry-After` header
+  (seconds) without reading the body.
 
 ```bash
 curl -F "file=@avatar.png;type=image/png" localhost:3000/upload
@@ -372,7 +385,9 @@ curl -F "file=@avatar.png;type=image/png" localhost:3000/upload
 { "cid": "bafkreiacuprjr4kth5rfldcy4tdq5xfltl22kdlc3es72u4qsqqcb6ypxa" }
 ```
 
-Errors: `400` (no file, type, size, content mismatch), `502` / `504` (IPFS).
+Errors: `400` (no file, type, size, content mismatch, image dimensions, PDF active
+content, encrypted PDF), `502` / `504` (IPFS), `503` (concurrency saturated, see
+`Retry-After`).
 
 The endpoint is unauthenticated and not rate limited yet; don't expose it publicly
 without a proxy that enforces limits.
