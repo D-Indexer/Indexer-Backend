@@ -1,10 +1,17 @@
 import { Router } from 'express';
-import * as ctrl from '../controllers/folder.controller';
+import { createFolderController } from '../controllers/folder.controller';
+import type { FolderService } from '../services/folder.service';
 
-const router = Router();
+export interface FolderRoutesDeps {
+  folderService: FolderService;
+}
 
-// /name/:name must be registered before /:address to avoid wildcard shadowing
-router.get('/name/:name', ctrl.getByName);
-router.get('/:address', ctrl.getByAddress);
+export function createFolderRoutes(deps: FolderRoutesDeps): Router {
+  const router = Router();
+  const ctrl = createFolderController({ folderService: deps.folderService });
+
+// Express 5 note: named params like /:address are supported as-is.
+// Future wildcard routes must use the new path-to-regexp syntax, e.g. '/*splat'
+// (the legacy '*' / ':param*' forms are no longer valid in Express 5).
 
 export default router;
