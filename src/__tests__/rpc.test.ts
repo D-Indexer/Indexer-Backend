@@ -17,6 +17,12 @@ function client(fetchImpl: jest.Mock) {
 }
 
 describe('rpc client', () => {
+  it('sends one filter for multiple contracts', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(jsonResponse(ok));
+    await client(fetchImpl).getEvents({ contractIds: ['CONE', 'CTWO'], limit: 50, cursor: 'cur' });
+    const body = JSON.parse(fetchImpl.mock.calls[0][1].body);
+    expect(body.params.filters).toEqual([{ type: 'contract', contractIds: ['CONE', 'CTWO'] }]);
+  });
   it('sends a contract-filtered getEvents request', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(jsonResponse(ok));
     await client(fetchImpl).getEvents({ contractId: 'CABC', limit: 50, cursor: 'cur' });

@@ -1,14 +1,18 @@
 import { LedgerRangeError, EventSource, GetEventsResult } from '../indexer/rpc';
 import {
+  adaptiveDelay,
   backoffDelay,
   createIndexer,
+  CursorInvalidError,
   IndexerConfig,
+  isValidCursor,
   ledgerFromCursor,
   pollOnce,
   processPage,
   RetentionGapError,
 } from '../indexer/stellar';
 import { addr, makeEvent, OWNER, str, TESTNET_CONTRACT, testnetEvents, u32 } from './eventFixtures';
+import { cassetteSource, listCassettes } from './rpcCassette';
 
 type Call = { sql: string; params?: unknown[] };
 
@@ -55,6 +59,8 @@ function fakeRpc(overrides: Partial<EventSource> = {}): jest.Mocked<EventSource>
   return {
     getEvents: jest.fn().mockResolvedValue(page([])),
     getHealth: jest.fn().mockResolvedValue({ status: 'healthy', latestLedger: 200, oldestLedger: 100 }),
+    getNetwork: jest.fn().mockResolvedValue({ passphrase: 'Test SDF Network ; September 2015' }),
+    getLedgerEntries: jest.fn().mockResolvedValue({ entries: [], latestLedger: 200 }),
     ...overrides,
   } as jest.Mocked<EventSource>;
 }
@@ -137,6 +143,46 @@ describe('processPage', () => {
   });
 });
 
+describe('portfolio ownership transfers', () => {
+  const NEW_OWNER = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
+
+  it('moves ownership and records history without losing portfolio data', async () => {
+    const { db, calls } = fakeDb();
+    const mint = makeEvent('port_init', [addr(OWNER), str('bafyportfolio')]);
+    const transfer = makeEvent('port_xfer', [addr(OWNER), addr(NEW_OWNER), u32(1)]);
+
+    const result = await processPage(db, TESTNET_CONTRACT, page([mint, transfer]));
+
+    expect(result).toMatchObject({ applied: 2, rejected: 0, ignored: 0 });
+
+    // Ownership is updated in place on the stable portfolio id, not re-minted.
+    const update = calls.find((c) => /UPDATE portfolios\s+SET owner/.test(c.sql));
+    expect(update).toBeDefined();
+    expect(update!.params).toEqual(expect.arrayContaining([NEW_OWNER]));
+
+    // History row is appended for the transfer.
+    const history = calls.find((c) => c.sql.includes('INSERT INTO ownership_history'));
+    expect(history).toBeDefined();
+    expect(history!.params).toEqual(expect.arrayContaining([NEW_OWNER, OWNER]));
+
+    // No portfolio data is deleted or re-created by the transfer.
+    expect(calls.some((c) => /DELETE FROM portfolios/.test(c.sql))).toBe(false);
+    expect(sqls(calls)).toContain('COMMIT');
+  });
+
+  it('keeps non-transferred events writing the same read-model rows', async () => {
+    const { db, calls } = fakeDb();
+
+    await processPage(db, TESTNET_CONTRACT, page());
+
+    expect(calls.some((c) => c.sql.includes('INSERT INTO folders'))).toBe(true);
+    expect(calls.some((c) => c.sql.includes('INSERT INTO portfolios'))).toBe(true);
+    expect(calls.some((c) => c.sql.includes('INSERT INTO templates'))).toBe(true);
+    expect(calls.some((c) => c.sql.includes('INSERT INTO ownership_history'))).toBe(false);
+    expect(calls.some((c) => /UPDATE portfolios\s+SET owner/.test(c.sql))).toBe(false);
+  });
+});
+
 describe('pollOnce', () => {
   it('starts at the oldest retained ledger when there is no cursor or start ledger', async () => {
     const { db } = fakeDb();
@@ -153,7 +199,11 @@ describe('pollOnce', () => {
 
   it('prefers the saved cursor, then a reset start ledger, then INDEXER_START_LEDGER', async () => {
     const rpc = fakeRpc();
-    await pollOnce({ db: fakeDb({ state: { cursor: 'abc', start_ledger: '7' } }).db, rpc, config });
+    await pollOnce({
+      db: fakeDb({ state: { cursor: '0024284788768636927-4294967295', start_ledger: '7' } }).db,
+      rpc,
+      config,
+    });
     await pollOnce({
       db: fakeDb({ state: { start_ledger: '7' } }).db,
       rpc,
@@ -161,8 +211,43 @@ describe('pollOnce', () => {
     });
     await pollOnce({ db: fakeDb().db, rpc, config: { ...config, startLedger: 9 } });
 
-    expect(rpc.getEvents.mock.calls.map(([p]) => p.cursor ?? p.startLedger)).toEqual(['abc', 7, 9]);
+    expect(rpc.getEvents.mock.calls.map(([p]) => p.cursor ?? p.startLedger)).toEqual([
+      '0024284788768636927-4294967295',
+      7,
+      9,
+    ]);
     expect(rpc.getHealth).not.toHaveBeenCalled();
+  });
+
+  it('recovers from a corrupt cursor by resuming at last_ledger', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: 'garbage', last_ledger: '5654242' } });
+    const rpc = fakeRpc();
+
+    await pollOnce({ db, rpc, config });
+
+    expect(rpc.getEvents).toHaveBeenCalledWith({
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      startLedger: 5654242,
+    });
+    expect(calls.find((c) => c.params?.[0] === 'cursor')?.params).toEqual(['cursor', null]);
+    const recovered = calls.find((c) => c.params?.[0] === 'cursor_recovered');
+    expect(JSON.parse(recovered!.params![1] as string)).toMatchObject({
+      invalidCursor: 'garbage',
+      resumedAt: 5654242,
+    });
+  });
+
+  it('halts with cursor_invalid when neither the cursor nor last_ledger is valid', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: 'garbage' } });
+    const rpc = fakeRpc();
+
+    const err = await pollOnce({ db, rpc, config }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(CursorInvalidError);
+    expect(err.message).toMatch(/reset-cursor/);
+    expect(rpc.getEvents).not.toHaveBeenCalled();
+    expect(calls.find((c) => c.params?.[0] === 'status')?.params).toEqual(['status', 'cursor_invalid']);
   });
 
   it('halts with a clear error when the cursor is older than the retention window', async () => {
@@ -192,10 +277,56 @@ describe('pollOnce', () => {
     expect(rpc.getEvents).toHaveBeenLastCalledWith({
       contractId: TESTNET_CONTRACT,
       limit: 100,
-      startLedger: 101,
+      startLedger: 100,
     });
     const gap = calls.find((c) => c.params?.[0] === 'last_gap');
-    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({ missedFrom: 50, resumedAt: 101 });
+    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({
+      missedFrom: 50,
+      missedTo: 99,
+      resumedAt: 100,
+    });
+  });
+
+  it('retries from the new oldest ledger when the window moves while resuming', async () => {
+    const { db, calls } = fakeDb({ state: { start_ledger: '50' } });
+    const rpc = fakeRpc({
+      getEvents: jest
+        .fn()
+        .mockRejectedValueOnce(new LedgerRangeError('range', 100, 200))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 105, 210))
+        .mockResolvedValueOnce(page([])),
+    });
+
+    await pollOnce({ db, rpc, config: { ...config, onRetentionGap: 'skip' } });
+
+    expect(rpc.getEvents.mock.calls.map(([p]) => p.startLedger)).toEqual([50, 100, 105]);
+    const gap = calls.find((c) => c.params?.[0] === 'last_gap');
+    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({
+      missedFrom: 50,
+      missedTo: 104,
+      resumedAt: 105,
+    });
+  });
+
+  it('gives up after a bounded number of resume attempts', async () => {
+    const { db } = fakeDb({ state: { start_ledger: '50' } });
+    const rpc = fakeRpc({
+      getEvents: jest
+        .fn()
+        .mockRejectedValueOnce(new LedgerRangeError('range', 100, 200))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 101, 201))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 102, 202))
+        .mockRejectedValueOnce(new LedgerRangeError('range', 103, 203)),
+    });
+
+    const err = await pollOnce({
+      db,
+      rpc,
+      config: { ...config, onRetentionGap: 'skip', maxGapResumeAttempts: 2 },
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(RetentionGapError);
+    expect(rpc.getEvents).toHaveBeenCalledTimes(3);
   });
 
   it('clamps an old INDEXER_START_LEDGER on an empty database instead of halting', async () => {
@@ -212,10 +343,14 @@ describe('pollOnce', () => {
     expect(rpc.getEvents).toHaveBeenLastCalledWith({
       contractId: TESTNET_CONTRACT,
       limit: 100,
-      startLedger: 101,
+      startLedger: 100,
     });
     const gap = calls.find((c) => c.params?.[0] === 'last_gap');
-    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({ missedFrom: 5, resumedAt: 101 });
+    expect(JSON.parse(gap!.params![1] as string)).toMatchObject({
+      missedFrom: 5,
+      missedTo: 99,
+      resumedAt: 100,
+    });
   });
 
   it('does not treat a start ledger ahead of the RPC as a retention gap', async () => {
@@ -241,9 +376,97 @@ describe('scanned ledger', () => {
   });
 });
 
+describe('recorded RPC cassettes', () => {
+  it('ships the four required cassettes', () => {
+    expect(listCassettes()).toEqual(
+      expect.arrayContaining(['full-catch-up', 'empty-page', 'retention-gap', 'partial-page-tip'])
+    );
+  });
+
+  it('replays a full catch-up from a start ledger', async () => {
+    const { db, calls } = fakeDb();
+    const rpc = cassetteSource('full-catch-up');
+
+    await pollOnce({ db, rpc, config: { ...config, startLedger: 100 } });
+    await pollOnce({ db, rpc, config: { ...config, startLedger: 100 } });
+
+    expect(rpc.getEvents).toHaveBeenNthCalledWith(1, {
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      startLedger: 100,
+    });
+    expect(rpc.getEvents).toHaveBeenNthCalledWith(2, {
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      cursor: '0024284788768636927-0000000001',
+    });
+    expect(calls.filter((c) => c.params?.[0] === 'cursor').map((c) => c.params![1])).toEqual([
+      '0024284788768636927-0000000001',
+      '0024284788768636927-4294967295',
+    ]);
+  });
+
+  it('treats an empty page as caught up and keeps the returned cursor', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: '0024284788768636927-4294967295' } });
+    const rpc = cassetteSource('empty-page');
+
+    await pollOnce({ db, rpc, config });
+
+    expect(rpc.getEvents).toHaveBeenCalledWith({
+      contractId: TESTNET_CONTRACT,
+      limit: 100,
+      cursor: '0024284788768636927-4294967295',
+    });
+    expect(calls.some((c) => c.sql.includes('INSERT INTO contract_events'))).toBe(false);
+    expect(calls.find((c) => c.params?.[0] === 'cursor')?.params).toEqual([
+      'cursor',
+      '0024284788768636927-4294967295',
+    ]);
+  });
+
+  it('halts on a recorded retention-gap error', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: '0021474836480000000-0000000000' } });
+    const rpc = cassetteSource('retention-gap');
+
+    const err = await pollOnce({ db, rpc, config }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(RetentionGapError);
+    expect(err.message).toMatch(/ledger 5000000.*from 5533280.*docs\/operations.md/);
+    expect(calls.find((c) => c.params?.[0] === 'status')?.params).toEqual(['status', 'retention_gap']);
+  });
+
+  it('records the scanned ledger from a partial page at the tip', async () => {
+    const { db, calls } = fakeDb({ state: { cursor: '0024284788768636927-0000000001' } });
+    const rpc = cassetteSource('partial-page-tip');
+
+    await pollOnce({ db, rpc, config });
+
+    expect(calls.find((c) => c.params?.[0] === 'last_ledger')?.params).toEqual(['last_ledger', '5654242']);
+    expect(calls.find((c) => c.params?.[0] === 'cursor')?.params).toEqual([
+      'cursor',
+      '0024284788768636927-4294967295',
+    ]);
+  });
+
+  it('fails the test on an unrecorded request', async () => {
+    const rpc = cassetteSource('empty-page');
+    await expect(
+      rpc.getEvents({ contractId: TESTNET_CONTRACT, limit: 100, startLedger: 1 })
+    ).rejects.toThrow(/no cassette entry/);
+  });
+});
+
 describe('indexer loop', () => {
   it('reads the ledger out of an RPC event id', () => {
     expect(ledgerFromCursor(testnetEvents[0].id)).toBe(testnetEvents[0].ledger);
+  });
+
+  it('validates saved cursors', () => {
+    expect(isValidCursor('0024284788768636927-4294967295')).toBe(true);
+    expect(isValidCursor('garbage')).toBe(false);
+    expect(isValidCursor('')).toBe(false);
+    expect(isValidCursor('0-0')).toBe(false);
+    expect(isValidCursor('12-')).toBe(false);
   });
 
   it('backs off exponentially up to the cap', () => {
@@ -265,5 +488,53 @@ describe('indexer loop', () => {
     await indexer.stop();
 
     expect(rpc.getEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails a tick that exceeds its deadline, marks status error and recovers', async () => {
+    const { db, calls } = fakeDb();
+    let release: (() => void) | undefined;
+    const stuck = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const rpc = fakeRpc({
+      getEvents: jest
+        .fn()
+        .mockImplementationOnce(async () => {
+          await stuck;
+          return page([]);
+        })
+        .mockResolvedValue(page([])),
+    });
+
+    const indexer = createIndexer({
+      db,
+      rpc,
+      config: { ...config, tickTimeoutMs: 20, shutdownTimeoutMs: 200 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const errorWrite = calls.find((c) => c.params?.[0] === 'status' && c.params?.[1] === 'error');
+    expect(errorWrite).toBeDefined();
+
+    release!();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(rpc.getEvents.mock.calls.length).toBeGreaterThan(1);
+    await indexer.stop();
+  });
+
+  it('stop() returns within shutdownTimeoutMs during a stuck tick', async () => {
+    const { db } = fakeDb();
+    const rpc = fakeRpc({ getEvents: jest.fn(() => new Promise<GetEventsResult>(() => undefined)) });
+
+    const indexer = createIndexer({
+      db,
+      rpc,
+      config: { ...config, tickTimeoutMs: 60000, shutdownTimeoutMs: 20 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const started = Date.now();
+    await indexer.stop();
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });

@@ -1,77 +1,59 @@
 import 'dotenv/config';
-import { getEnv, rpcHeaders, rpcUrls } from '../config/env';
-import pool from '../db/client';
+import { createContainer } from '../container';
 import { migrate } from '../db/migrate';
 import { logger } from '../utils/logger';
-import { createFailoverEventSource, createRpcClient, redactUrl } from './rpc';
-import { createIndexer, ledgerFromCursor, readState, STATE } from './stellar';
+import { redactUrl } from './rpc';
+import { createIndexer } from './stellar';
+import { createHealthServer } from './httpHealth';
 
 /** Indexer process entrypoint: `npm run start:indexer` (or `dev:indexer`). */
 async function main(): Promise<void> {
-  const env = getEnv();
-  await migrate(pool);
+  const container = createContainer();
+  const { db, env } = container;
 
-  const urls = rpcUrls(env);
-  const headers = rpcHeaders(env);
-  const rpc =
-    urls.length > 1
-      ? createFailoverEventSource({
-          urls,
-          timeoutMs: env.STELLAR_RPC_TIMEOUT_MS,
-          failureThreshold: env.STELLAR_RPC_FAILURE_THRESHOLD,
-          cooldownMs: env.STELLAR_RPC_COOLDOWN_MS,
-          headers,
-          cursorLedger: () => {
-            const cursor = lastCursor;
-            if (!cursor) return undefined;
-            try {
-              return ledgerFromCursor(cursor);
-            } catch {
-              return undefined;
-            }
-          },
-        })
-      : createRpcClient({ url: urls[0], timeoutMs: env.STELLAR_RPC_TIMEOUT_MS, headers });
-  logger.info('Connecting indexer', { rpc: urls.map(redactUrl), rpcHeaders: Object.keys(headers) });
+  await migrate(db);
 
-  // Cached so the failover source can skip endpoints behind the saved cursor.
-  let lastCursor: string | undefined;
-  const refreshCursor = async () => {
-    lastCursor = (await readState(pool))[STATE.cursor];
-  };
-  await refreshCursor();
-  const cursorTimer = setInterval(() => void refreshCursor().catch(() => undefined), 1000);
-  cursorTimer.unref();
+  logger.info('Connecting indexer', { rpc: redactUrl(env.STELLAR_RPC_URL) });
 
-  const indexer = createIndexer({
-    db: pool,
-    rpc,
-    config: {
-      contractId: env.FOLDER_CONTRACT_ID,
-      pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
-      pageLimit: env.INDEXER_PAGE_LIMIT,
-      startLedger: env.INDEXER_START_LEDGER,
-      onRetentionGap: env.INDEXER_ON_RETENTION_GAP,
-      maxBackoffMs: env.INDEXER_MAX_BACKOFF_MS,
-      enrichTransactions: env.INDEXER_ENRICH_TRANSACTIONS,
-      enrichBatchSize: env.INDEXER_ENRICH_BATCH_SIZE,
-    },
-  });
+  const indexer = createIndexer(container.deps);
+
+  // Start the cache LISTEN connection so this process receives NOTIFY messages
+  // and invalidates its in-process cache. The indexer publishes NOTIFY messages
+  // after applying events (see the publish point in src/indexer/stellar.ts);
+  // if the LISTEN connection is down, cache staleness is bounded by the TTL.
+  await startCacheListener();
+
+  health.start();
+
+  // Hold the indexer lock for the life of the process so `retry-rejected`
+  // refuses to write the read model concurrently.
+  const lockClient = await pool.connect();
+  if (!(await tryLockIndexer(lockClient))) {
+    lockClient.release();
+    throw new Error('Another indexer process holds the indexer lock');
+  }
 
   const shutdown = async (signal: string) => {
     logger.info('Shutdown requested', { signal });
     const timeout = setTimeout(() => process.exit(1), env.SHUTDOWN_TIMEOUT_MS);
     timeout.unref();
+    await health.stop();
     await indexer.stop();
-    clearInterval(cursorTimer);
-    await pool.end();
+    await db.end();
     process.exit(0);
   };
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
-  process.on('SIGINT', () => void shutdown('SIGINT'));
+
+  installProcessHandlers({
+    logger,
+    shutdown,
+    isProduction: env.NODE_ENV === 'production',
+  });
 }
 
 main().catch((err) => {
-  logger.error('Indexer failed to start', { error: err instanceof Error ? err.message : err });
+  logger.error('Indexer failed to start', {
+    error: err instanceof Error ? err.message : err,
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   process.exit(1);
 });
