@@ -1,0 +1,22 @@
+{
+  "testnet": {
+    "networkPassphrase": "Test SDF Network ; September 2015",
+    "defaultRpcUrl": "https://soroban-testnet.stellar.org",
+    "contractId": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+  },
+  "mainnet": {
+    "networkPassphrase": "Public Global Stellar Network ; September 2015",
+    "defaultRpcUrl": "https://soroban-mainnet.stellar.org",
+    "contractId": "CCJZ5DGASBWQXR5MPFCJXMBI333XE5U3FSJTNQU7RIKE3P5GN2K2WYD5"
+  },
+  "futurenet": {
+    "networkPassphrase": "Test SDF Future Network ; October 2022",
+    "defaultRpcUrl": "https://rpc-futurenet.stellar.org",
+    "contractId": "CDMLFMKMMD7MWZP3FKUBZPVHTUEDLSX4BYGYKH4GCESXYHS3IHQ4EIG4"
+  },
+  "local": {
+    "networkPassphrase": "Standalone Network ; February 2017",
+    "defaultRpcUrl": "http://localhost:8000/soroban/rpc",
+    "contractId": ""
+  }
+}

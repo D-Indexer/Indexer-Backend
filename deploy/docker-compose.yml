@@ -3,33 +3,59 @@
 # repo root (compose.yaml includes this file). Overrides come from your shell
 # or a root .env file, e.g. FOLDER_CONTRACT_ID=... docker compose up.
 
+# Single source of truth for the Kubo (IPFS) version. CI reads this same value
+# (see .github/workflows/ci.yml) so integration tests run against the exact
+# node version the local stack uses. Override with KUBO_VERSION=... if needed.
+x-kubo-version: &kubo-version ${KUBO_VERSION:-v0.29.0}
+
 x-app-env: &app-env
   NODE_ENV: development
   LOG_LEVEL: ${LOG_LEVEL:-info}
-  DATABASE_URL: postgresql://folder:folder@postgres:5432/folder
+  # Secrets are mounted as files and read via the *_FILE convention, so they
+  # never appear in `docker inspect` or the process environment.
+  DATABASE_URL_FILE: /run/secrets/database_url
   STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
   STELLAR_NETWORK_PASSPHRASE: ${STELLAR_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
   FOLDER_CONTRACT_ID: ${FOLDER_CONTRACT_ID:-CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV}
   # Testnet deployment ledger; clamped to the oldest retained ledger once it ages out.
   INDEXER_START_LEDGER: ${INDEXER_START_LEDGER:-5647760}
   INDEXER_ON_RETENTION_GAP: ${INDEXER_ON_RETENTION_GAP:-halt}
+  # Embedded health server port inside the indexer container.
+  INDEXER_HTTP_PORT: ${INDEXER_HTTP_PORT:-3001}
   IPFS_API_URL: http://ipfs:5001
+  # Scoped Kubo RPC authorization token (Kubo >= 0.25 API.Authorizations).
+  IPFS_API_AUTH_FILE: /run/secrets/ipfs_api_auth
   IPFS_GATEWAY: ${IPFS_GATEWAY:-https://ipfs.io/ipfs}
   CORS_ORIGIN: ${CORS_ORIGIN:-}
+
+# Chaos profile overrides (issue #251). When `--profile chaos` is active these
+# values win over x-app-env and route every upstream through Toxiproxy.
+# Toxiproxy proxies are created by scripts/chaos/init.sh; the proxy names are
+# postgres, ipfs and rpc.
+x-chaos-env: &chaos-env
+  DATABASE_URL: postgresql://folder:folder@toxiproxy:5433/folder
+  IPFS_API_URL: http://toxiproxy:5002
+  STELLAR_RPC_URL: http://toxiproxy:8545
 
 services:
   postgres:
     image: postgres:16
     environment:
       POSTGRES_USER: folder
-      POSTGRES_PASSWORD: folder
+      # The official image reads the password from a file when *_FILE is set.
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: folder
+    secrets:
+      - postgres_password
     ports:
       - '127.0.0.1:5432:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
       # Applied on first start of an empty volume; the indexer re-applies it (idempotent).
       - ../database/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+      # Creates the least-privilege folder_api / folder_indexer roles. Runs after
+      # the schema so grants target existing tables; idempotent on re-apply.
+      - ../database/roles.sql:/docker-entrypoint-initdb.d/002-roles.sql:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U folder -d folder']
       interval: 5s
@@ -37,13 +63,17 @@ services:
       retries: 10
 
   ipfs:
-    image: ipfs/kubo:v0.29.0
+    image: ipfs/kubo:${KUBO_VERSION:-v0.29.0}
     ports:
-      # The Kubo RPC API is an admin interface: keep it on localhost.
-      - '127.0.0.1:5001:5001'
+      # The Kubo RPC API is an admin interface: it is NOT published to the host.
+      # Only services on the internal `ipfs-rpc` network (api, indexer) can reach it.
       - '127.0.0.1:8080:8080'
     volumes:
       - ipfs-data:/data/ipfs
+      - ./kubo/configure-rpc-auth.sh:/container-init.d/010-configure-rpc-auth.sh:ro
+    networks:
+      - default
+      - ipfs-rpc
     healthcheck:
       test: ['CMD', 'ipfs', 'id']
       interval: 10s
@@ -55,28 +85,65 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     image: folder-indexer-backend:local
+    # The image's ENTRYPOINT is tini, which runs as PID 1, forwards SIGTERM to
+    # Node and reaps zombies. `init: true` is a belt-and-braces fallback for
+    # images built before tini was baked in; it is a no-op when tini is already
+    # PID 1. The command override is passed to tini as the child process.
+    init: true
     command: ['node', 'dist/indexer/main.js']
+    environment:
+      <<: *app-env
+      <<: *chaos-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ipfs:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      # Probe the indexer's own embedded health server (single in-process HTTP
+      # request) instead of spawning a CLI process that opens a DB connection.
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:'+(process.env.INDEXER_HTTP_PORT||3001)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: folder-indexer-backend:local
+    # Dedicated background job runner. Scale with `docker compose up --scale worker=N`;
+    # Postgres-based leasing guarantees each scheduled tick runs exactly once.
+    command: ['node', 'dist/jobs/worker.js']
     environment: *app-env
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
-    healthcheck:
-      test: ['CMD', 'node', 'dist/indexer/cli.js', 'healthcheck']
-      interval: 15s
-      timeout: 10s
-      start_period: 60s
-      retries: 5
 
   api:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
     image: folder-indexer-backend:local
+    # See the indexer service: tini is PID 1 via the image ENTRYPOINT, with
+    # `init: true` as a fallback so SIGTERM always reaches Node.
+    init: true
     command: ['node', 'dist/server.js']
     environment:
       <<: *app-env
+      <<: *chaos-env
       PORT: 3000
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
     ports:
       - '${API_PORT:-3000}:3000'
     depends_on:
@@ -99,6 +166,38 @@ services:
       timeout: 5s
       retries: 5
 
+  # Toxiproxy fronts Postgres, Kubo and the Stellar RPC so network faults can be
+  # injected locally. Only started with `docker compose --profile chaos up`.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    profiles: ['chaos']
+    command: ['-host', '0.0.0.0']
+    ports:
+      # Control API used by scripts/chaos/*.sh.
+      - '127.0.0.1:8474:8474'
+      # Proxy ports (one per upstream).
+      - '127.0.0.1:5433:5433'
+      - '127.0.0.1:5002:5002'
+      - '127.0.0.1:8545:8545'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ipfs:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:8474/version']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   postgres-data:
   ipfs-data:
+
+# Smoke check that the indexer container reaches the healthy state:
+#   docker compose up -d --build
+#   docker compose ps --format '{{.Service}} {{.Health}}' | grep '^indexer healthy$'
+# or wait for it explicitly:
+#   until [ "$(docker inspect -f '{{.State.Health.Status}}' \
+#     "$(docker compose ps -q indexer)")" = healthy ]; do sleep 2; done

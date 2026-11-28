@@ -1,7 +1,71 @@
 import type { PoolClient } from 'pg';
+import { CID } from 'multiformats/cid';
+import { base32 } from 'multiformats/bases/base32';
 import type { DecodedEvent } from './decode';
+import { normaliseCid } from '../services/cid';
 
 export type Queryable = Pick<PoolClient, 'query'>;
+
+export interface NormalisedCid {
+  /** Canonical CIDv1 base32 form, or null when the input isn't a parseable CID. */
+  cid: string | null;
+  /** The original string exactly as stored on-chain. */
+  raw: string;
+  valid: boolean;
+}
+
+/**
+ * Normalise an arbitrary CID string to canonical CIDv1 base32. CIDv0 (`Qm...`)
+ * and other multibase encodings of the same content collapse to one form so
+ * equality checks across the read model are encoding-independent. Unparseable
+ * strings are flagged rather than rejected.
+ */
+export function normaliseCid(raw: string): NormalisedCid {
+  try {
+    const cid = CID.parse(raw);
+    return { cid: cid.toV1().toString(base32), raw, valid: true };
+  } catch {
+    return { cid: null, raw, valid: false };
+  }
+}
+
+/**
+ * Ledger of the event currently being applied. Set by applyEvent so the
+ * validity-range helpers below can close/open ranges without threading the
+ * ledger through every call site.
+ */
+let currentLedger = 0;
+
+/**
+ * Close the open validity range for an entity and open a new one starting at
+ * `ledger`. Ranges are half-open `[from_ledger, to_ledger)`. The close is a
+ * no-op when the open range already starts at `ledger` (replay of the same
+ * event), and the insert is an upsert keyed on `(entity, from_ledger)` so a
+ * cursor rewind converges instead of duplicating rows.
+ */
+async function openRange(
+  db: Queryable,
+  table: 'folder_versions' | 'portfolio_versions' | 'template_versions',
+  keyColumn: 'owner' | 'id',
+  key: string,
+  ledger: number,
+  columns: string[],
+  values: unknown[]
+): Promise<void> {
+  await db.query(
+    `UPDATE ${table} SET to_ledger = $2
+     WHERE ${keyColumn} = $1 AND to_ledger IS NULL AND from_ledger < $2`,
+    [key, ledger]
+  );
+  const allColumns = [keyColumn, 'from_ledger', 'to_ledger', ...columns];
+  const placeholders = allColumns.map((_, i) => `$${i + 1}`).join(', ');
+  const updates = columns.map((c) => `${c} = EXCLUDED.${c}`).join(', ');
+  await db.query(
+    `INSERT INTO ${table} (${allColumns.join(', ')}) VALUES (${placeholders})
+     ON CONFLICT (${keyColumn}, from_ledger) DO UPDATE SET ${updates}`,
+    [key, ledger, null, ...values]
+  );
+}
 
 /**
  * Apply one decoded contract event to the read model. Runs inside the page
@@ -11,6 +75,7 @@ export type Queryable = Pick<PoolClient, 'query'>;
  * cursor rewind (docs/operations.md) converges to the same state.
  */
 export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): Promise<void> {
+  currentLedger = event.ledger;
   switch (event.topic) {
     case 'init':
       await db.query(
@@ -36,6 +101,9 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
          ON CONFLICT (owner) DO UPDATE SET name = EXCLUDED.name, updated_at = EXCLUDED.updated_at`,
         [event.owner, event.folderName, at]
       );
+      await openRange(db, 'folder_versions', 'owner', event.owner, event.ledger, ['name'], [
+        event.folderName,
+      ]);
       return;
 
     case 'tmpl_reg':
@@ -44,6 +112,29 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
          ON CONFLICT (id) DO UPDATE
            SET metadata_uri = EXCLUDED.metadata_uri, creator = EXCLUDED.creator`,
         [event.templateId, event.metadataUri, event.creator, at]
+      );
+      // Dense, replay-stable version number: count of prior versions + 1.
+      await db.query(
+        `INSERT INTO template_versions
+           (id, version, metadata_uri, creator, event_id, at, from_ledger, to_ledger)
+         VALUES (
+           $1,
+           (SELECT COALESCE(MAX(version), 0) + 1 FROM template_versions WHERE id = $1),
+           $2, $3, $4, $5, $6, NULL)
+         ON CONFLICT (id, version) DO UPDATE
+           SET metadata_uri = EXCLUDED.metadata_uri, creator = EXCLUDED.creator,
+               event_id = EXCLUDED.event_id, at = EXCLUDED.at,
+               from_ledger = EXCLUDED.from_ledger, to_ledger = NULL`,
+        [event.templateId, event.metadataUri, event.creator, event.eventId, at, event.ledger]
+      );
+      await openRange(
+        db,
+        'template_versions',
+        'id',
+        event.templateId,
+        event.ledger,
+        ['metadata_uri', 'creator', 'event_id', 'at'],
+        [event.metadataUri, event.creator, event.eventId, at]
       );
       return;
 
@@ -59,31 +150,104 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
         event.templateId,
         at,
       ]);
+      await openRange(db, 'folder_versions', 'owner', event.owner, event.ledger, ['template_id'], [
+        event.templateId,
+      ]);
+      await openRange(
+        db,
+        'portfolio_versions',
+        'owner',
+        event.owner,
+        event.ledger,
+        ['template_id'],
+        [event.templateId]
+      );
       return;
 
-    case 'port_mint':
+    case 'port_mint': {
       // mint_portfolio also sets the owner's selected template.
+      const cid = normaliseCid(event.ipfsCid);
       await db.query(
-        `INSERT INTO portfolios (owner, template_id, ipfs_cid, minted_at, updated_at)
-         VALUES ($1, $2, $3, $4, $4)
+        `INSERT INTO portfolios
+           (owner, template_id, ipfs_cid, ipfs_cid_raw, cid_valid, minted_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $6)
          ON CONFLICT (owner) DO UPDATE
            SET template_id = EXCLUDED.template_id, ipfs_cid = EXCLUDED.ipfs_cid,
+               ipfs_cid_raw = EXCLUDED.ipfs_cid_raw, cid_valid = EXCLUDED.cid_valid,
                updated_at = EXCLUDED.updated_at`,
-        [event.owner, event.templateId, event.ipfsCid, at]
+        [event.owner, event.templateId, cid, at]
       );
       await db.query('UPDATE folders SET template_id = $2, updated_at = $3 WHERE owner = $1', [
         event.owner,
         event.templateId,
         at,
       ]);
-      return;
-
-    case 'port_upd':
-      await db.query('UPDATE portfolios SET ipfs_cid = $2, updated_at = $3 WHERE owner = $1', [
+      await db.query(
+        `INSERT INTO portfolio_versions
+           (owner, version, cid, template_id, event_id, at, from_ledger, to_ledger)
+         VALUES (
+           $1,
+           (SELECT COALESCE(MAX(version), 0) + 1 FROM portfolio_versions WHERE owner = $1),
+           $2, $3, $4, $5, $6, NULL)
+         ON CONFLICT (owner, version) DO UPDATE
+           SET cid = EXCLUDED.cid, template_id = EXCLUDED.template_id,
+               event_id = EXCLUDED.event_id, at = EXCLUDED.at,
+               from_ledger = EXCLUDED.from_ledger, to_ledger = NULL`,
+        [event.owner, cid, event.templateId, event.eventId, at, event.ledger]
+      );
+      await openRange(
+        db,
+        'portfolio_versions',
+        'owner',
         event.owner,
-        event.ipfsCid,
-        at,
+        event.ledger,
+        ['cid', 'template_id', 'event_id', 'at'],
+        [cid, event.templateId, event.eventId, at]
+      );
+      await openRange(db, 'folder_versions', 'owner', event.owner, event.ledger, ['template_id'], [
+        event.templateId,
       ]);
       return;
+    }
+
+    case 'port_upd': {
+      const cid = normaliseCid(event.ipfsCid);
+      await db.query('UPDATE portfolios SET ipfs_cid = $2, updated_at = $3 WHERE owner = $1', [
+        event.owner,
+        cid,
+        at,
+      ]);
+      await db.query(
+        `INSERT INTO portfolio_versions
+           (owner, version, cid, template_id, event_id, at, from_ledger, to_ledger)
+         VALUES (
+           $1,
+           (SELECT COALESCE(MAX(version), 0) + 1 FROM portfolio_versions WHERE owner = $1),
+           $2,
+           (SELECT template_id FROM portfolios WHERE owner = $1),
+           $3, $4, $5, NULL)
+         ON CONFLICT (owner, version) DO UPDATE
+           SET cid = EXCLUDED.cid, template_id = EXCLUDED.template_id,
+               event_id = EXCLUDED.event_id, at = EXCLUDED.at,
+               from_ledger = EXCLUDED.from_ledger, to_ledger = NULL`,
+        [event.owner, cid, event.eventId, at, event.ledger]
+      );
+      await openRange(
+        db,
+        'portfolio_versions',
+        'owner',
+        event.owner,
+        event.ledger,
+        ['cid', 'event_id', 'at'],
+        [cid, event.eventId, at]
+      );
+      return;
+
+    default: {
+      // Exhaustiveness check: if a new topic is added to DecodedEvent without a
+      // handler above, `event` is no longer `never` here and this fails to compile.
+      const unhandled: never = event;
+      throw new Error(`unhandled event topic: ${JSON.stringify(unhandled)}`);
+    }
   }
 }
