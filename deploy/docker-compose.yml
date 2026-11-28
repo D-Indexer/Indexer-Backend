@@ -53,6 +53,9 @@ services:
       - postgres-data:/var/lib/postgresql/data
       # Applied on first start of an empty volume; the indexer re-applies it (idempotent).
       - ../database/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+      # Creates the least-privilege folder_api / folder_indexer roles. Runs after
+      # the schema so grants target existing tables; idempotent on re-apply.
+      - ../database/roles.sql:/docker-entrypoint-initdb.d/002-roles.sql:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U folder -d folder']
       interval: 5s

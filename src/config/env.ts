@@ -341,6 +341,16 @@ export function getUploadQuotaConfig(env: AppEnv = getEnv()): UploadQuotaConfig 
   };
 }
 
+/** Connection string for the internet-facing API process (falls back to DATABASE_URL). */
+export function getApiDatabaseUrl(env: AppEnv): string {
+  return env.API_DATABASE_URL ?? env.DATABASE_URL;
+}
+
+/** Connection string for the indexer process (falls back to DATABASE_URL). */
+export function getIndexerDatabaseUrl(env: AppEnv): string {
+  return env.INDEXER_DATABASE_URL ?? env.DATABASE_URL;
+}
+
 let cachedEnv: AppEnv | null = null;
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {

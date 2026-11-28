@@ -3,6 +3,8 @@
  * TEST_DATABASE_URL is set (CI provides one; locally see CONTRIBUTING.md).
  * The database is wiped: point it at a throwaway database.
  */
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { Pool } from 'pg';
 import { migrate } from '../db/migrate';
 import { GetEventsResult } from '../indexer/rpc';
@@ -11,6 +13,17 @@ import { addr, makeEvent, OWNER, str, TESTNET_CONTRACT, testnetEvents, u32 } fro
 
 const url = process.env.TEST_DATABASE_URL;
 const describeDb = url ? describe : describe.skip;
+
+const API_ROLE = 'folder_api';
+const API_ROLE_PASSWORD = 'folder_api_test_password';
+const ROLES_SQL = readFileSync(join(__dirname, '..', '..', 'database', 'roles.sql'), 'utf8');
+
+function apiRoleUrl(base: string): string {
+  const parsed = new URL(base);
+  parsed.username = API_ROLE;
+  parsed.password = API_ROLE_PASSWORD;
+  return parsed.toString();
+}
 
 function page(events = testnetEvents, cursor = 'cursor-1'): GetEventsResult {
   return { events, cursor, latestLedger: 5654239, oldestLedger: 5533280 };
@@ -23,6 +36,9 @@ describeDb('indexer against Postgres', () => {
     pool = new Pool({ connectionString: url });
     await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
     await migrate(pool);
+    // Create the least-privilege roles and grant them access to the schema.
+    await pool.query(ROLES_SQL);
+    await pool.query(`ALTER ROLE ${API_ROLE} WITH LOGIN PASSWORD '${API_ROLE_PASSWORD}'`);
   });
 
   beforeEach(async () => {

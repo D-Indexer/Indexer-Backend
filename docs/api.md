@@ -396,6 +396,23 @@ Behaviour:
 
 Errors: `400` invalid CID, `404` `CID not referenced`, `502` / `504` (IPFS).
 
+If the portfolio's `ipfsCid` has been denylisted (see [Takedowns](#takedowns-and-the-cid-denylist)),
+the response still includes the CID but adds `"contentRemoved": true`:
+
+```json
+{
+  "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+  "templateId": 1,
+  "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
+  "contentRemoved": true,
+  "mintedAt": "2026-11-09T22:23:07.000Z",
+  "updatedAt": "2026-11-09T22:23:52.000Z"
+}
+```
+
+The flag is only present when `true`. The CID is never rewritten: the on-chain reference
+cannot be removed, only the content behind it is no longer served or pinned.
+
 ## `GET /templates`
 
 All registered templates (`tmpl_reg`), ordered by id. Not paginated yet.

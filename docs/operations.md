@@ -317,8 +317,6 @@ Fix the credentials or create the database, then restart.
 - Backups: the read model can always be rebuilt from the ledger while events are in the RPC
   window. Beyond it, `contract_events` is the only copy, so back it up like any other
   database.
-- Use a least-privilege role in production. It needs `CREATE` for the migration and
-  read/write on the tables above.
 - Connect locally to the compose database:
   `docker compose exec postgres psql -U folder folder`.
 
