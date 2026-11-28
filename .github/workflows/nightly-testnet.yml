@@ -17,6 +17,53 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  simulation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SIMULATION_SEEDS: '500'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: folder
+          POSTGRES_PASSWORD: folder
+          POSTGRES_DB: folder_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U folder"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run simulation suite (large seed count)
+        env:
+          TEST_DATABASE_URL: postgresql://folder:folder@localhost:5432/folder_test
+          LOG_LEVEL: info
+        run: |
+          set -o pipefail
+          npx jest --runInBand src/__tests__/simulation 2>&1 | tee "$RUNNER_TEMP/simulation.log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Simulation suite failed. Reproduce with the seed(s) printed above."
+            grep -E 'seed[ =:]' "$RUNNER_TEMP/simulation.log" || true
+          fi
+          exit "$status"
+
   testnet:
     runs-on: ubuntu-latest
     timeout-minutes: 30

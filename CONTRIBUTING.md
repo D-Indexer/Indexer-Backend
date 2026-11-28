@@ -31,6 +31,19 @@ load instead of type-checking them, so startup is fast. Type checking is a separ
 (`npm run typecheck`). Or run everything in containers with `docker compose up --build`
 (see the README).
 
+### Dev container
+
+Prefer not to install anything locally? Open the repo in GitHub Codespaces or in VS Code
+with the [Dev Containers](https://code.visualstudio.com/docs/devcontainers/containers)
+extension. The configuration in [`.devcontainer/`](.devcontainer) starts a Node 20 workspace
+container alongside Postgres and Kubo (IPFS), and installs the Stellar CLI at the same
+pinned version CI uses (see the nightly workflow). `TEST_DATABASE_URL` and the `.env`
+defaults are preset, and `npm ci` plus `npm run db:migrate` run automatically on creation,
+so `npm run check` (including the Postgres tests) passes with no manual steps.
+
+The services are reachable exactly as in the local setup above: Postgres on
+`localhost:5432` and Kubo on `localhost:5001`.
+
 ## Checks
 
 CI runs these on every pull request. Run them before pushing:
