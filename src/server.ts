@@ -1,36 +1,56 @@
 import 'dotenv/config';
+import type { ServerResponse } from 'node:http';
 import { createApp } from './app';
-import { getEnv } from './config/env';
-import pool from './db/client';
+import { createContainer } from './container';
 import { logger } from './utils/logger';
+import { installProcessHandlers } from './utils/process';
+import { initErrorReporter, getErrorReporter } from './utils/errorReporter';
 
-/** API process entrypoint. The indexer runs separately: see src/indexer/main.ts. */
-const env = getEnv();
-const app = createApp(env);
+/**
+ * API process entrypoint.
+ *
+ * This is one of the only modules allowed to read environment variables and
+ * start I/O. Everything else receives its dependencies explicitly from the
+ * composition root (`src/container.ts`). The indexer runs separately: see
+ * `src/indexer/main.ts`.
+ */
+const container = createContainer();
+const { env, pool } = container;
+const app = createApp(container.deps);
+
+const errorReporter = initErrorReporter({
+  dsn: env.ERROR_TRACKING_DSN,
+  environment: env.NODE_ENV,
+  release: env.RELEASE_VERSION,
+  logger,
+});
+
+/** In-flight responses, so shutdown can mark them `Connection: close`. */
+const inFlight = new Set<ServerResponse>();
+
+app.use((_req, res, next) => {
+  if (isShuttingDown()) {
+    res.setHeader('Connection', 'close');
+    res.setHeader('Retry-After', '1');
+  }
+  inFlight.add(res);
+  res.on('close', () => inFlight.delete(res));
+  next();
+});
 
 const server = app.listen(env.PORT, () => {
   logger.info('Server started', { port: env.PORT, nodeEnv: env.NODE_ENV });
 });
 
-// #190 – Harden against slow-header / slow-body clients and LB keep-alive mismatch.
-// headersTimeout: abort connections that don't complete headers in time (slowloris defence).
-// requestTimeout: abort stalled upload bodies and release their buffers.
-// keepAliveTimeout: must exceed the upstream LB idle timeout to avoid 502s on reused sockets.
-//   Common LB defaults: AWS ALB 60 s, GCP/Nginx 75 s. Default here is 65 s, raise if needed.
-// maxRequestsPerSocket: 0 = unlimited (Node default); set > 0 to cap requests per connection.
-server.headersTimeout = env.SERVER_HEADERS_TIMEOUT_MS;
-server.requestTimeout = env.SERVER_REQUEST_TIMEOUT_MS;
-server.keepAliveTimeout = env.SERVER_KEEP_ALIVE_TIMEOUT_MS;
-server.maxRequestsPerSocket = env.SERVER_MAX_REQUESTS_PER_SOCKET;
-
-logger.info('HTTP server timeouts configured', {
-  headersTimeoutMs: env.SERVER_HEADERS_TIMEOUT_MS,
-  requestTimeoutMs: env.SERVER_REQUEST_TIMEOUT_MS,
-  keepAliveTimeoutMs: env.SERVER_KEEP_ALIVE_TIMEOUT_MS,
-  maxRequestsPerSocket: env.SERVER_MAX_REQUESTS_PER_SOCKET,
-});
+let shuttingDown = false;
 
 async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) {
+    logger.info('Shutdown already in progress', { signal });
+    return;
+  }
+  shuttingDown = true;
+
   logger.info('Shutdown requested', { signal });
 
   const timeout = setTimeout(() => {
@@ -39,14 +59,39 @@ async function shutdown(signal: string): Promise<void> {
   }, env.SHUTDOWN_TIMEOUT_MS);
   timeout.unref();
 
+  // Force-close whatever is still open before the hard timeout.
+  const forceClose = setTimeout(() => {
+    logger.warn('Force-closing remaining connections', { forceCloseMs: env.SHUTDOWN_FORCE_CLOSE_MS });
+    closeAllConnections();
+  }, env.SHUTDOWN_FORCE_CLOSE_MS);
+  forceClose.unref();
+
+  // Ask in-flight responses to close their connection once they finish.
+  for (const res of inFlight) {
+    if (!res.headersSent) res.setHeader('Connection', 'close');
+  }
+
+  // Stop accepting new connections and close idle keep-alive sockets.
+  closeIdleConnections();
+
   server.close(async (err) => {
+    clearTimeout(forceClose);
     if (err) {
       logger.error('HTTP server close failed', { error: err.message });
       clearTimeout(timeout);
       process.exit(1);
     }
 
-    await pool.end();
+    try {
+      await pool.end();
+    } catch (poolErr) {
+      logger.error('Pool shutdown failed', {
+        error: poolErr instanceof Error ? poolErr.message : String(poolErr),
+      });
+      clearTimeout(timeout);
+      process.exit(1);
+    }
+
     clearTimeout(timeout);
     logger.info('Shutdown complete');
     process.exit(0);
@@ -61,13 +106,11 @@ process.on('SIGINT', () => {
   void shutdown('SIGINT');
 });
 
-process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled promise rejection', { reason });
-});
-
-process.on('uncaughtException', (err) => {
-  logger.error('Uncaught exception', { error: err.message });
-  void shutdown('uncaughtException');
+installProcessHandlers({
+  logger,
+  shutdown,
+  errorReporter: getErrorReporter(),
+  isProduction: env.NODE_ENV === 'production',
 });
 
 export default app;
