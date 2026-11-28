@@ -13,8 +13,8 @@ export class HttpError extends Error {
   }
 }
 
-export function badRequest(message: string): HttpError {
-  return new HttpError(400, message);
+export function badRequest(message: string, details?: unknown): HttpError {
+  return new HttpError(400, message, true, details);
 }
 
 export function notFound(message: string): HttpError {

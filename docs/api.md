@@ -7,8 +7,11 @@ responses from the local stack indexing the testnet contract.
 | ------ | ------------------------------------------------ | ------------------------------------- |
 | `GET`  | [`/`](#get-)                                     | Service banner                        |
 | `GET`  | [`/health`](#get-health)                         | API + database health, indexer status |
+| `GET`  | [`/folders`](#get-folders)                       | Folders ordered by claim time         |
 | `GET`  | [`/folders/:address`](#get-foldersaddress)       | Folder claimed by an address          |
 | `GET`  | [`/folders/name/:name`](#get-foldersnamename)    | Folder by name                        |
+| `POST` | [`/folders/lookup`](#post-folderslookup)         | Batch folder lookup by address        |
+| `GET`  | [`/portfolios`](#get-portfolios)                 | Portfolios ordered by mint/update time |
 | `GET`  | [`/portfolios/:address`](#get-portfoliosaddress) | Portfolio NFT minted by an address    |
 | `GET`  | [`/portfolios/:address/versions`](#get-portfoliosaddressversions) | Portfolio version history |
 | `GET`  | [`/portfolios/by-cid/:cid`](#get-portfoliosby-cidcid) | Portfolios referencing a CID      |
@@ -221,6 +224,58 @@ curl localhost:3000/folders/name/smoke-1794262900.folder
 Errors: `400` invalid name, `404` `Folder not found`. Hidden entries are still returned,
 with `moderation: { hidden: true }`.
 
+## `GET /folders`
+
+Keyset-paginated list of folders ordered by `claimed_at` (ascending, ties broken by owner).
+Hidden (moderated) folders are excluded.
+
+Query params:
+
+- `order` — only `claimed_at` (default).
+- `limit` — 1–100, default 20.
+- `cursor` — opaque cursor from the previous page's `nextCursor`.
+
+```bash
+curl 'localhost:3000/folders?limit=2'
+```
+
+```json
+{
+  "items": [
+    {
+      "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+      "name": "smoke-1794262900.folder",
+      "templateId": 1,
+      "claimedAt": "2026-11-09T22:22:27.000Z",
+      "updatedAt": "2026-11-09T22:23:07.000Z"
+    }
+  ],
+  "nextCursor": "djE6Y2xhaW1lZF9hdDoyMDI2LTExLTA5VDIyOjIyOjI3LjAwMFo6R0FQQU1UVFZIQjdSWjVEUUhFSU5aTjNHUVlSQ1hYV05DUU5RU1k1WUFVNktSUVVZWDJRSlQyQ00"
+}
+```
+
+Pass `nextCursor` back as `cursor` to get the next page; `nextCursor` is `null` on the last
+page. Cursors are opaque and versioned: a tampered, malformed, or wrong-`order` cursor
+returns `400 Invalid cursor`. Pagination is stable under concurrent inserts (no duplicates
+or gaps) because the cursor is a strict `(claimed_at, owner)` comparison.
+
+Errors: `400` invalid `order`, `limit`, or `cursor`.
+
+## `GET /portfolios`
+
+Keyset-paginated list of portfolios ordered by `minted_at` (default) or `updated_at`
+(ascending, ties broken by owner). Hidden (moderated) portfolios are excluded.
+
+Query params: `order` (`minted_at` | `updated_at`), `limit` (1–100, default 20), `cursor`.
+Response shape is `{ "items": [...], "nextCursor": "…" | null }` with the same item shape as
+[`GET /portfolios/:address`](#get-portfoliosaddress).
+
+```bash
+curl 'localhost:3000/portfolios?order=updated_at&limit=20'
+```
+
+Errors: `400` invalid `order`, `limit`, or `cursor`.
+
 ## `GET /portfolios/:address`
 
 Portfolio NFT minted by `address` (`port_mint`; `ipfsCid` follows `port_upd`, `templateId`
@@ -415,6 +470,68 @@ the response still includes the CID but adds `"contentRemoved": true`:
 
 The flag is only present when `true`. The CID is never rewritten: the on-chain reference
 cannot be removed, only the content behind it is no longer served or pinned.
+
+## `POST /folders/lookup`
+
+Resolve up to 100 folder owners in one request. The body takes `addresses`: an array of
+1–100 Stellar addresses (`G...` or `C...`). Duplicates are removed before the lookup, and
+all owners are resolved with a single SQL query. The response is a map keyed by address;
+owners without a folder map to `null`.
+
+```bash
+curl -X POST localhost:3000/folders/lookup \
+  -H 'content-type: application/json' \
+  -d '{"addresses":["GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM","GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"]}'
+```
+
+```json
+{
+  "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM": {
+    "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+    "name": "smoke-1794262900.folder",
+    "templateId": 1,
+    "claimedAt": "2026-11-09T22:22:27.000Z",
+    "updatedAt": "2026-11-09T22:23:07.000Z"
+  },
+  "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5": null
+}
+```
+
+Errors: `400` when `addresses` is missing, empty, longer than 100, or contains invalid
+entries. Every invalid entry is reported individually in `details`:
+
+```json
+{
+  "error": "Invalid Stellar address",
+  "details": [{ "index": 1, "address": "not-an-address", "message": "Invalid Stellar address" }],
+  "requestId": "…"
+}
+```
+
+## `POST /portfolios/lookup`
+
+Same contract as [`POST /folders/lookup`](#post-folderslookup), returning portfolios keyed
+by owner address with `null` for owners without a minted portfolio.
+
+```bash
+curl -X POST localhost:3000/portfolios/lookup \
+  -H 'content-type: application/json' \
+  -d '{"addresses":["GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM"]}'
+```
+
+```json
+{
+  "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM": {
+    "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+    "templateId": 1,
+    "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
+    "mintedAt": "2026-11-09T22:23:07.000Z",
+    "updatedAt": "2026-11-09T22:23:52.000Z"
+  }
+}
+```
+
+Errors: `400` as above.
 
 ## `GET /templates`
 

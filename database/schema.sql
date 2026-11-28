@@ -54,6 +54,24 @@ CREATE TABLE IF NOT EXISTS folders (
   last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
 );
 
+-- Moderation: a hidden folder/portfolio is excluded from the listing endpoints.
+-- Rows are keyed by the same key as the listed table (folders.owner / portfolios.owner).
+CREATE TABLE IF NOT EXISTS hidden_folders (
+  owner      TEXT PRIMARY KEY,
+  hidden_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS hidden_portfolios (
+  owner      TEXT PRIMARY KEY,
+  hidden_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Keyset listing indexes. The trailing owner column makes each ordering total,
+-- so a cursor on (timestamp, owner) never repeats or skips a row.
+CREATE INDEX IF NOT EXISTS idx_folders_claimed_at ON folders (claimed_at, owner);
+CREATE INDEX IF NOT EXISTS idx_portfolios_minted_at ON portfolios (minted_at, owner);
+CREATE INDEX IF NOT EXISTS idx_portfolios_updated_at ON portfolios (updated_at, owner);
+
 -- tmpl_reg
 CREATE TABLE IF NOT EXISTS templates (
   id             BIGINT PRIMARY KEY,
