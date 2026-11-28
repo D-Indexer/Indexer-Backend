@@ -22,6 +22,7 @@ describe('environment configuration', () => {
     expect(env.NODE_ENV).toBe('test');
     expect(env.INDEXER_POLL_INTERVAL_MS).toBe(5000);
     expect(env.INDEXER_ON_RETENTION_GAP).toBe('halt');
+    expect(env.INDEXER_MAX_GAP_RESUME_ATTEMPTS).toBe(5);
     expect(env.INDEXER_START_LEDGER).toBeUndefined();
     expect(env.IPFS_VERIFY_CID).toBe(true);
   });
@@ -58,6 +59,8 @@ describe('environment configuration', () => {
     expect(env.INDEXER_ON_RETENTION_GAP).toBe('skip');
     expect(loadEnv({ ...validEnv, INDEXER_START_LEDGER: '' }).INDEXER_START_LEDGER).toBeUndefined();
     expect(() => loadEnv({ ...validEnv, INDEXER_ON_RETENTION_GAP: 'ignore' })).toThrow();
+    expect(loadEnv({ ...validEnv, INDEXER_MAX_GAP_RESUME_ATTEMPTS: '2' }).INDEXER_MAX_GAP_RESUME_ATTEMPTS).toBe(2);
+    expect(() => loadEnv({ ...validEnv, INDEXER_MAX_GAP_RESUME_ATTEMPTS: '0' })).toThrow();
   });
 
   it('applies upload and pdf parsing defaults', () => {

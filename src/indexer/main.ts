@@ -25,6 +25,14 @@ async function main(): Promise<void> {
 
   health.start();
 
+  // Hold the indexer lock for the life of the process so `retry-rejected`
+  // refuses to write the read model concurrently.
+  const lockClient = await pool.connect();
+  if (!(await tryLockIndexer(lockClient))) {
+    lockClient.release();
+    throw new Error('Another indexer process holds the indexer lock');
+  }
+
   const shutdown = async (signal: string) => {
     logger.info('Shutdown requested', { signal });
     const timeout = setTimeout(() => process.exit(1), env.SHUTDOWN_TIMEOUT_MS);

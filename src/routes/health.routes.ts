@@ -25,6 +25,14 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
+function safeJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
 /**
  * API health: 200 when the database answers. Indexer state is reported for
  * visibility but doesn't affect the status code; the indexer process has its
