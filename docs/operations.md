@@ -292,6 +292,9 @@ re-reads events and skips the ones already stored. To rebuild the read model fro
 TRUNCATE contract_events, folders, templates, portfolios, admins, admin_changes, indexer_state;
 ```
 
+The derived counters (`template_usage`, `daily_stats`) must be truncated with the tables
+they are derived from, or re-indexing counts everything a second time.
+
 ```bash
 npm run indexer -- reset-cursor <first ledger to index>   # or leave state empty to use INDEXER_START_LEDGER
 ```

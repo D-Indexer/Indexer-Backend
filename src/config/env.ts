@@ -81,6 +81,12 @@ export const envVarMeta: Record<keyof AppEnv, EnvVarMeta> = {
     default: '30000',
     example: '30000',
   },
+  API_KEY_HMAC_SECRET: {
+    description:
+      'Server secret API keys are hashed with (HMAC-SHA256). Unset disables API keys: requests are served anonymously and Authorization headers are ignored. At least 32 characters.',
+    example: 'output of: openssl rand -hex 32',
+    secret: true,
+  },
   CORS_ORIGIN: {
     description:
       'Comma-separated list of allowed CORS origins, or * to allow all. Required in production.',
@@ -225,6 +231,11 @@ export const envSchema = z
     IPFS_API_AUTH: z.string().min(1).optional(),
     IPFS_GATEWAY: z.string().url('IPFS_GATEWAY must be a valid URL'),
     IPFS_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+    API_KEY_HMAC_SECRET: z
+      .string()
+      .min(32, 'API_KEY_HMAC_SECRET must be at least 32 characters')
+      .optional()
+      .describe(envVarMeta.API_KEY_HMAC_SECRET.description),
     CORS_ORIGIN: z
       .string()
       .optional()

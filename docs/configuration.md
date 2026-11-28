@@ -69,6 +69,18 @@ in Indexer-Contract. Update it here and in `.env.example` when the contract is r
 <!-- BEGIN GENERATED CONFIG -->
 <!-- END GENERATED CONFIG -->
 
+## API keys
+
+`API_KEY_HMAC_SECRET` enables optional API keys on read endpoints (see
+[API keys](api.md#api-keys)). Keys are stored only as an HMAC-SHA256 under this secret, so:
+
+- it must be at least 32 characters (`openssl rand -hex 32`) and treated like a password;
+- the API and the `npm run keys` CLI must use the same value;
+- changing it invalidates every issued key.
+
+Unset, API keys are disabled: requests are served anonymously and `Authorization` headers
+are ignored.
+
 When you add a variable, add it to the schema in
 [`src/config/env.ts`](../src/config/env.ts) with its description, default and example,
 then run `npm run docs:config` to regenerate this page and `.env.example`. CI fails when

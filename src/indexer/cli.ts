@@ -8,7 +8,9 @@ const USAGE = `Usage:
   npm run indexer -- reset-cursor <ledger>  Re-index from <ledger> (already-stored events are skipped)
   npm run indexer -- healthcheck            Exit 1 if the indexer has not succeeded recently
                                             (manual use only; containers probe the embedded
-                                            /healthz and /readyz HTTP endpoints instead)`;
+                                            /healthz and /readyz HTTP endpoints instead)
+  npm run indexer -- rebuild-stats          Recompute daily_stats from contract_events
+                                            (safe while the indexer runs)`;
 
 export async function run(args: string[]): Promise<number> {
   const [command, arg] = args;
@@ -87,6 +89,16 @@ export async function run(args: string[]): Promise<number> {
            FROM contract_events WHERE status = 'orphaned' ORDER BY ledger, id`
       );
       console.log(JSON.stringify(rows, null, 2));
+      return 0;
+    }
+    case 'rebuild-stats': {
+      const client = await pool.connect();
+      try {
+        const { days } = await rebuildDailyStats(client);
+        console.log(`daily_stats rebuilt from contract_events: ${days} day(s) with activity.`);
+      } finally {
+        client.release();
+      }
       return 0;
     }
     default:

@@ -1,6 +1,8 @@
-import { Request, Response } from 'express';
+import type { Request, RequestHandler, Response } from 'express';
+import type { Queryable } from '../db/types';
 import * as templateService from '../services/template';
 import { badRequest, notFound } from '../http/errors';
+import { parsePageRequest } from '../http/pagination';
 import { templateIdSchema } from '../validation/schemas';
 
 export const list = async (_req: Request, res: Response): Promise<void> => {
@@ -18,31 +20,41 @@ export const list = async (_req: Request, res: Response): Promise<void> => {
   res.json(templates);
 };
 
-export const getOne = async (req: Request, res: Response): Promise<void> => {
-  const rawId = req.params.id;
-  if (rawId === undefined) throw badRequest('Template id is required');
+export interface TemplateController {
+  list: RequestHandler;
+  getOne: RequestHandler;
+  listPortfolios: RequestHandler;
+}
 
+export function parseTemplateId(rawId: unknown): number {
+  if (typeof rawId !== 'string') throw badRequest('Template id is required');
   const parsed = templateIdSchema.safeParse(rawId);
   if (!parsed.success) {
     const firstIssue = parsed.error.errors[0];
     throw badRequest(firstIssue ? firstIssue.message : 'Invalid template id');
   }
+  return parsed.data;
+}
 
-  const atLedger = parseAtLedger(req.query.atLedger);
+function parseSort(raw: unknown): templateService.TemplateSort {
+  if (raw === undefined || raw === 'id') return 'id';
+  if (raw === 'popular') return 'popular';
+  throw badRequest("sort must be 'id' or 'popular'");
+}
 
-  let template;
-  try {
-    template = await templateService.getTemplate(parsed.data, atLedger);
-  } catch (err) {
-    if (isOutOfRangeError(err)) {
-      const message =
-        err instanceof Error && err.message
-          ? err.message
-          : 'atLedger is outside the indexed ledger range';
-      throw badRequest(message);
-    }
-    throw err;
-  }
+export function createTemplateController({ db }: TemplateControllerDeps): TemplateController {
+  return {
+    list: async (req: Request, res: Response): Promise<void> => {
+      const sort = parseSort(req.query['sort']);
+      res.json(await templateService.listTemplates(db, sort));
+    },
+
+    getOne: async (req: Request, res: Response): Promise<void> => {
+      const id = parseTemplateId(req.params['id']);
+      const template = await templateService.getTemplate(db, id);
+      if (!template) throw notFound('Template not found');
+      res.json(template);
+    },
 
   if (!template) throw notFound('Template not found');
   conditionalGet(resourceEtag(template.registeredAt), template.registeredAt, req, res);

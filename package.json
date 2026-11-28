@@ -18,6 +18,7 @@
     "start": "node dist/server.js",
     "start:indexer": "node dist/indexer/main.js",
     "indexer": "tsx src/indexer/cli.ts",
+    "keys": "tsx src/cli/keys.ts",
     "test": "jest --runInBand",
     "test:integration": "TESTNET_INTEGRATION=1 jest --runInBand src/__tests__/testnet.integration.test.ts",
     "typecheck": "tsc --noEmit",

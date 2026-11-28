@@ -14,6 +14,17 @@ export interface Template {
   metadataUri: string;
   creator: string | null;
   registeredAt: Date;
+  /** Number of minted portfolios currently using this template. */
+  usageCount: number;
+}
+
+/** A portfolio as listed under its template (`GET /templates/:id/portfolios`). */
+export interface TemplatePortfolio {
+  owner: string;
+  templateId: number;
+  ipfsCid: string;
+  mintedAt: Date;
+  updatedAt: Date;
 }
 
 /** One indexed contract event (`contract_events`). */
