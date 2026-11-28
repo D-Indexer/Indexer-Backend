@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { CID } from 'multiformats/cid';
 import { base32 } from 'multiformats/bases/base32';
 import type { DecodedEvent } from './decode';
+import { updateCounters } from './counters';
 import { normaliseCid } from '../services/cid';
 
 export type Queryable = Pick<PoolClient, 'query'>;
@@ -76,6 +77,9 @@ async function openRange(
  */
 export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): Promise<void> {
   currentLedger = event.ledger;
+  // Derived counters read the pre-event state, so they must run before the
+  // read model below is mutated.
+  await updateCounters(db, event);
   switch (event.topic) {
     case 'init':
       await db.query(
@@ -242,6 +246,7 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
         [cid, event.eventId, at]
       );
       return;
+    }
 
     default: {
       // Exhaustiveness check: if a new topic is added to DecodedEvent without a

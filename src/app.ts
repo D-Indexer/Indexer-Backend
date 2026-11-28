@@ -12,6 +12,7 @@ import { requestId } from './middleware/requestId';
 import { securityHeaders } from './middleware/securityHeaders';
 import { AppEnv } from './config/env';
 import type { FeatureFlagKey, FeatureFlagService } from './featureFlags';
+import type { Queryable } from './db/types';
 
 /**
  * Dependencies required to build the HTTP app. Everything is passed in
@@ -38,10 +39,7 @@ const ROUTE_FLAGS: Record<string, FeatureFlagKey> = {
  * Builds middleware that rejects requests with 503 when the given feature flag
  * is disabled. The flag is evaluated per request (the service caches reads).
  */
-export function requireFeature(
-  featureFlags: FeatureFlagService,
-  flag: FeatureFlagKey,
-): RequestHandler {
+export function requireFeature(featureFlags: FeatureFlagService, flag: FeatureFlagKey): RequestHandler {
   return (_req, res, next) => {
     featureFlags
       .isEnabled(flag)
@@ -94,7 +92,9 @@ export function createApp(deps: AppDependencies) {
   });
 
   app.use('/folders', createFolderRoutes(deps));
-  app.use('/templates', createTemplateRoutes(deps));
+  // Read-model routes query the database directly through an explicit handle.
+  const db = deps.db as Queryable;
+  app.use('/templates', createTemplateRoutes({ db }));
   app.use('/portfolios', createPortfolioRoutes(deps));
   app.use('/upload', requireFeature(featureFlags, ROUTE_FLAGS.uploads), createUploadRoutes(deps));
   app.use('/health', createHealthRoutes(deps));

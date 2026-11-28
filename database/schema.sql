@@ -86,6 +86,30 @@ CREATE TABLE IF NOT EXISTS portfolios (
   to_ledger       INTEGER
 );
 
+-- GET /templates/:id/portfolios: keyset pagination by (updated_at, owner) within a template.
+CREATE INDEX IF NOT EXISTS idx_portfolios_template_updated
+  ON portfolios (template_id, updated_at DESC, owner DESC);
+
+-- Number of portfolios currently using each template (usageCount). Maintained
+-- by the indexer in the page transaction (src/indexer/counters.ts) on
+-- port_mint and tmpl_set, so reads never aggregate over portfolios. Keyed by
+-- template id with no foreign key: a portfolio can reference a template the
+-- indexer hasn't seen registered (indexing started partway through history).
+-- The table is backfilled from portfolios only when it is first created, so
+-- re-running the migration never races the indexer's increments.
+DO $$
+BEGIN
+  IF to_regclass('template_usage') IS NULL THEN
+    CREATE TABLE template_usage (
+      template_id      BIGINT PRIMARY KEY,
+      portfolio_count  BIGINT NOT NULL DEFAULT 0
+    );
+    INSERT INTO template_usage (template_id, portfolio_count)
+      SELECT template_id, COUNT(*) FROM portfolios GROUP BY template_id;
+  END IF;
+END
+$$;
+
 -- Version history for portfolio content (port_mint / port_upd / tmpl_set).
 -- Version numbers are dense per owner and stable under replay: the handler
 -- derives the next version from the current max inside the page transaction.
