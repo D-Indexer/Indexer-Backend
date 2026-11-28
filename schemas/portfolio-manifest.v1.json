@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/portfolio-manifest.v1.json",
+  "title": "Portfolio Manifest v1",
+  "description": "Versioned schema for portfolio manifests stored on IPFS and rendered by templates. The schemaVersion field is a const of '1'; future versions will be published as separate files (e.g. portfolio-manifest.v2.json) and consumers should dispatch on schemaVersion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "name",
+    "items"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "description": "Manifest schema version. Must be the string '1' for this schema.",
+      "type": "string",
+      "const": "1"
+    },
+    "name": {
+      "description": "Human-readable portfolio name.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "description": {
+      "description": "Optional longer description of the portfolio.",
+      "type": "string",
+      "maxLength": 5000
+    },
+    "templateId": {
+      "description": "Identifier of the template used to render this portfolio.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "items": {
+      "description": "Ordered list of portfolio items/assets.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "uri"
+      ],
+      "properties": {
+        "type": {
+          "description": "Kind of portfolio item.",
+          "type": "string",
+          "enum": [
+            "image",
+            "video",
+            "audio",
+            "document",
+            "link",
+            "text"
+          ]
+        },
+        "uri": {
+          "description": "Location of the item content (e.g. ipfs:// URI or https URL).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^(ipfs://|https?://|data:)"
+        },
+        "mimeType": {
+          "description": "Optional MIME type of the item content.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]*/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]*$"
+        },
+        "name": {
+          "description": "Optional display name for the item.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "description": {
+          "description": "Optional description for the item.",
+          "type": "string",
+          "maxLength": 2000
+        }
+      }
+    }
+  }
+}

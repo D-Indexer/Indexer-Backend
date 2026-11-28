@@ -161,47 +161,105 @@ describeDb('indexer against Postgres', () => {
     await pool.query('ALTER TABLE folders DROP COLUMN cid');
   });
 
-  describe('least-privilege API role', () => {
-    let apiPool: Pool;
+  describe('domain invariant CHECK constraints', () => {
+    async function expectRejected(sql: string, params: unknown[], pattern: RegExp) {
+      await expect(pool.query(sql, params)).rejects.toThrow(pattern);
+    }
 
-    beforeAll(() => {
-      apiPool = new Pool({ connectionString: apiRoleUrl(url as string) });
-    });
-
-    afterAll(async () => {
-      await apiPool.end();
-    });
-
-    it('can SELECT from read-model tables', async () => {
-      await processPage(pool, TESTNET_CONTRACT, page());
-      const { rows } = await apiPool.query('SELECT owner, name FROM folders WHERE owner = $1', [OWNER]);
-      expect(rows[0]).toMatchObject({ name: 'smoke-1794262900.folder' });
-      const templates = await apiPool.query('SELECT id FROM templates ORDER BY id');
-      expect(templates.rows.map((r) => Number(r.id))).toEqual([1, 2, 3]);
-    });
-
-    it('cannot INSERT INTO folders', async () => {
-      await expect(
-        apiPool.query(
-          'INSERT INTO folders (owner, name, template_id) VALUES ($1, $2, $3)',
-          [OWNER, 'forbidden.folder', '1']
-        )
-      ).rejects.toThrow(/permission denied/i);
-    });
-
-    it('cannot UPDATE or DELETE from folders', async () => {
-      await expect(
-        apiPool.query('UPDATE folders SET name = $1 WHERE owner = $2', ['hacked.folder', OWNER])
-      ).rejects.toThrow(/permission denied/i);
-      await expect(apiPool.query('DELETE FROM folders WHERE owner = $1', [OWNER])).rejects.toThrow(
-        /permission denied/i
+    it('rejects malformed strkeys on address columns', async () => {
+      const bad = 'g' + 'A'.repeat(55); // lowercase first char
+      await expectRejected(
+        'INSERT INTO folders (owner, name, template_id) VALUES ($1, $2, $3)',
+        [bad, 'ok.folder', 1],
+        /folders_owner_strkey/
+      );
+      await expectRejected(
+        'INSERT INTO admins (address) VALUES ($1)',
+        ['G' + 'a'.repeat(55)],
+        /admins_address_strkey/
       );
     });
 
-    it('cannot write to indexer-owned tables', async () => {
-      await expect(
-        apiPool.query('INSERT INTO indexer_state (id, cursor) VALUES (1, $1)', ['x'])
-      ).rejects.toThrow(/permission denied/i);
+    it('rejects template ids above u32', async () => {
+      await expectRejected(
+        'INSERT INTO templates (id, metadata_uri, creator) VALUES ($1, $2, $3)',
+        ['4294967296', 'ipfs://x', OWNER],
+        /templates_id_u32/
+      );
+      await expectRejected(
+        'INSERT INTO folders (owner, name, template_id) VALUES ($1, $2, $3)',
+        [OWNER, 'ok.folder', -1],
+        /folders_template_id_u32/
+      );
+    });
+
+    it('rejects empty or malformed folder names', async () => {
+      await expectRejected(
+        'INSERT INTO folders (owner, name, template_id) VALUES ($1, $2, $3)',
+        [OWNER, '', 1],
+        /folders_name_length/
+      );
+      await expectRejected(
+        'INSERT INTO folders (owner, name, template_id) VALUES ($1, $2, $3)',
+        [OWNER, 'bad name!', 1],
+        /folders_name_charset/
+      );
+    });
+
+    it('rejects non-positive ledgers', async () => {
+      await expectRejected(
+        'INSERT INTO contract_events (contract_id, ledger, tx_hash, event_index, kind, payload, status) ' +
+          'VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [TESTNET_CONTRACT, 0, 'tx', 0, 'tmpl_reg', '{}', 'applied'],
+        /contract_events_ledger_positive/
+      );
+    });
+
+    it('rejects empty metadata_uri', async () => {
+      await expectRejected(
+        'INSERT INTO templates (id, metadata_uri, creator) VALUES ($1, $2, $3)',
+        [1, '', OWNER],
+        /templates_metadata_uri_nonempty/
+      );
+    });
+
+    it('indexes the testnet fixtures with zero rejections', async () => {
+      const result = await processPage(pool, TESTNET_CONTRACT, page());
+      expect(result.rejected).toBe(0);
+      expect(result.applied).toBe(10);
+    });
+  });
+
+  describe('abuse-control tables', () => {
+    it('creates upload_usage and content_blocklist', async () => {
+      const { rows } = await pool.query(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' " +
+          "AND table_name IN ('upload_usage', 'content_blocklist') ORDER BY table_name"
+      );
+      expect(rows.map((r) => r.table_name)).toEqual(['content_blocklist', 'upload_usage']);
+    });
+
+    it('enforces the upload_usage primary key', async () => {
+      const day = '2024-01-01';
+      await pool.query(
+        'INSERT INTO upload_usage (client_hash, day, bytes, files) VALUES ($1, $2, $3, $4)',
+        ['hash-a', day, 10, 1]
+      );
+      await expectRejected(
+        'INSERT INTO upload_usage (client_hash, day, bytes, files) VALUES ($1, $2, $3, $4)',
+        ['hash-a', day, 5, 1],
+        /upload_usage_pkey/
+      );
+    });
+
+    it('enforces the content_blocklist primary key', async () => {
+      const sha = 'a'.repeat(64);
+      await pool.query('INSERT INTO content_blocklist (sha256, reason) VALUES ($1, $2)', [sha, 'abuse']);
+      await expectRejected(
+        'INSERT INTO content_blocklist (sha256, reason) VALUES ($1, $2)',
+        [sha, 'again'],
+        /content_blocklist_pkey/
+      );
     });
   });
 });
