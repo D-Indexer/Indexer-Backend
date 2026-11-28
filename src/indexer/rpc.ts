@@ -30,7 +30,8 @@ export type GetEventsResult = {
 };
 
 export type GetEventsParams = {
-  contractId: string;
+  contractId?: string;
+  contractIds?: string[];
   limit: number;
 } & ({ startLedger: number; cursor?: never } | { cursor: string; startLedger?: never });
 
@@ -41,108 +42,33 @@ export type HealthResult = {
   ledgerRetentionWindow?: number;
 };
 
-/**
- * Runtime schemas for RPC responses. The RPC is an untrusted boundary: a
- * malformed body must fail loudly (and retryably) instead of reaching the
- * indexer as `undefined` fields.
- */
-export const rawEventSchema = z.object({
-  type: z.string(),
-  ledger: z.number().int().nonnegative(),
-  ledgerClosedAt: z.string(),
-  contractId: z.string(),
-  id: z.string().min(1),
-  txHash: z.string(),
-  topic: z.array(z.string()),
-  value: z.string(),
-});
+/** A single ledger entry as returned by the RPC `getLedgerEntries` method. */
+export type RawLedgerEntry = {
+  /** Base64-encoded `LedgerKey` XDR, echoed back by the RPC. */
+  key: string;
+  /** Base64-encoded `LedgerEntryData` XDR. */
+  xdr: string;
+  /** Ledger sequence at which the entry expires (0 for non-TTL entries). */
+  liveUntilLedgerSeq?: number;
+  lastModifiedLedgerSeq?: number;
+  /** Present when the entry has been archived/evicted and only its TTL remains. */
+  ext?: unknown;
+};
 
-export const getEventsResultSchema = z.object({
-  events: z.array(rawEventSchema),
-  cursor: z.string().min(1),
-  latestLedger: z.number().int().nonnegative(),
-  oldestLedger: z.number().int().nonnegative(),
-});
+export type GetLedgerEntriesResult = {
+  entries: RawLedgerEntry[];
+  latestLedger: number;
+};
 
-export const healthResultSchema = z.object({
-  status: z.string(),
-  latestLedger: z.number().int().nonnegative(),
-  oldestLedger: z.number().int().nonnegative(),
-  ledgerRetentionWindow: z.number().int().nonnegative().optional(),
-});
-
-/** Format a zod issue as `path: message` for error messages. */
-function describeIssue(issue: z.ZodIssue): string {
-  const path = issue.path.length > 0 ? issue.path.join('.') : '<root>';
-  return `${path}: ${issue.message}`;
-}
-
-/**
- * Parse `value` with `schema`, throwing a retryable `RpcError` that names the
- * offending field path when the response is malformed.
- */
-export function parseRpcResult<T>(method: string, schema: z.ZodType<T>, value: unknown): T {
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) {
-    const detail = parsed.error.issues.map(describeIssue).join('; ');
-    throw new RpcError(`${method}: malformed response (${detail})`, undefined, true);
-  }
-  return parsed.data;
-}
-
-/**
- * Enforce the invariants the indexer relies on for a `getEvents` page: every
- * event is a contract event for the requested contract, ids strictly increase
- * (so the cursor can never move backwards), and a cursor is always present.
- */
-export function assertGetEventsInvariants(
-  result: GetEventsResult,
-  contractId: string
-): GetEventsResult {
-  if (result.cursor.length === 0) {
-    throw new RpcError('getEvents: malformed response (cursor: missing)', undefined, true);
-  }
-  let previous: string | undefined;
-  result.events.forEach((event, index) => {
-    if (event.type !== 'contract') {
-      throw new RpcError(
-        `getEvents: malformed response (events.${index}.type: expected 'contract', got '${event.type}')`,
-        undefined,
-        true
-      );
-    }
-    if (event.contractId !== contractId) {
-      throw new RpcError(
-        `getEvents: malformed response (events.${index}.contractId: expected '${contractId}', got '${event.contractId}')`,
-        undefined,
-        true
-      );
-    }
-    if (previous !== undefined && !(event.id > previous)) {
-      throw new RpcError(
-        `getEvents: malformed response (events.${index}.id: '${event.id}' is not greater than '${previous}')`,
-        undefined,
-        true
-      );
-    }
-    previous = event.id;
-  });
-  return result;
-}
-
-/** Result of `getLedgerEntries` for the contract instance entry. */
-export type ContractInstanceResult = {
-  /** Hex-encoded WASM hash the contract instance currently points at, or null when absent. */
-  wasmHash: string | null;
-  /** Ledger the instance entry was last modified in, or null when absent. */
-  lastModifiedLedger: number | null;
+export type GetLedgerEntriesParams = {
+  /** Base64-encoded `LedgerKey` XDR values to look up. */
+  keys: string[];
 };
 
 export interface EventSource {
   getEvents(params: GetEventsParams): Promise<GetEventsResult>;
   getHealth(): Promise<HealthResult>;
-  /** Read the contract instance entry to detect WASM upgrades. */
-  getContractInstance(contractId: string): Promise<ContractInstanceResult>;
+  getLedgerEntries(params: GetLedgerEntriesParams): Promise<GetLedgerEntriesResult>;
 }
 
 export class RpcError extends Error {
@@ -199,16 +125,20 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
   const safeUrl = redactUrl(options.url);
   let nextId = 1;
 
-  async function callOnce<T>(method: string, params?: unknown): Promise<T> {
+  async function callOnce<T>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) throw new RpcAbortError();
     let response: Response;
     try {
       response = await fetchImpl(options.url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
-        signal: AbortSignal.timeout(options.timeoutMs),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs)])
+          : AbortSignal.timeout(options.timeoutMs),
       });
     } catch (err) {
+      if (signal?.aborted) throw new RpcAbortError();
       const reason = err instanceof Error ? err.name : 'unknown';
       throw new RpcError(`${method} to ${safeUrl} failed: ${reason}`, undefined, true);
     }
@@ -218,8 +148,7 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
       throw new RpcError(`${method} to ${safeUrl} returned HTTP ${response.status}`, undefined, retryable);
     }
 
-    let raw = '';
-    let body: {
+    const body = (await abortable(response.json(), signal)) as {
       result?: T;
       error?: { code: number; message: string };
     };
@@ -255,27 +184,31 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
     return body.result;
   }
 
-  async function call<T>(method: string, params?: unknown): Promise<T> {
+  async function call<T>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
     for (let attempt = 1; ; attempt++) {
       try {
-        return await callOnce<T>(method, params);
+        return await callOnce<T>(method, params, signal);
       } catch (err) {
+        if (signal?.aborted) throw new RpcAbortError();
         if (!(err instanceof RpcError) || !err.retryable || attempt >= maxAttempts) throw err;
         const delay = baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random() / 2);
-        await sleep(delay);
+        await abortable(sleep(delay), signal);
       }
     }
   }
 
   return {
-    getEvents(params) {
+    getEvents(params, signal) {
       const pagination =
         params.cursor !== undefined
           ? { cursor: params.cursor, limit: params.limit }
           : { limit: params.limit };
       return call<unknown>('getEvents', {
         ...(params.startLedger !== undefined ? { startLedger: params.startLedger } : {}),
-        filters: [{ type: 'contract', contractIds: [params.contractId] }],
+        filters: [{
+          type: 'contract',
+          contractIds: params.contractIds ?? (params.contractId ? [params.contractId] : []),
+        }],
         pagination,
       }).then((result) =>
         assertGetEventsInvariants(
@@ -284,35 +217,11 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
         )
       );
     },
-    getHealth() {
-      return call<unknown>('getHealth').then((result) =>
-        parseRpcResult('getHealth', healthResultSchema, result)
-      );
+    getLedgerEntries(keys, signal) {
+      return call<GetLedgerEntriesResult>('getLedgerEntries', { keys }, signal);
     },
-    async getContractInstance(contractId) {
-      const key = xdr.LedgerKey.contractData(
-        new xdr.LedgerKeyContractData({
-          contract: Address.fromString(contractId).toScAddress(),
-          key: xdr.ScVal.scvLedgerKeyContractInstance(),
-          durability: xdr.ContractDataDurability.persistent(),
-        })
-      );
-      const result = await call<{
-        entries?: {
-          lastModifiedLedgerSeq?: number;
-          val?: { contractData?: () => { val: () => xdr.ScVal } };
-        }[];
-      }>('getLedgerEntries', { keys: [key.toXDR('base64')] });
-
-      const entry = result.entries?.[0];
-      const instance = entry?.val?.contractData?.().val();
-      if (!instance || instance.switch().name !== 'scvContractInstance') {
-        return { wasmHash: null, lastModifiedLedger: null };
-      }
-      return {
-        wasmHash: instance.instance().executable().wasmHash().toString('hex'),
-        lastModifiedLedger: entry?.lastModifiedLedgerSeq ?? null,
-      };
+    getLedgerEntries(params) {
+      return call<GetLedgerEntriesResult>('getLedgerEntries', { keys: params.keys });
     },
   };
 }

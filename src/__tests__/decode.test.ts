@@ -1,6 +1,22 @@
 import { decodeEvent, EventDecodeError } from '../indexer/decode';
 import { addr, ADMIN, makeEvent, OWNER, str, testnetEvents, u32 } from './eventFixtures';
 
+const TRANSFER_FLAG = 'INDEXER_PORTFOLIO_TRANSFERS';
+
+function withTransferFlag<T>(enabled: boolean, fn: () => T): T {
+  const previous = process.env[TRANSFER_FLAG];
+  process.env[TRANSFER_FLAG] = enabled ? 'true' : 'false';
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) {
+      delete process.env[TRANSFER_FLAG];
+    } else {
+      process.env[TRANSFER_FLAG] = previous;
+    }
+  }
+}
+
 describe('decodeEvent', () => {
   it('decodes every event the deployed testnet contract emitted', () => {
     const decoded = testnetEvents.map(decodeEvent);
@@ -73,6 +89,37 @@ describe('decodeEvent', () => {
 
   it('returns null for topics the indexer does not handle', () => {
     expect(decodeEvent(makeEvent('something_new', [u32(1)]))).toBeNull();
+  });
+
+  describe('portfolio transfer events', () => {
+    it('decodes a transfer event when the feature flag is enabled', () => {
+      const event = makeEvent('port_xfer', [u32(7), addr(OWNER), addr(ADMIN)]);
+      expect(withTransferFlag(true, () => decodeEvent(event))).toEqual({
+        topic: 'port_xfer',
+        portfolioId: 7,
+        from: OWNER,
+        to: ADMIN,
+      });
+    });
+
+    it('ignores transfer events when the feature flag is disabled', () => {
+      const event = makeEvent('port_xfer', [u32(7), addr(OWNER), addr(ADMIN)]);
+      expect(withTransferFlag(false, () => decodeEvent(event))).toBeNull();
+    });
+
+    it('rejects a transfer event missing a field', () => {
+      const event = makeEvent('port_xfer', [u32(7), addr(OWNER)]);
+      expect(() => withTransferFlag(true, () => decodeEvent(event))).toThrow(
+        new EventDecodeError('port_xfer: missing field 2 (to)')
+      );
+    });
+
+    it('rejects a transfer event with a field of the wrong type', () => {
+      const event = makeEvent('port_xfer', [str('7'), addr(OWNER), addr(ADMIN)]);
+      expect(() => withTransferFlag(true, () => decodeEvent(event))).toThrow(
+        /field 0 \(portfolio_id\) is scvString, expected scvU32/
+      );
+    });
   });
 
   it('rejects a missing field', () => {
