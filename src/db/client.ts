@@ -1,7 +1,10 @@
 import { Pool, type PoolConfig } from 'pg';
 import { getEnv } from '../config/env';
 
-const env = getEnv();
+export type PoolEnv = Pick<
+  AppEnv,
+  'DATABASE_URL' | 'DB_MAX_CONNECTIONS' | 'DB_IDLE_TIMEOUT_MS' | 'DB_CONNECTION_TIMEOUT_MS'
+>;
 
 const poolConfig: PoolConfig = {
   connectionString: env.DATABASE_URL,

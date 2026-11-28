@@ -1,4 +1,4 @@
-import pool from '../db/client';
+import type { Pool } from 'pg';
 import { Template } from '../types';
 
 type TemplateRow = {

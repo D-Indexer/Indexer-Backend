@@ -14,6 +14,20 @@ Run exactly **one** indexer per database. Two would not corrupt data, since even
 deduplicate, but they would race on the cursor and waste RPC calls. The API can scale
 horizontally.
 
+### Composition root
+
+Configuration and I/O are wired up explicitly in `src/container.ts`, the composition root.
+It reads the environment once, builds the config, the Postgres pool, the RPC client and the
+services, and passes them to `createApp(deps)` / `createIndexer(deps)`. Services are
+factories that take their dependencies (e.g. `createFolderService({ db })`).
+
+Only the entrypoints (`src/server.ts`, `src/indexer/main.ts` and the CLI) read env and start
+I/O. Every other module under `src/` can be imported with an empty environment, which is
+what the tests rely on: they build the app with explicit dependencies instead of mutating
+`process.env`. If you need configuration in a new module, take it as a parameter rather
+than calling `getEnv()` — a test enforces that `getEnv()` is only called from the
+composition root and entrypoints.
+
 ## Health
 
 - **API**: `GET /health` returns `200` when Postgres answers, `503` otherwise, and includes
@@ -118,6 +132,32 @@ is behind or misconfigured (wrong network).
 A new contract id means new events. Set `FOLDER_CONTRACT_ID` (and `INDEXER_START_LEDGER` to
 the deployment ledger), truncate the tables above, and restart the indexer.
 
+## Feature flags
+
+Some behaviour can be toggled at runtime without redeploying, for incident response. Flags
+live in the `feature_flags` table (`key`, `enabled`, `updated_by`, `updated_at`, `note`).
+The API and indexer read them with a short cache TTL (`FEATURE_FLAGS_CACHE_TTL_MS`, default
+a few seconds), so a change takes effect across all replicas within that TTL. Where the
+database supports it, a `NOTIFY` invalidates the cache immediately.
+
+Gated features: uploads, bundle uploads, webhook delivery, SSE and GraphQL. When a flag is
+disabled the endpoint returns `503` with a clear message naming the flag, so clients can
+retry later.
+
+List and set flags with the CLI:
+
+```bash
+npm run flags -- list
+npm run flags -- set uploads false --by alice --note "Kubo overloaded"
+npm run flags -- set uploads true --by alice
+# in the container image (no ts-node there):
+docker compose exec api node dist/cli/flags.js list
+```
+
+Every change is audited: `updated_by`, `updated_at` and `note` are stored on the row, and
+the CLI logs the change. Prefer setting a `note` explaining why during an incident, and
+re-enable the flag once the incident is over.
+
 ## Database
 
 - The schema is `database/schema.sql`. Every statement is `IF NOT EXISTS`, so applying it is
@@ -221,3 +261,25 @@ Both processes handle SIGTERM/SIGINT. The API stops accepting connections and cl
 pool. The indexer finishes the in-flight page (one transaction) and stops. Either exits
 non-zero after `SHUTDOWN_TIMEOUT_MS`. An interrupted page is rolled back and re-read on the
 next start.
+
+### Init process (PID 1)
+
+The image runs Node under `tini` as the entrypoint, so Node is not PID 1. `tini` forwards
+signals to Node and reaps orphaned/zombie child processes (healthcheck commands, future
+tools). Without it, signals sent before Node registers its handlers are ignored and
+`docker stop` falls back to SIGKILL after the timeout.
+
+`docker stop` on both the API and indexer containers should complete gracefully (exit 0)
+well before the kill timeout. A CI smoke step starts the container, sends SIGTERM and
+asserts the exit code and duration.
+
+### Kubernetes
+
+- Keep `tini` as the entrypoint; don't override `command`/`args` with a bare `node ...`
+  unless you also set `shareProcessNamespace: true` (or run under an init in the pod).
+- Set `terminationGracePeriodSeconds` comfortably above `SHUTDOWN_TIMEOUT_MS` (e.g. 30s
+  with a 10s shutdown timeout) so the graceful path finishes before SIGKILL.
+- The pod's `preStop` hook is not required, but if you add one keep it shorter than the
+  grace period.
+- Healthcheck commands run as children of the container process; `tini` reaps them, so
+  repeated probes don't accumulate zombies.

@@ -63,3 +63,33 @@ CREATE TABLE IF NOT EXISTS indexer_state (
   value       TEXT NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Runtime feature flags for incident response. Read by the API and indexer
+-- with a short cache TTL; changes are audited via updated_by / updated_at /
+-- note. Rows are upserted by the `flags set` CLI command.
+CREATE TABLE IF NOT EXISTS feature_flags (
+  key         TEXT PRIMARY KEY,
+  enabled     BOOLEAN NOT NULL,
+  updated_by  TEXT,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  note        TEXT
+);
+
+-- NOTIFY-based cache invalidation: every insert/update/delete on feature_flags
+-- broadcasts the affected key on the `feature_flags_changed` channel so
+-- replicas can drop their cached value immediately instead of waiting for the
+-- TTL to expire. Listeners should treat the payload as a hint and re-read.
+CREATE OR REPLACE FUNCTION notify_feature_flags_changed() RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_notify(
+    'feature_flags_changed',
+    COALESCE(NEW.key, OLD.key)
+  );
+  RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_feature_flags_changed ON feature_flags;
+CREATE TRIGGER trg_feature_flags_changed
+  AFTER INSERT OR UPDATE OR DELETE ON feature_flags
+  FOR EACH ROW EXECUTE FUNCTION notify_feature_flags_changed();

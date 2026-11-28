@@ -1,6 +1,11 @@
 # One image for both processes:
 #   API:     node dist/server.js         (default)
 #   Indexer: node dist/indexer/main.js   (applies database/schema.sql on start)
+#
+# tini runs as PID 1 so Node runs as a child process. This ensures:
+#   - SIGTERM/SIGINT are forwarded to Node so graceful shutdown handlers run.
+#   - Zombie child processes are reaped.
+# The CMD can be overridden (e.g. for the indexer) and tini will still wrap it.
 
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
