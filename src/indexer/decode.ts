@@ -92,15 +92,36 @@ class Fields {
   }
 
   address(index: number, name: string): string {
-    return Address.fromScVal(this.expect(index, name, 'scvAddress')).toString();
+    const value = this.expect(index, name, 'scvAddress');
+    try {
+      return Address.fromScVal(value).toString();
+    } catch (err) {
+      throw new EventDecodeError(
+        `${this.topic}: field ${index} (${name}) is not a valid address (${describe(err)})`
+      );
+    }
   }
 
   u32(index: number, name: string): number {
-    return this.expect(index, name, 'scvU32').u32();
+    const value = this.expect(index, name, 'scvU32');
+    try {
+      return value.u32();
+    } catch (err) {
+      throw new EventDecodeError(
+        `${this.topic}: field ${index} (${name}) is not a valid u32 (${describe(err)})`
+      );
+    }
   }
 
   string(index: number, name: string): string {
-    return this.expect(index, name, 'scvString').str().toString();
+    const value = this.expect(index, name, 'scvString');
+    try {
+      return value.str().toString();
+    } catch (err) {
+      throw new EventDecodeError(
+        `${this.topic}: field ${index} (${name}) is not a valid string (${describe(err)})`
+      );
+    }
   }
 }
 
@@ -109,7 +130,13 @@ function dataFields(topic: string, valueXdr: string): Fields {
   if (value.switch().name !== 'scvVec') {
     throw new EventDecodeError(`${topic}: data is ${value.switch().name}, expected scvVec`);
   }
-  return new Fields(topic, value.vec() ?? []);
+  let vec: xdr.ScVal[] | null;
+  try {
+    vec = value.vec();
+  } catch (err) {
+    throw new EventDecodeError(`${topic}: malformed data vector (${describe(err)})`);
+  }
+  return new Fields(topic, vec ?? []);
 }
 
 /**
@@ -129,6 +156,17 @@ function applyCompat(decoded: DecodedEvent, f: Fields): DecodedEvent {
  * (stored as `ignored`); throws EventDecodeError for malformed known topics.
  */
 export function decodeEvent(event: Pick<RawEvent, 'topic' | 'value'>): DecodedEvent | null {
+  try {
+    return decodeKnownEvent(event);
+  } catch (err) {
+    // Defensive: any unexpected SDK exception must not escape and poison the
+    // indexer. Surface it as a decode error so the event is stored as rejected.
+    if (err instanceof EventDecodeError) throw err;
+    throw new EventDecodeError(`unexpected decode failure: ${describe(err)}`);
+  }
+}
+
+function decodeKnownEvent(event: Pick<RawEvent, 'topic' | 'value'>): DecodedEvent | null {
   const topic = decodeTopic(event);
   if (topic === null) return null;
   const generated = GENERATED_DECODERS[topic];

@@ -222,6 +222,7 @@ export const envSchema = z
       )
       .optional(),
     IPFS_API_URL: z.string().url('IPFS_API_URL must be a valid URL'),
+    IPFS_API_AUTH: z.string().min(1).optional(),
     IPFS_GATEWAY: z.string().url('IPFS_GATEWAY must be a valid URL'),
     IPFS_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     CORS_ORIGIN: z
@@ -319,13 +320,22 @@ export type AppEnv = z.infer<typeof envSchema> & {
 let cachedEnv: AppEnv | null = null;
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
-  const parsed = envSchema.safeParse(source);
+  const { env, issues } = resolveSecretFiles(source);
+  const parsed = envSchema.safeParse(env);
 
-  if (!parsed.success) {
-    const details = parsed.error.errors
-      .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
-      .join('; ');
-    throw new Error(`Invalid environment configuration: ${details}. See docs/configuration.md`);
+  const formatIssue = (issue: z.ZodIssue): string => {
+    const field = issue.path.join('.');
+    const message = isSecretField(issue.path) ? REDACTED : issue.message;
+    return `${field}: ${message}`;
+  };
+
+  const details = [
+    ...issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`),
+    ...(parsed.success ? [] : parsed.error.errors.map(formatIssue)),
+  ];
+
+  if (details.length > 0) {
+    throw new Error(`Invalid environment configuration: ${details.join('; ')}. See docs/configuration.md`);
   }
 
   const network = parsed.data.STELLAR_NETWORK ?? DEFAULT_STELLAR_NETWORK;

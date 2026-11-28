@@ -426,8 +426,6 @@ running large `DELETE`s.
 
 - `POST /upload` calls Kubo's `/api/v0/add?pin=true&cid-version=1` at `IPFS_API_URL`, with a
   timeout of `IPFS_TIMEOUT_MS`. An unreachable node returns `502`, a timeout `504`.
-- The Kubo RPC API is an admin interface: never expose port 5001 publicly. Compose binds it to
-  `127.0.0.1`.
 - Pins live on that one node. For durability, run a pinning service or cluster. A pluggable
   pinning-provider interface is a tracked issue.
 - Check a node: `docker compose exec ipfs ipfs id`. List pins:

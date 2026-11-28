@@ -11,7 +11,9 @@ x-kubo-version: &kubo-version ${KUBO_VERSION:-v0.29.0}
 x-app-env: &app-env
   NODE_ENV: development
   LOG_LEVEL: ${LOG_LEVEL:-info}
-  DATABASE_URL: postgresql://folder:folder@postgres:5432/folder
+  # Secrets are mounted as files and read via the *_FILE convention, so they
+  # never appear in `docker inspect` or the process environment.
+  DATABASE_URL_FILE: /run/secrets/database_url
   STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
   STELLAR_NETWORK_PASSPHRASE: ${STELLAR_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
   FOLDER_CONTRACT_ID: ${FOLDER_CONTRACT_ID:-CDDQK74SMH4RB4HYLHM6BYZPTAMDMRISHW5Q274KADVZVFD57K43O6KV}
@@ -21,6 +23,8 @@ x-app-env: &app-env
   # Embedded health server port inside the indexer container.
   INDEXER_HTTP_PORT: ${INDEXER_HTTP_PORT:-3001}
   IPFS_API_URL: http://ipfs:5001
+  # Scoped Kubo RPC authorization token (Kubo >= 0.25 API.Authorizations).
+  IPFS_API_AUTH_FILE: /run/secrets/ipfs_api_auth
   IPFS_GATEWAY: ${IPFS_GATEWAY:-https://ipfs.io/ipfs}
   CORS_ORIGIN: ${CORS_ORIGIN:-}
 
@@ -38,8 +42,11 @@ services:
     image: postgres:16
     environment:
       POSTGRES_USER: folder
-      POSTGRES_PASSWORD: folder
+      # The official image reads the password from a file when *_FILE is set.
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: folder
+    secrets:
+      - postgres_password
     ports:
       - '127.0.0.1:5432:5432'
     volumes:
@@ -55,11 +62,15 @@ services:
   ipfs:
     image: ipfs/kubo:${KUBO_VERSION:-v0.29.0}
     ports:
-      # The Kubo RPC API is an admin interface: keep it on localhost.
-      - '127.0.0.1:5001:5001'
+      # The Kubo RPC API is an admin interface: it is NOT published to the host.
+      # Only services on the internal `ipfs-rpc` network (api, indexer) can reach it.
       - '127.0.0.1:8080:8080'
     volumes:
       - ipfs-data:/data/ipfs
+      - ./kubo/configure-rpc-auth.sh:/container-init.d/010-configure-rpc-auth.sh:ro
+    networks:
+      - default
+      - ipfs-rpc
     healthcheck:
       test: ['CMD', 'ipfs', 'id']
       interval: 10s
@@ -82,6 +93,8 @@ services:
       <<: *chaos-env
     depends_on:
       postgres:
+        condition: service_healthy
+      ipfs:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:

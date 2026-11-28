@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
@@ -69,6 +70,13 @@ jobs:
           IPFS_INTEGRATION: "1"
           IPFS_API_URL: http://localhost:5001
         run: npm test
+
+      - name: Fuzz (short budget)
+        env:
+          # Reduced case count so PR builds stay fast; the nightly workflow runs the
+          # longer budget. The fuzz test asserts >= 10,000 cases by default.
+          FUZZ_CASES: '10000'
+        run: npm run test:fuzz
 
       - name: Build
         run: npm run build
@@ -276,6 +284,8 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     needs: check
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
