@@ -47,7 +47,12 @@ export type IndexerConfig = {
   maxPagesPerTick?: number;
 };
 
-export type IndexerDependencies = { db: Db; rpc: EventSource; config: IndexerConfig };
+export type IndexerDependencies = {
+  db: Db;
+  rpc: EventSource;
+  config: IndexerConfig;
+  onCidApplied?: (cid: string) => void | Promise<void>;
+};
 
 export type PageResult = { applied: number; ignored: number; rejected: number; duplicates: number };
 
@@ -328,12 +333,23 @@ async function processPageInContext(db: Db, contractId: string, page: GetEventsR
   const result: PageResult = { applied: 0, ignored: 0, rejected: 0, duplicates: 0 };
   const affectedKeys = new Set<string>();
   const client = await db.connect();
+  const appliedCids = new Set<string>();
 
   try {
     await client.query('BEGIN');
     for (const event of page.events) {
       if (event.contractId !== contractId) continue;
       const outcome = await storeEvent(client, contractId, event);
+      if (outcome === 'applied') {
+        try {
+          const decoded = decodeEvent(event);
+          if (decoded && (decoded.topic === 'port_mint' || decoded.topic === 'port_upd')) {
+            appliedCids.add(decoded.ipfsCid);
+          }
+        } catch {
+          // The event is already handled by storeEvent; malformed events are recorded as rejected.
+        }
+      }
       if (outcome === 'duplicate') result.duplicates++;
       else result[outcome]++;
       if (outcome === 'applied') {
@@ -361,6 +377,18 @@ async function processPageInContext(db: Db, contractId: string, page: GetEventsR
       buildIndexedNotification(lastLedger, affectedKeys),
     ]);
     await client.query('COMMIT');
+    if (onCidApplied) {
+      for (const cid of appliedCids) {
+        try {
+          await onCidApplied(cid);
+        } catch (err) {
+          logger.warn('Immediate IPFS reconciliation failed', {
+            cid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
     return result;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);

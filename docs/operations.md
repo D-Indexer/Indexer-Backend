@@ -428,6 +428,9 @@ running large `DELETE`s.
   pinning-provider interface is a tracked issue.
 - Check a node: `docker compose exec ipfs ipfs id`. List pins:
   `docker compose exec ipfs ipfs pin ls --type=recursive`.
+- Run `npm run ipfs -- reconcile` to immediately check and repair all portfolio/template CIDs.
+- Run `npm run ipfs -- gc --older-than 7d --dry-run` before unpinning unreferenced uploads;
+  omit `--dry-run` to apply the pin removals. CIDs referenced on-chain are never GC'd.
 
 ## Network fault injection (chaos profile)
 

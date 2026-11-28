@@ -15,6 +15,13 @@ import { isCidDenylisted } from '../services/cidDenylist';
 jest.mock('../services/ipfs', () => ({
   pinFile: jest.fn(),
 }));
+jest.mock('../services/imageSanitize', () => ({
+  sanitizeImage: jest.fn(async (buffer: Buffer) => buffer),
+}));
+jest.mock('../db/client', () => ({
+  __esModule: true,
+  default: { query: jest.fn().mockResolvedValue({ rows: [] }) },
+}));
 
 jest.mock('../services/resumableUpload', () => ({
   createResumableUpload: jest.fn(),
