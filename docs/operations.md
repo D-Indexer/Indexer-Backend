@@ -288,7 +288,7 @@ docker compose exec indexer node dist/indexer/cli.js reset-cursor <ledger>
 re-reads events and skips the ones already stored. To rebuild the read model from scratch:
 
 ```sql
-TRUNCATE contract_events, folders, templates, portfolios, admins, indexer_state;
+TRUNCATE contract_events, folders, templates, portfolios, admins, admin_changes, indexer_state;
 ```
 
 ```bash

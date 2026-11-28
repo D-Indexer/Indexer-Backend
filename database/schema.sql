@@ -197,6 +197,14 @@ CREATE TABLE IF NOT EXISTS admins (
   last_event_id  TEXT NOT NULL REFERENCES contract_events (id)
 );
 
+-- Membership as of the end of `ledger`: the last change per address at or
+-- before that ledger, keeping only addresses whose last change was an add.
+CREATE OR REPLACE VIEW admins_at_ledger AS
+SELECT DISTINCT ON (target) target AS address, ledger, action, actor, at
+FROM admin_changes
+WHERE ledger <= $1
+ORDER BY target, ledger DESC, event_id DESC;
+
 -- Indexer cursor and status, written in the same transaction as event data.
 -- `version` is bumped by every write; a page only commits its cursor if the
 -- version it read is still current, so a concurrent `reset-cursor` wins.

@@ -86,6 +86,7 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
   currentLedger = event.ledger;
   switch (event.topic) {
     case 'init':
+      await recordAdminChange(db, eventId, ledger, 'init', null, event.admin, at);
       await db.query(
         network
           ? 'INSERT INTO admins (network, contract_id, address, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT (network, address) DO NOTHING'
@@ -95,6 +96,7 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
       return 'applied';
 
     case 'adm_add':
+      await recordAdminChange(db, eventId, ledger, 'add', event.admin, event.newAdmin, at);
       await db.query(
         network
           ? 'INSERT INTO admins (network, contract_id, address, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT (network, address) DO NOTHING'
@@ -104,6 +106,7 @@ export async function applyEvent(db: Queryable, event: DecodedEvent, at: Date): 
       return 'applied';
 
     case 'adm_rm':
+      await recordAdminChange(db, eventId, ledger, 'remove', event.admin, event.target, at);
       await db.query('DELETE FROM admins WHERE address = $1', [event.target]);
       return 'applied';
 

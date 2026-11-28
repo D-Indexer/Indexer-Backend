@@ -237,6 +237,7 @@ export const envSchema = z
     INDEXER_ON_RETENTION_GAP: z.enum(['halt', 'skip']).default('halt'),
     INDEXER_MAX_GAP_RESUME_ATTEMPTS: z.coerce.number().int().min(1).default(5),
     INDEXER_MAX_BACKOFF_MS: z.coerce.number().int().positive().default(60000),
+    INDEXER_RPC_VERSION_POLICY: z.enum(['warn', 'refuse']).default('warn'),
     INDEXER_STALE_AFTER_MS: z.coerce.number().int().positive().default(120000),
     INDEXER_HTTP_PORT: z.coerce.number().int().positive().max(65535).default(3001),
     INDEXER_TICK_WINDOW_MULTIPLIER: z.coerce.number().int().min(1).default(3),

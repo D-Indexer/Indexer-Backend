@@ -35,5 +35,6 @@ export const getByAddress = async (req: Request, res: Response): Promise<void> =
     ? await portfolioService.getPortfolio(parsed.data, res.locals.network)
     : await portfolioService.getPortfolio(parsed.data);
   if (!portfolio) throw notFound('Portfolio not found');
+  conditionalGet(resourceEtag(portfolio.updatedAt), portfolio.updatedAt, req, res);
   res.json(portfolio);
 };

@@ -38,7 +38,7 @@ the API never talks to the RPC.
 
 | Path                                            | Responsibility                                                                                                    |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `src/indexer/rpc.ts`                            | JSON-RPC client for `getEvents` / `getHealth`: timeouts, retries with backoff, URL redaction                      |
+| `src/indexer/rpc.ts`                            | JSON-RPC client for `getEvents` / `getHealth` / `getVersionInfo`: timeouts, retries with backoff, URL redaction |
 | `src/indexer/decode.ts`                         | Decode raw events (Symbol topic, ScVec data) into typed objects                                                   |
 | `src/indexer/handlers.ts`                       | Apply one decoded event to the read model                                                                         |
 | `src/indexer/stellar.ts`                        | Poll loop, page transactions, cursor, retention-gap handling                                                      |
@@ -60,9 +60,9 @@ position; trailing fields are ignored because the contract only appends.
 
 | Topic       | Data (in order)                                                    | Effect                                                 |
 | ----------- | ------------------------------------------------------------------ | ------------------------------------------------------ |
-| `init`      | `admin`                                                            | insert into `admins`                                   |
-| `adm_add`   | `admin`, `new_admin`                                               | insert `new_admin` into `admins`                       |
-| `adm_rm`    | `admin`, `target`                                                  | delete `target` from `admins`                          |
+| `init`      | `admin`                                                            | insert into `admins`; append `admin_changes`           |
+| `adm_add`   | `admin`, `new_admin`                                               | insert `new_admin` into `admins`; append `admin_changes` |
+| `adm_rm`    | `admin`, `target`                                                  | delete `target` from `admins`; append `admin_changes`  |
 | `folder_cl` | `owner`, `folder_name`                                             | upsert `folders`                                       |
 | `tmpl_reg`  | `template_id: u32`, `metadata_uri`, `creator` (appended; optional) | upsert `templates`; append `template_versions`         |
 | `tmpl_set`  | `owner`, `template_id: u32`                                        | set `folders.template_id` and `portfolios.template_id` |
