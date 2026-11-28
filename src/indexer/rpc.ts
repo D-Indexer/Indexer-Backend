@@ -6,6 +6,10 @@
  * want the raw base64 XDR to store alongside each event.
  */
 
+import { Address, xdr } from '@stellar/stellar-sdk';
+import { z } from 'zod';
+import { logger } from '../utils/logger';
+
 /** Event exactly as returned by the RPC `getEvents` method. */
 export type RawEvent = {
   type: string;
@@ -148,6 +152,23 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
       result?: T;
       error?: { code: number; message: string };
     };
+    try {
+      raw = await response.text();
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      const contentType = response.headers.get('content-type') ?? 'unknown';
+      logger.warn('RPC returned a non-JSON body', {
+        method,
+        url: safeUrl,
+        contentType,
+        body: raw.slice(0, 200),
+      });
+      throw new RpcError(`${method} to ${safeUrl} returned a non-JSON body`, undefined, true);
+    }
+
+    if (body === null || typeof body !== 'object') {
+      throw new RpcError(`${method} to ${safeUrl} returned a non-JSON body`, undefined, true);
+    }
 
     if (body.error) {
       const range = RANGE_RE.exec(body.error.message);
@@ -182,14 +203,19 @@ export function createRpcClient(options: RpcClientOptions): EventSource {
         params.cursor !== undefined
           ? { cursor: params.cursor, limit: params.limit }
           : { limit: params.limit };
-      return call<GetEventsResult>('getEvents', {
+      return call<unknown>('getEvents', {
         ...(params.startLedger !== undefined ? { startLedger: params.startLedger } : {}),
         filters: [{
           type: 'contract',
           contractIds: params.contractIds ?? (params.contractId ? [params.contractId] : []),
         }],
         pagination,
-      });
+      }).then((result) =>
+        assertGetEventsInvariants(
+          parseRpcResult('getEvents', getEventsResultSchema, result),
+          params.contractId
+        )
+      );
     },
     getLedgerEntries(keys, signal) {
       return call<GetLedgerEntriesResult>('getLedgerEntries', { keys }, signal);

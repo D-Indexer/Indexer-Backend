@@ -33,6 +33,15 @@ function safeJson(value: string): unknown {
   }
 }
 
+function parseJson(value: string | undefined): unknown {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * API health: 200 when the database answers. Indexer state is reported for
  * visibility but doesn't affect the status code; the indexer process has its

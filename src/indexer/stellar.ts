@@ -134,6 +134,37 @@ export function adaptiveDelay(
   return Math.max(min, Math.min(max, lag.lagLedgers * closeTime));
 }
 
+/** Thrown when the contract's WASM hash changed and the policy is to halt. */
+export class WasmUpgradeError extends Error {
+  constructor(
+    readonly previousHash: string | null,
+    readonly currentHash: string,
+    readonly allowListed: boolean
+  ) {
+    super(
+      `Contract WASM hash changed from ${previousHash ?? '(unknown)'} to ${currentHash}` +
+        (allowListed ? '' : ', which is not in INDEXER_WASM_ALLOW_LIST') +
+        '. Indexing is halted; see docs/operations.md#wasm-upgrade.'
+    );
+    this.name = 'WasmUpgradeError';
+  }
+}
+
+/** Thrown when too many known events in one page were rejected. */
+export class RejectionRateError extends Error {
+  constructor(
+    readonly rejected: number,
+    readonly known: number,
+    readonly maxRate: number
+  ) {
+    super(
+      `${rejected} of ${known} known events in the page were rejected ` +
+        `(> ${maxRate}); the cursor was not advanced. See docs/operations.md#rejection-rate.`
+    );
+    this.name = 'RejectionRateError';
+  }
+}
+
 export class RetentionGapError extends Error {
   constructor(
     readonly requestedLedger: number,
@@ -466,14 +497,118 @@ export async function validateStartup(deps: IndexerDependencies): Promise<void> 
   });
 }
 
+export type DbErrorClass = 'deterministic' | 'transient' | 'fatal';
+
+/**
+ * SQLSTATE table. Anything not listed is treated as `transient`: an unknown
+ * failure is retried rather than halting the indexer.
+ */
+const DB_ERROR_CLASSES: Record<string, DbErrorClass> = {
+  // Data exceptions: the event contradicts the read model. Retrying is futile.
+  '22001': 'deterministic', // string_data_right_truncation
+  '22003': 'deterministic', // numeric_value_out_of_range
+  '22007': 'deterministic', // invalid_datetime_format
+  '22008': 'deterministic', // datetime_field_overflow
+  '22012': 'deterministic', // division_by_zero
+  '22021': 'deterministic', // character_not_in_repertoire
+  '22P02': 'deterministic', // invalid_text_representation
+  '22P05': 'deterministic', // untranslatable_character
+  // Integrity constraint violations: same event, same failure.
+  '23502': 'deterministic', // not_null_violation
+  '23503': 'deterministic', // foreign_key_violation
+  '23505': 'deterministic', // unique_violation
+  '23514': 'deterministic', // check_violation
+  '23P01': 'deterministic', // exclusion_violation
+  // Transient: retry the page immediately.
+  '40001': 'transient', // serialization_failure
+  '40P01': 'transient', // deadlock_detected
+  '57P01': 'transient', // admin_shutdown
+  '57P02': 'transient', // crash_shutdown
+  '57P03': 'transient', // cannot_connect_now
+  '53300': 'transient', // too_many_connections
+  // Fatal: retrying cannot help; an operator must intervene.
+  '28P01': 'fatal', // invalid_password
+  '28000': 'fatal', // invalid_authorization_specification
+  '3D000': 'fatal', // invalid_catalog_name
+  '42P01': 'fatal', // undefined_table
+  '42703': 'fatal', // undefined_column
+  '42501': 'fatal', // insufficient_privilege
+};
+
+/** SQLSTATE classes that are always transient (connection exceptions). */
+const TRANSIENT_CLASSES = ['08'];
+
+/**
+ * Classify a Postgres error by SQLSTATE. `deterministic` errors are the event's
+ * fault (reject it), `transient` ones are retried, `fatal` ones halt indexing.
+ */
+export function classifyDbError(err: unknown): DbErrorClass {
+  const code = (err as { code?: unknown })?.code;
+  if (typeof code !== 'string') return 'transient';
+  const known = DB_ERROR_CLASSES[code];
+  if (known) return known;
+  if (TRANSIENT_CLASSES.some((prefix) => code.startsWith(prefix))) return 'transient';
+  return 'transient';
+}
+
 /**
  * Postgres errors that are deterministic for a given event: data exceptions
  * (class 22, e.g. out of range) and constraint violations (class 23).
  * Retrying would fail forever, so the event is rejected instead.
  */
 export function isDeterministicDbError(err: unknown): boolean {
-  const code = (err as { code?: unknown })?.code;
-  return typeof code === 'string' && (code.startsWith('22') || code.startsWith('23'));
+  return classifyDbError(err) === 'deterministic';
+}
+
+/** Thrown when the database reports an error that retrying cannot fix. */
+export class FatalDbError extends Error {
+  constructor(
+    readonly code: string,
+    readonly cause: unknown
+  ) {
+    super(
+      `Fatal database error ${code}: ${cause instanceof Error ? cause.message : String(cause)}. ` +
+        'Indexing is halted; see docs/operations.md#fatal-database-error.'
+    );
+    this.name = 'FatalDbError';
+  }
+}
+
+/** Immediate retries for transient database errors before falling back to tick backoff. */
+export const DB_RETRY_ATTEMPTS = 3;
+export const DB_RETRY_BASE_MS = 25;
+
+/** Small jitter so concurrent indexers don't retry in lockstep. */
+function retryJitter(attempt: number): number {
+  return Math.floor(Math.random() * DB_RETRY_BASE_MS * attempt);
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Run `fn`, retrying transient database errors up to `DB_RETRY_ATTEMPTS` times
+ * with small jitter. Fatal errors are wrapped in a FatalDbError; deterministic
+ * and unknown errors are rethrown unchanged.
+ */
+export async function withDbRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const kind = classifyDbError(err);
+      if (kind === 'fatal') {
+        throw new FatalDbError((err as { code: string }).code, err);
+      }
+      if (kind !== 'transient' || attempt >= DB_RETRY_ATTEMPTS) throw err;
+      const delay = retryJitter(attempt + 1);
+      logger.warn('Transient database error; retrying page', {
+        code: (err as { code?: string }).code,
+        attempt: attempt + 1,
+        delayMs: delay,
+      });
+      if (delay > 0) await sleep(delay);
+    }
+  }
 }
 
 /**
@@ -688,6 +823,66 @@ async function processPageInContext(db: Db, contractId: string, page: GetEventsR
   }
 }
 
+/**
+ * Rejection-rate circuit breaker: a page where more than `maxRejectionRate` of
+ * the known (non-duplicate) events were rejected means the event schema probably
+ * changed, so the page is rolled back and the cursor stays put.
+ */
+export function assertRejectionRate(
+  result: PageResult,
+  config: Pick<IndexerConfig, 'maxRejectionRate' | 'minRejectionSample'>
+): void {
+  const maxRate = config.maxRejectionRate ?? 0.5;
+  if (maxRate >= 1) return;
+  const known = result.applied + result.rejected;
+  if (known < (config.minRejectionSample ?? 1)) return;
+  if (result.rejected / known > maxRate) {
+    throw new RejectionRateError(result.rejected, known, maxRate);
+  }
+}
+
+/**
+ * Compare the contract's current WASM hash with the stored one. A change is
+ * persisted in `indexer_state`; when the policy is `halt` (or the new hash is
+ * not allow-listed) a WasmUpgradeError is thrown so the cursor does not move.
+ */
+export async function checkWasmHash(deps: IndexerDependencies): Promise<void> {
+  const { wasmHash, lastModifiedLedger } = await deps.rpc.getContractInstance(deps.config.contractId);
+  if (!wasmHash) return;
+
+  const state = await readState(deps.db);
+  const previous = state[STATE.wasmHash] ?? null;
+  if (previous === wasmHash) return;
+
+  const allowList = (deps.config.wasmAllowList ?? []).map((hash) => hash.toLowerCase());
+  const allowListed = allowList.length === 0 || allowList.includes(wasmHash.toLowerCase());
+  const policy = deps.config.onWasmUpgrade ?? 'halt';
+  const upgrade = {
+    previousHash: previous,
+    currentHash: wasmHash,
+    allowListed,
+    lastModifiedLedger,
+    at: new Date().toISOString(),
+  };
+
+  await writeState(deps.db, {
+    [STATE.wasmHash]: wasmHash,
+    [STATE.wasmUpgrade]: JSON.stringify(upgrade),
+  });
+
+  if (previous === null) {
+    logger.info('Recorded contract WASM hash', { wasmHash, allowListed });
+    return;
+  }
+
+  logger.warn('Contract WASM hash changed', upgrade);
+  if (policy === 'halt' || !allowListed) {
+    const err = new WasmUpgradeError(previous, wasmHash, allowListed);
+    await writeState(deps.db, { [STATE.status]: 'wasm_upgrade', [STATE.lastError]: err.message });
+    throw err;
+  }
+}
+
 type NextRequest = {
   params: GetEventsParams;
   /** True when the start point came from config on an empty database, not from indexed state. */
@@ -848,6 +1043,7 @@ async function pollOnceInContext(
   await ensurePartitions(deps.db, Math.max(scannedLedger(page), page.latestLedger));
 
   const result = await processPage(deps.db, deps.config.contractId, page);
+  assertRejectionRate(result, deps.config);
   if (page.events.length > 0) {
     logger.info('Indexed events', { ...result, lastLedger: page.events[page.events.length - 1].ledger });
   }
@@ -936,6 +1132,7 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
 
   const runTick = async () => {
     try {
+      await withDbRetry(() => checkWasmHash(deps));
       for (let page = 0; page < maxPages && !stopped; page++) {
         const polled = await pollOnce(deps);
         lag = polled.lag;
@@ -946,6 +1143,14 @@ export function createIndexer(deps: IndexerDependencies): RunningIndexer {
       if (isAbortError(err) || stopped) return; // shutting down: no error state, no retry
       failures++;
       const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof FatalDbError) {
+        stopped = true;
+        logger.error('Indexer halted: fatal database error', { error: message, code: err.code });
+        await writeState(deps.db, { [STATE.status]: 'fatal_db_error', [STATE.lastError]: message }).catch(
+          () => undefined
+        );
+        return;
+      }
       if (err instanceof RetentionGapError) {
         logger.error('Indexer halted: retention gap', { error: message });
       } else if (err instanceof CursorInvalidError) {
