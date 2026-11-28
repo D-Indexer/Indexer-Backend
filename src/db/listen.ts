@@ -1,208 +1,217 @@
-import { Pool, PoolClient } from 'pg';
+import { Client } from 'pg';
 
 /**
- * The Postgres NOTIFY channel used to broadcast indexed changes.
+ * Payload emitted on the `folder_indexed` Postgres channel after each
+ * committed indexer page. See `src/indexer/stellar.ts`.
  *
- * Producers call `publish` inside the same transaction that commits the
- * outbox / page change, so subscribers only ever see notifications for
- * committed data.
+ * Consumers MUST tolerate missed notifications (e.g. after a reconnect or
+ * while disconnected) by re-reading authoritative state when they receive a
+ * `resync` signal.
  */
-export const notifyChannel = 'indexed_changes';
-
-/**
- * Payload shape broadcast over the NOTIFY channel.
- *
- * Keep this small: Postgres NOTIFY payloads are limited to 8000 bytes.
- * Consumers that need more detail should re-read from `contract_events`
- * using the cursor (`id`).
- */
-export interface NotifyPayload {
-  /** Monotonic cursor (event id / ledger cursor) used as the SSE `id`. */
-  id: string | number;
-  /** Topic(s) this change belongs to, e.g. "folder", "portfolio", "template". */
-  topics?: string[];
-  /** Owner address, if the change is scoped to a single user. */
-  owner?: string | null;
-  /** Optional event type, e.g. "mint", "update", "delete". */
-  type?: string;
-  /** Optional contract id. */
-  contractId?: string | null;
-  /** Optional ledger sequence. */
-  ledger?: number | null;
-  /** Optional timestamp (ISO string). */
-  ts?: string;
+export interface FolderIndexedPayload {
+  /** The new `last_ledger` after the committed page. */
+  last_ledger: number;
+  /**
+   * Compact list of affected entity keys (e.g. `folder:<id>`).
+   * May be truncated; when truncated, `full_refresh` is set to `true`.
+   */
+  keys?: string[];
+  /** When `true`, consumers should perform a full refresh. */
+  full_refresh?: boolean;
 }
 
 /**
- * Publish a notification inside the caller's transaction.
+ * Event delivered to a `subscribeIndexed` handler.
  *
- * Must be called with the same `PoolClient` that is performing the page
- * commit so the NOTIFY is delivered atomically with the data change.
+ * - `indexed`: a committed page produced a notification.
+ * - `resync`: the listener (re)connected; consumers may have missed
+ *   notifications and should re-read state.
  */
-export async function publish(
-  client: PoolClient,
-  payload: NotifyPayload,
-): Promise<void> {
-  const body = JSON.stringify(payload);
-  // pg_notify takes the channel and payload as text parameters, which avoids
-  // any quoting/escaping issues with dynamic SQL.
-  await client.query('SELECT pg_notify($1, $2)', [notifyChannel, body]);
+export type IndexedEvent =
+  | { type: 'indexed'; payload: FolderIndexedPayload }
+  | { type: 'resync'; reason: 'connected' | 'reconnected' };
+
+export type IndexedHandler = (event: IndexedEvent) => void;
+
+export interface SubscribeIndexedOptions {
+  /** Postgres connection string. Defaults to `process.env.DATABASE_URL`. */
+  connectionString?: string;
+  /** Base delay (ms) before reconnecting. Defaults to 1000. */
+  reconnectBaseDelayMs?: number;
+  /** Max delay (ms) between reconnect attempts. Defaults to 30000. */
+  reconnectMaxDelayMs?: number;
+  /** Optional logger. Defaults to `console`. */
+  logger?: Pick<Console, 'info' | 'warn' | 'error'>;
 }
 
-export type NotifyHandler = (payload: NotifyPayload) => void;
+export interface IndexedSubscription {
+  /** Stop listening and clean up the dedicated client. */
+  stop(): Promise<void>;
+}
 
-export interface SubscribeOptions {
-  /** Initial reconnect delay in ms (default 500). */
-  initialReconnectDelayMs?: number;
-  /** Maximum reconnect delay in ms (default 30000). */
-  maxReconnectDelayMs?: number;
-  /** Optional logger. */
-  logger?: Pick<Console, 'warn' | 'error' | 'info'>;
+const CHANNEL = 'folder_indexed';
+
+function parsePayload(raw: string): FolderIndexedPayload | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof (parsed as { last_ledger?: unknown }).last_ledger === 'number'
+    ) {
+      return parsed as FolderIndexedPayload;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Subscribe to the NOTIFY channel using a dedicated listener client.
+ * Subscribe to `folder_indexed` notifications using a dedicated,
+ * auto-reconnecting `LISTEN` client.
  *
- * Returns an unsubscribe function that stops the listener and releases the
- * client. The listener automatically reconnects with exponential backoff if
- * the underlying connection drops.
+ * The handler is invoked with:
+ * - `{ type: 'resync', reason: 'connected' }` on the initial connection,
+ * - `{ type: 'indexed', payload }` for each committed page notification,
+ * - `{ type: 'resync', reason: 'reconnected' }` after a dropped connection is
+ *   re-established (notifications may have been missed while disconnected).
+ *
+ * Postgres delivers notifications only on commit, so a rolled-back page
+ * produces no notification.
  */
-export function subscribe(
-  pool: Pool,
-  handler: NotifyHandler,
-  options: SubscribeOptions = {},
-): () => void {
-  const {
-    initialReconnectDelayMs = 500,
-    maxReconnectDelayMs = 30_000,
-    logger = console,
-  } = options;
+export function subscribeIndexed(
+  handler: IndexedHandler,
+  options: SubscribeIndexedOptions = {},
+): IndexedSubscription {
+  const connectionString =
+    options.connectionString ?? process.env.DATABASE_URL;
+  const baseDelay = options.reconnectBaseDelayMs ?? 1000;
+  const maxDelay = options.reconnectMaxDelayMs ?? 30000;
+  const logger = options.logger ?? console;
 
-  let closed = false;
-  let client: PoolClient | null = null;
+  let stopped = false;
+  let client: Client | null = null;
   let reconnectTimer: NodeJS.Timeout | null = null;
-  let reconnectDelay = initialReconnectDelayMs;
+  let attempt = 0;
+  let hasConnectedOnce = false;
 
-  const clearReconnectTimer = () => {
+  const clearReconnectTimer = (): void => {
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
   };
 
-  const scheduleReconnect = () => {
-    if (closed) return;
+  const scheduleReconnect = (): void => {
+    if (stopped) return;
     clearReconnectTimer();
-    const delay = reconnectDelay;
-    reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelayMs);
+    const delay = Math.min(baseDelay * 2 ** attempt, maxDelay);
+    attempt += 1;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       void connect();
     }, delay);
-    // Don't keep the process alive solely for a reconnect timer.
+    // Do not keep the process alive solely for reconnects.
     if (typeof reconnectTimer.unref === 'function') {
       reconnectTimer.unref();
     }
   };
 
-  const handleNotification = (msg: {
-    channel: string;
-    payload?: string;
-  }) => {
-    if (msg.channel !== notifyChannel || !msg.payload) return;
-    let parsed: NotifyPayload;
+  const teardownClient = async (current: Client): Promise<void> => {
+    current.removeAllListeners();
     try {
-      parsed = JSON.parse(msg.payload) as NotifyPayload;
-    } catch (err) {
-      logger.warn?.(
-        `[listen] failed to parse NOTIFY payload on ${notifyChannel}:`,
-        err,
-      );
-      return;
-    }
-    try {
-      handler(parsed);
-    } catch (err) {
-      logger.error?.(`[listen] handler threw for ${notifyChannel}:`, err);
-    }
-  };
-
-  const cleanupClient = () => {
-    if (!client) return;
-    const c = client;
-    client = null;
-    c.removeListener('notification', handleNotification);
-    c.removeListener('error', onError);
-    c.removeListener('end', onEnd);
-    // Release back to the pool; ignore errors on an already-broken client.
-    try {
-      c.release(true);
+      await current.end();
     } catch {
-      /* ignore */
+      // Ignore errors while tearing down a broken client.
     }
   };
 
-  const onError = (err: Error) => {
-    if (closed) return;
-    logger.warn?.(`[listen] connection error on ${notifyChannel}:`, err);
-    cleanupClient();
-    scheduleReconnect();
-  };
+  const connect = async (): Promise<void> => {
+    if (stopped) return;
 
-  const onEnd = () => {
-    if (closed) return;
-    logger.warn?.(`[listen] connection ended on ${notifyChannel}`);
-    cleanupClient();
-    scheduleReconnect();
-  };
+    const current = new Client({ connectionString });
+    client = current;
 
-  const connect = async () => {
-    if (closed) return;
-    try {
-      const c = await pool.connect();
-      if (closed) {
-        c.release();
+    let closed = false;
+    const onClose = (): void => {
+      if (closed) return;
+      closed = true;
+      if (client === current) {
+        client = null;
+      }
+      if (stopped) return;
+      logger.warn('[listen] folder_indexed connection closed; reconnecting');
+      scheduleReconnect();
+    };
+
+    current.on('notification', (msg) => {
+      if (stopped) return;
+      if (msg.channel !== CHANNEL || !msg.payload) return;
+      const payload = parsePayload(msg.payload);
+      if (!payload) {
+        logger.warn('[listen] ignoring malformed folder_indexed payload');
         return;
       }
-      client = c;
-      c.on('notification', handleNotification);
-      c.on('error', onError);
-      c.on('end', onEnd);
-      await c.query(`LISTEN ${notifyChannel}`);
-      // Reset backoff after a successful (re)connect.
-      reconnectDelay = initialReconnectDelayMs;
-      logger.info?.(`[listen] subscribed to ${notifyChannel}`);
+      try {
+        handler({ type: 'indexed', payload });
+      } catch (err) {
+        logger.error('[listen] handler threw on indexed event', err);
+      }
+    });
+
+    current.on('error', (err) => {
+      logger.warn('[listen] folder_indexed client error', err);
+      // `end`/`error` will trigger reconnect via `onClose`.
+      if (!closed) {
+        void teardownClient(current).finally(onClose);
+      }
+    });
+
+    current.on('end', onClose);
+
+    try {
+      await current.connect();
+      if (stopped) {
+        await teardownClient(current);
+        return;
+      }
+      await current.query(`LISTEN ${CHANNEL}`);
+      attempt = 0;
+      const reason: 'connected' | 'reconnected' = hasConnectedOnce
+        ? 'reconnected'
+        : 'connected';
+      hasConnectedOnce = true;
+      try {
+        handler({ type: 'resync', reason });
+      } catch (err) {
+        logger.error('[listen] handler threw on resync event', err);
+      }
     } catch (err) {
-      logger.warn?.(`[listen] failed to subscribe to ${notifyChannel}:`, err);
-      cleanupClient();
-      scheduleReconnect();
+      logger.warn('[listen] failed to establish folder_indexed listener', err);
+      if (!closed) {
+        closed = true;
+        if (client === current) {
+          client = null;
+        }
+        await teardownClient(current);
+        scheduleReconnect();
+      }
     }
   };
 
   void connect();
 
-  return function unsubscribe() {
-    if (closed) return;
-    closed = true;
-    clearReconnectTimer();
-    if (client) {
-      const c = client;
+  return {
+    async stop(): Promise<void> {
+      if (stopped) return;
+      stopped = true;
+      clearReconnectTimer();
+      const current = client;
       client = null;
-      c.removeListener('notification', handleNotification);
-      c.removeListener('error', onError);
-      c.removeListener('end', onEnd);
-      // Best-effort UNLISTEN then release.
-      c.query(`UNLISTEN ${notifyChannel}`)
-        .catch(() => {
-          /* ignore */
-        })
-        .finally(() => {
-          try {
-            c.release();
-          } catch {
-            /* ignore */
-          }
-        });
-    }
+      if (current) {
+        await teardownClient(current);
+      }
+    },
   };
 }

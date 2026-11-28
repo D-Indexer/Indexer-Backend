@@ -10,11 +10,72 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/folders/:address`](#get-foldersaddress)       | Folder claimed by an address          |
 | `GET`  | [`/folders/name/:name`](#get-foldersnamename)    | Folder by name                        |
 | `GET`  | [`/portfolios/:address`](#get-portfoliosaddress) | Portfolio NFT minted by an address    |
+| `GET`  | [`/portfolios/:address/versions`](#get-portfoliosaddressversions) | Portfolio version history |
+| `GET`  | [`/portfolios/by-cid/:cid`](#get-portfoliosby-cidcid) | Portfolios referencing a CID      |
 | `GET`  | [`/templates`](#get-templates)                   | All registered templates              |
 | `GET`  | [`/templates/:id`](#get-templatesid)             | One template                          |
-| `GET`  | [`/stream`](#get-stream)                         | Server-Sent Events of indexed changes |
-| `GET`  | [`/changes`](#get-changes)                       | Incremental read-model changes feed   |
+| `GET`  | [`/templates/:id/versions`](#get-templatesidversions) | Template metadata history         |
 | `POST` | [`/upload`](#post-upload)                        | Add and pin a file on IPFS            |
+| `GET`  | [`/.well-known/stellar.toml`](#get-well-knownstellartoml) | SEP-1 stellar.toml          |
+| `GET`  | [`/federation`](#get-federation)                 | SEP-2 federation lookup               |
+
+## Moderation
+
+On-chain data can't be removed, but the API can choose what it promotes. Entries
+(folders and portfolios) can be marked `hidden` or `flagged` by an operator. Moderation
+state lives in its own `moderation` table, keyed by entity type and key, so re-indexing
+or replaying events never overwrites it.
+
+- **Listings, search and stats** never include `hidden` entries. `flagged` entries stay
+  visible but are marked so clients can de-emphasize them.
+- **Direct lookups** (`/folders/:address`, `/folders/name/:name`, `/portfolios/:address`)
+  still return the data, with a `moderation` block. Hidden entries are **not** turned
+  into `451`; the data is public on-chain and the API only declines to promote it.
+
+```json
+{
+  "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+  "name": "smoke-1794262900.folder",
+  "templateId": 1,
+  "claimedAt": "2026-11-09T22:22:27.000Z",
+  "updatedAt": "2026-11-09T22:23:07.000Z",
+  "moderation": { "hidden": true }
+}
+```
+
+`moderation` is omitted for entries with no active moderation record. For `flagged`
+entries it is `{ "hidden": false, "flagged": true, "reason": "…" }`.
+
+### CLI
+
+Moderation is managed with `src/cli/moderation.ts`. Every action requires an actor and
+a reason and is appended to the audit trail (see below).
+
+```bash
+# Hide / flag an entry
+npm run moderation -- hide folder GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM \
+  --actor alice --reason "impersonation"
+npm run moderation -- flag portfolio GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM \
+  --actor alice --reason "offensive content"
+
+# Undo a moderation action
+npm run moderation -- unhide folder GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM \
+  --actor alice --reason "appeal accepted"
+
+# Inspect
+npm run moderation -- list
+npm run moderation -- history folder GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM
+```
+
+Entity types are `folder` (keyed by owner address) and `portfolio` (keyed by owner
+address). States are `hidden` and `flagged`; `unhide` clears the record.
+
+### Audit trail
+
+Each moderation action is recorded with the entity type and key, the resulting state,
+the actor, the reason and a timestamp. Records are append-only: changing or clearing a
+moderation state adds a new row rather than editing the previous one, so
+`moderation history` shows the full sequence of actions for an entry.
 
 ## Errors
 
@@ -26,7 +87,7 @@ Every error has the same shape:
 
 | Status | When                                                  | `error` examples                                                                                                                                                                                                                                                             |
 | ------ | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | Invalid path parameter or upload                      | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit`, `Invalid cursor`, `Invalid limit`, `Invalid topics` |
+| `400`  | Invalid path parameter, query parameter or upload     | `Invalid Stellar address`, `Template ID must be a number`, `Template ID must be at most 4294967295`, `Folder name contains unsupported characters`, `Invalid CID`, `atLedger must be a number`, `atLedger is before the earliest indexed ledger`, `atLedger is after the last indexed ledger`, `Invalid cursor`, `No file provided`, `Unsupported file type`, `File content does not match its declared type`, `File exceeds 10 MB limit` |
 | `404`  | Resource not indexed, or unknown route                | `Folder not found`, `Portfolio not found`, `Template not found`, `Route not found` (also includes `path`)                                                                                                                                                                    |
 | `410`  | `/changes` only: cursor expired or unknown            | `Cursor expired` (body includes `resync: true` and instructions)                                                                                                                                                                                                             |
 | `429`  | `/stream` only: too many concurrent connections       | `Too many stream connections`                                                                                                                                                                                                                                                |
@@ -46,6 +107,33 @@ to correlate; anything else is replaced with a UUID.
 - `:address` is a Stellar strkey: `G…` (account) or `C…` (contract), 56 characters.
 - `:name` is 1–64 characters of `A-Z a-z 0-9 . _ -`. On-chain names end in `.folder`.
 - `:id` is a non-negative integer up to `4294967295` (the contract stores `u32`).
+- `:cid` is a valid CIDv0 (`Qm…`) or CIDv1 (`bafy…`) string. Both forms of the same
+  content are equivalent: lookups normalise the input to CIDv1 before matching.
+- `atLedger` is a non-negative integer ledger sequence. It must fall within the
+  indexed range (`earliest indexed ledger` ≤ `atLedger` ≤ `last_ledger`); otherwise
+  the request is rejected with `400`.
+
+### Point-in-time reads (`?atLedger=`)
+
+`GET /folders/:address`, `GET /folders/name/:name`, `GET /portfolios/:address`,
+`GET /templates/:id` and `GET /templates` accept an optional `atLedger` query
+parameter. When present, the response reflects the state as of the end of that
+ledger instead of the current state. The response shape is unchanged; timestamps
+are still ledger close times.
+
+```bash
+curl "localhost:3000/portfolios/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM?atLedger=5654400"
+```
+
+Errors: `400` `atLedger must be a number`, `atLedger is before the earliest indexed
+ledger`, `atLedger is after the last indexed ledger`.
+
+### Pagination
+
+The `…/versions` endpoints are keyset paginated. Pass `limit` (1–100, default 20)
+and, to fetch the next page, the `cursor` value returned by the previous response.
+Pages are ordered newest version first. An invalid `cursor` returns `400`
+`Invalid cursor`.
 
 ## `GET /`
 
@@ -111,11 +199,13 @@ curl localhost:3000/folders/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJ
   "name": "smoke-1794262900.folder",
   "templateId": 1,
   "claimedAt": "2026-11-09T22:22:27.000Z",
-  "updatedAt": "2026-11-09T22:23:07.000Z"
+  "updatedAt": "2026-11-09T22:23:07.000Z",
+  "archival": { "liveUntilLedger": 5658123, "archived": false }
 }
 ```
 
-Errors: `400` invalid address, `404` `Folder not found`.
+Errors: `400` invalid address, `404` `Folder not found`. Hidden entries are still
+returned, with `moderation: { hidden: true }` (see [moderation](#moderation)).
 
 ## `GET /folders/name/:name`
 
@@ -125,7 +215,8 @@ Same response as above, looked up by folder name.
 curl localhost:3000/folders/name/smoke-1794262900.folder
 ```
 
-Errors: `400` invalid name, `404` `Folder not found`.
+Errors: `400` invalid name, `404` `Folder not found`. Hidden entries are still returned,
+with `moderation: { hidden: true }`.
 
 ## `GET /portfolios/:address`
 
@@ -142,11 +233,84 @@ curl localhost:3000/portfolios/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX
   "templateId": 1,
   "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
   "mintedAt": "2026-11-09T22:23:07.000Z",
-  "updatedAt": "2026-11-09T22:23:52.000Z"
+  "updatedAt": "2026-11-09T22:23:52.000Z",
+  "archival": { "liveUntilLedger": 5658123, "archived": false }
 }
 ```
 
-Errors: `400` invalid address, `404` `Portfolio not found`.
+Errors: `400` invalid address, `404` `Portfolio not found`. Hidden entries are still
+returned, with `moderation: { hidden: true }`.
+
+## `GET /portfolios/:address/versions`
+
+Version history of the portfolio owned by `address`, newest first. A new version is
+recorded on every `port_mint`, `port_upd` and `tmpl_set` event. `version` numbers are
+dense and stable: replaying the same ledger range produces identical history.
+
+```bash
+curl "localhost:3000/portfolios/GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM/versions?limit=2"
+```
+
+```json
+{
+  "versions": [
+    {
+      "version": 2,
+      "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
+      "templateId": 1,
+      "ledger": 5654521,
+      "at": "2026-11-09T22:23:52.000Z"
+    },
+    {
+      "version": 1,
+      "ipfsCid": "bafkreiacuprjr4kth5rfldcy4tdq5xfltl22kdlc3es72u4qsqqcb6ypxa",
+      "templateId": 1,
+      "ledger": 5654400,
+      "at": "2026-11-09T22:23:07.000Z"
+    }
+  ],
+  "nextCursor": "2"
+}
+```
+
+`nextCursor` is `null` on the last page.
+
+Errors: `400` invalid address or cursor, `404` `Portfolio not found`.
+
+## `GET /portfolios/by-cid/:cid`
+
+Reverse lookup: portfolios whose current or historical `ipfsCid` matches `cid`.
+CIDv0 and CIDv1 inputs for the same content return the same results. Lookup is
+index-backed.
+
+```bash
+curl "localhost:3000/portfolios/by-cid/bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu"
+```
+
+```json
+{
+  "cid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
+  "current": [
+    {
+      "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
+      "templateId": 1,
+      "updatedAt": "2026-11-09T22:23:52.000Z"
+    }
+  ],
+  "historical": [
+    {
+      "owner": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
+      "version": 1,
+      "at": "2026-11-09T22:14:42.000Z"
+    }
+  ]
+}
+```
+
+`historical` lists versions that referenced the CID but are no longer current. Pass
+`includeHistorical=false` to omit it (default `true`).
+
+Errors: `400` `Invalid CID`.
 
 ## `GET /templates`
 
@@ -158,7 +322,8 @@ All registered templates (`tmpl_reg`), ordered by id. Not paginated yet.
     "id": 1,
     "metadataUri": "ipfs://bafkreiejxg6d3gqvi3737mcwxkv4u7gismaraxgv5zfoqtfuc3nbdgve7i",
     "creator": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
-    "registeredAt": "2026-11-09T22:14:42.000Z"
+    "registeredAt": "2026-11-09T22:14:42.000Z",
+    "archival": { "liveUntilLedger": 5658123, "archived": false }
   }
 ]
 ```
@@ -169,214 +334,25 @@ One template, same shape as a list item.
 
 Errors: `400` invalid id, `404` `Template not found`.
 
-## `GET /stream`
+## Archival
 
-Server-Sent Events (`text/event-stream`) stream of indexed changes, fed by the
-Postgres `NOTIFY` listener. Use it to update a portfolio page or a "recent mints"
-list live, or to learn when your own transaction has been indexed.
+Soroban persistent storage entries have a TTL and are archived when it expires unless it
+is extended. Folder claims, template registrations and portfolios are all stored this way,
+and archival is not announced by contract events, so the indexer periodically queries
+`getLedgerEntries` for the storage keys backing each entity and records their TTL.
 
-### Query parameters
+Every folder, portfolio and template response includes an `archival` object:
 
-| Name     | Required | Description                                                                                                 |
-| -------- | -------- | ----------------------------------------------------------------------------------------------------------- |
-| `topics` | no       | Comma-separated list of `folder`, `portfolio`, `template`. Omit to receive all topics.                      |
-| `owner`  | no       | Stellar address (`G…`/`C…`). Only events affecting this owner are delivered.                                |
+| Field             | Meaning                                                                                                                       |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `liveUntilLedger` | The ledger at which the entity's storage entry expires, or `null` if it hasn't been checked yet.                              |
+| `archived`        | `true` when the entry is no longer live (its TTL has passed or the key is missing on-chain).                                  |
 
-```bash
-curl -N "localhost:3000/stream?topics=folder,portfolio&owner=GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM"
-```
-
-### Message format
-
-Each message is a JSON payload in `data:` with an `id:` equal to the opaque event
-cursor (the same cursor space as [`/changes`](#get-changes)). The `event:` field is
-the topic.
-
-```
-id: 00000000000000000042
-event: portfolio
-data: {"entity":"portfolio","key":"GAPAMT…2CM","op":"upsert","data":{"owner":"GAPAMT…2CM","templateId":1,"ipfsCid":"bafkrei…","mintedAt":"2026-11-09T22:23:07.000Z","updatedAt":"2026-11-09T22:23:52.000Z"},"cursor":"00000000000000000042"}
-
-```
-
-A comment line `: heartbeat` is sent every 15 s so idle connections and proxies stay
-open; ignore lines starting with `:`.
-
-### Resuming with `Last-Event-ID`
-
-Reconnect with the `Last-Event-ID` header (or `?lastEventId=`) set to the last `id:`
-you received. Missed events are replayed from `contract_events` before the live
-stream resumes, so each event is delivered exactly once. Without it, only events
-committed after the connection is established are sent.
-
-### Limits and shutdown
-
-- Concurrent connections are limited per client IP; exceeding the limit returns
-  `429 Too many stream connections` before the stream starts.
-- On graceful shutdown the server sends a final `event: close` and ends the stream;
-  reconnect with `Last-Event-ID` to resume.
-
-### Proxies
-
-The route sets `X-Accel-Buffering: no` and `Cache-Control: no-cache`, and compression
-is disabled for it. If you put another proxy in front, disable response buffering
-there too (e.g. nginx `proxy_buffering off;`), otherwise events will arrive in bursts.
-
-## `GET /changes`
-
-Incremental, entity-level changes feed for mirroring folders, portfolios and
-templates locally. Apply the feed from an empty state to reproduce the current read
-model exactly.
-
-### Query parameters
-
-| Name    | Required | Description                                                                                       |
-| ------- | -------- | ------------------------------------------------------------------------------------------------- |
-| `since` | no       | Opaque cursor from a previous response. Omit to start from the beginning of indexed history.      |
-| `limit` | no       | Page size, 1–1000 (default 100).                                                                  |
-
-```bash
-curl "localhost:3000/changes?since=00000000000000000000&limit=2"
-```
-
-```json
-{
-  "changes": [
-    {
-      "entity": "folder",
-      "key": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
-      "op": "upsert",
-      "data": {
-        "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
-        "name": "smoke-1794262900.folder",
-        "templateId": null,
-        "claimedAt": "2026-11-09T22:22:27.000Z",
-        "updatedAt": "2026-11-09T22:22:27.000Z"
-      },
-      "cursor": "00000000000000000001"
-    },
-    {
-      "entity": "portfolio",
-      "key": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
-      "op": "upsert",
-      "data": {
-        "owner": "GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM",
-        "templateId": 1,
-        "ipfsCid": "bafkreifwfa7v77kn2om36djjtqiwqykldpady3ytsfbqkqgcrfilhjqtnu",
-        "mintedAt": "2026-11-09T22:23:07.000Z",
-        "updatedAt": "2026-11-09T22:23:07.000Z"
-      },
-      "cursor": "00000000000000000002"
-    }
-  ],
-  "next": "00000000000000000002",
-  "hasMore": false
-}
-```
-
-- `entity` is `folder`, `portfolio` or `template`; `key` is the entity's primary key
-  (owner address or template id).
-- `op` is `upsert` or `delete`. `data` is `null` for deletes.
-- Changes are returned in commit order. Paging is stable under concurrent indexing:
-  pass the returned `next` cursor as `since` to get the following page. `hasMore` is
-  `true` when more changes exist after `next`.
-- Cursors are opaque and stable; don't parse or construct them.
-
-### Expired cursors
-
-If a cursor is malformed or older than the retained history, the endpoint returns
-`410 Gone`:
-
-```json
-{
-  "error": "Cursor expired",
-  "resync": true,
-  "message": "Discard your local state and re-fetch from /changes without `since`.",
-  "requestId": "…"
-}
-```
-
-On `410`, drop local state and restart from the beginning (or re-download the REST
-resources).
-
-## Webhooks
-
-Integrators (wallets, Discord bots, analytics) can subscribe to signed push
-deliveries of indexed events instead of polling. Subscriptions are managed with the
-admin CLI (they are not exposed over HTTP):
-
-```bash
-# add a subscription: URL, topics, optional owner filter
-npm run cli -- webhooks add \
-  --url https://example.com/hooks/dindexer \
-  --topics folder,portfolio \
-  --owner GAPAMTTVHB7RZ5DQHEINZN3GQYRCXXWNCQNQSY5YAU6RKQUYX2QJT2CM \
-  --secret "$WEBHOOK_SECRET"
-
-npm run cli -- webhooks list
-npm run cli -- webhooks disable <id>
-npm run cli -- webhooks enable <id>
-npm run cli -- webhooks remove <id>
-npm run cli -- webhooks deliveries <id>   # recent delivery attempts
-```
-
-- Each delivery is a `POST` with a JSON body containing `id` (event id, use it for
-  de-duplication), `topic`, `entity`, `key`, `op`, `data` and `cursor`.
-- Deliveries are retried with backoff; a subscription is disabled automatically after
-  a configured number of consecutive failures. Delivery attempts are recorded and
-  visible via `webhooks deliveries`.
-- Receiver URLs that resolve to private, loopback or link-local ranges
-  (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`,
-  `::1`, `fc00::/7`, `fe80::/10`, …) are refused. The check is done at delivery time
-  on the resolved IP, and the connection is made to that resolved IP, so DNS
-  rebinding cannot redirect a delivery to an internal host.
-
-### Signature
-
-Each request carries:
-
-| Header                  | Value                                                       |
-| ----------------------- | ----------------------------------------------------------- |
-| `X-DIndexer-Timestamp`  | Unix time in seconds when the delivery was signed           |
-| `X-DIndexer-Signature`  | `sha256=<hex HMAC-SHA256 of "timestamp.body">`              |
-| `X-DIndexer-Event-Id`   | Event id (same as `id` in the body), for de-duplication     |
-
-The signed string is the timestamp, a literal `.`, then the raw request body bytes:
-`HMAC_SHA256(secret, timestamp + "." + body)`. Verify against the raw body before
-parsing JSON, and reject timestamps outside a small tolerance (e.g. 5 minutes) to
-prevent replays.
-
-### Verification snippet (Node.js)
-
-```js
-const crypto = require('node:crypto');
-
-function verifyWebhook(secret, headers, rawBody, toleranceSeconds = 300) {
-  const timestamp = headers['x-dindexer-timestamp'];
-  const signature = headers['x-dindexer-signature'];
-  if (!timestamp || !signature) return false;
-
-  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > toleranceSeconds) return false;
-
-  const expected =
-    'sha256=' +
-    crypto.createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('hex');
-
-  const a = Buffer.from(expected);
-  const b = Buffer.from(signature);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-
-// Express: keep the raw body for verification
-app.post('/hooks/dindexer', express.raw({ type: 'application/json' }), (req, res) => {
-  if (!verifyWebhook(process.env.WEBHOOK_SECRET, req.headers, req.body)) {
-    return res.status(401).end();
-  }
-  const event = JSON.parse(req.body.toString('utf8'));
-  // de-duplicate on event.id, then handle event
-  res.status(204).end();
-});
-```
+An archived entry must be restored (via `RestoreFootprint`) before the contract can read
+or write it, so treat `archived: true` as "not currently usable on-chain" even though the
+read model still returns the last indexed data. The indexer prioritises recently active
+entities and batches `getLedgerEntries` calls to keep RPC usage bounded; see
+[operations](operations.md#status-cli) for the soon-to-expire list in the status CLI.
 
 ## `POST /upload`
 
@@ -400,3 +376,15 @@ Errors: `400` (no file, type, size, content mismatch), `502` / `504` (IPFS).
 
 The endpoint is unauthenticated and not rate limited yet; don't expose it publicly
 without a proxy that enforces limits.
+
+## RPC usage limits
+
+TTL tracking is the only part of the indexer that calls `getLedgerEntries`; event polling
+uses a separate cursor. To stay within provider quotas:
+
+- Keys are queried in batches (`TTL_BATCH_SIZE`, default 50) rather than one call per entity.
+- Polls run on an interval (`TTL_POLL_INTERVAL_MS`, default 60000) and are skipped while a
+  previous poll is still in flight.
+- Recently active entities are checked first; entities whose TTL is far from expiry are
+  refreshed less often.
+- If the RPC returns a rate-limit error the poll backs off and retries on the next interval.

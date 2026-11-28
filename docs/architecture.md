@@ -45,6 +45,9 @@ the API never talks to the RPC.
 | `src/indexer/cli.ts`                            | `status`, `reset-cursor`, `healthcheck`                                                                           |
 | `src/outbox/`                                   | Transactional outbox: row model, leased dispatcher, retries/backoff, dead-lettering, `noop` and `log` sinks        |
 | `src/routes`, `src/controllers`, `src/services` | REST API: routing, validation, SQL                                                                                |
+| `src/cache`                                     | In-process LRU cache with per-key TTL and tag invalidation, flushed by indexer NOTIFY messages                    |
+| `src/jobs`                                      | Postgres-leased background job runner: cron schedules, retries with backoff, per-job concurrency                  |
+| `src/cli/moderation.ts`                         | `hide` / `flag` / `unhide` / `list` moderation commands with an audit trail                                       |
 | `src/config/env.ts`                             | Zod schema for all configuration; the process exits on invalid config                                             |
 | `database/schema.sql`                           | The only schema definition; applied by `npm run db:migrate`, the indexer at startup and the compose Postgres init |
 
@@ -61,10 +64,10 @@ position; trailing fields are ignored because the contract only appends.
 | `adm_add`   | `admin`, `new_admin`                                               | insert `new_admin` into `admins`                       |
 | `adm_rm`    | `admin`, `target`                                                  | delete `target` from `admins`                          |
 | `folder_cl` | `owner`, `folder_name`                                             | upsert `folders`                                       |
-| `tmpl_reg`  | `template_id: u32`, `metadata_uri`, `creator` (appended; optional) | upsert `templates`                                     |
+| `tmpl_reg`  | `template_id: u32`, `metadata_uri`, `creator` (appended; optional) | upsert `templates`; append `template_versions`         |
 | `tmpl_set`  | `owner`, `template_id: u32`                                        | set `folders.template_id` and `portfolios.template_id` |
-| `port_mint` | `owner`, `template_id: u32`, `ipfs_cid`                            | upsert `portfolios`; set `folders.template_id`         |
-| `port_upd`  | `owner`, `ipfs_cid`                                                | update `portfolios.ipfs_cid`                           |
+| `port_mint` | `owner`, `template_id: u32`, `ipfs_cid`                            | upsert `portfolios`; set `folders.template_id`; append `portfolio_versions` |
+| `port_upd`  | `owner`, `ipfs_cid`                                                | update `portfolios.ipfs_cid`; append `portfolio_versions` |
 
 Timestamps (`claimed_at`, `minted_at`, `updated_at`, …) are the event's `ledgerClosedAt`.
 Unknown topics are stored with status `ignored`, so new contract events don't break the
@@ -102,6 +105,23 @@ What this guarantees:
   contract doesn't leave the cursor behind the retention window.
 - **Backoff.** RPC calls are retried 3× for timeouts, network errors, 429 and 5xx. Failed
   polls back off exponentially up to `INDEXER_MAX_BACKOFF_MS`.
+
+### Commit-time notification
+
+At the end of each page transaction the indexer runs
+`SELECT pg_notify('folder_indexed', <json>)`. The payload carries the new `last_ledger` and a
+compact list of affected entity keys (for example `folder:<owner>`, `portfolio:<owner>`,
+`template:<id>`). The list is truncated to stay under Postgres's 8,000-byte payload limit;
+when it would overflow, the payload instead sets a `full_refresh` flag and consumers must
+re-read all state.
+
+Postgres delivers `NOTIFY` only when the transaction commits, so a committed page produces
+exactly one notification and a rolled-back page produces none. The API exposes
+`subscribeIndexed(handler)` in `src/db/listen.ts`, which holds a dedicated `LISTEN`
+connection that reconnects automatically. Notifications can be missed while that connection
+is down (including during a reconnect), so consumers must not treat the stream as a log:
+on every reconnect the listener emits a resync signal and handlers re-read state from
+Postgres rather than assuming they saw every change.
 
 ### Retention window
 
@@ -150,13 +170,34 @@ events. The outbox is the delivery path for external systems.
 | `folders`         | `owner` (unique `name`) | `folder_cl`, `tmpl_set`, `port_mint`                                                           |
 | `templates`       | `id`                    | `tmpl_reg`                                                                                     |
 | `portfolios`      | `owner`                 | `port_mint`, `port_upd`, `tmpl_set`                                                            |
+| `portfolio_versions` | `(owner, version)`   | `port_mint`, `port_upd`: owner, version number, cid, template id, event id, time               |
+| `template_versions`  | `(id, version)`      | `tmpl_reg`: template id, version number, metadata uri, creator, event id, time                 |
 | `admins`          | `address`               | `init`, `adm_add`, `adm_rm`                                                                    |
 | `indexer_state`   | `key`                   | `cursor`, `last_ledger`, `last_success_at`, `status`, `last_error`, `start_ledger`, `last_gap` |
-| `outbox`          | `id` (unique `idempotency_key`) | one row per applied event and subscriber type: payload, status, attempts, next attempt, lease, last error |
+| `moderation`      | `(entity_type, key)`    | operator actions: `hidden` / `flagged`, reason, actor, timestamps                              |
+| `jobs`            | `id`                    | job runner state: name, payload, run at, attempts, lease owner/expiry, status, last error      |
 
 Template ids are `BIGINT` because the contract uses `u32`. There are no foreign keys between
 `folders` and `portfolios`: an indexer that starts partway through history can see a mint
 whose claim is outside the window.
+
+### Version history and validity ranges
+
+`portfolios.ipfs_cid` and `templates.metadata_uri` are overwritten in place, so the previous
+values are kept in `portfolio_versions` and `template_versions`. Handlers append a row in the
+same page transaction as the current-state write, keyed by `(owner, version)` or
+`(id, version)`. Version numbers start at 1 and are dense: each applied event increments the
+previous version by one, and because only newly inserted `contract_events` are applied,
+replay never creates gaps or duplicates. The same history can be derived from
+`contract_events` by the backfill script, which must produce rows identical to live
+indexing.
+
+History rows also carry a validity range `[from_ledger, to_ledger)`: `from_ledger` is the
+ledger of the event that produced the value and `to_ledger` is the ledger of the next version
+(or `NULL` for the current one). This makes point-in-time reads a single indexed lookup —
+`?atLedger=L` selects the row with `from_ledger <= L < to_ledger` — and is backed by btree
+indexes on `(owner, from_ledger)` (and the template equivalent). Requests for a ledger before
+the earliest indexed ledger or after `last_ledger` are rejected with `400`.
 
 ## Design decisions
 
