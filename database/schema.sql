@@ -72,6 +72,12 @@ ALTER TABLE templates ADD COLUMN IF NOT EXISTS ttl_checked_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_templates_live_until
   ON templates (live_until_ledger) WHERE live_until_ledger IS NOT NULL;
 
+-- GET /creators/:address/templates (keyset by registered_at, id) and creator
+-- stats. Templates registered by contract versions whose tmpl_reg carried no
+-- creator have creator = NULL and are not attributable to anyone.
+CREATE INDEX IF NOT EXISTS idx_templates_creator_registered
+  ON templates (creator, registered_at, id);
+
 -- port_mint / port_upd / tmpl_set. No foreign key to folders: the indexer can
 -- start partway through history, so a portfolio may arrive before its folder.
 -- cid_normalized holds the CIDv1 base32 form for reverse lookups.

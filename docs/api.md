@@ -16,6 +16,8 @@ responses from the local stack indexing the testnet contract.
 | `GET`  | [`/templates/:id`](#get-templatesid)                              | One template                          |
 | `GET`  | [`/templates/:id/portfolios`](#get-templatesidportfolios)         | Portfolios using a template           |
 | `GET`  | [`/templates/:id/versions`](#get-templatesidversions)             | Template metadata history             |
+| `GET`  | [`/creators/:address`](#get-creatorsaddress)                      | Template creator stats                |
+| `GET`  | [`/creators/:address/templates`](#get-creatorsaddresstemplates)   | Templates registered by a creator     |
 | `POST` | [`/upload`](#post-upload)                                         | Add and pin a file on IPFS            |
 | `GET`  | [`/.well-known/stellar.toml`](#get-well-knownstellartoml)         | SEP-1 stellar.toml                    |
 | `GET`  | [`/federation`](#get-federation)                                  | SEP-2 federation lookup               |
@@ -474,6 +476,50 @@ curl "localhost:3000/templates/1/portfolios?limit=2"
 ```
 
 Errors: `400` invalid id, `limit` or cursor; `404` `Template not found`.
+
+## `GET /creators/:address`
+
+Aggregate stats for a template creator: how many templates `tmpl_reg` attributes to the
+address and their combined `usageCount`. Creators aren't registered anywhere, so an
+address with no templates returns zeros, not `404`.
+
+```json
+{
+  "address": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
+  "templateCount": 2,
+  "totalUsage": 14
+}
+```
+
+Errors: `400` `Invalid Stellar address`.
+
+## `GET /creators/:address/templates`
+
+Templates registered by `address`, oldest registration first (ties broken by id), in the
+same shape as [`GET /templates`](#get-templates). Keyset paginated (see
+[Pagination](#pagination)): `limit` 1–100, default 20. An address with no templates
+returns `{ "templates": [], "nextCursor": null }`, not `404`.
+
+```json
+{
+  "templates": [
+    {
+      "id": 1,
+      "metadataUri": "ipfs://bafkreiejxg6d3gqvi3737mcwxkv4u7gismaraxgv5zfoqtfuc3nbdgve7i",
+      "creator": "GCFADTAQUXYFXUW7G65YXIQTTDORMT72FFTUYFEEUXJZDNAYTD2RXMBZ",
+      "registeredAt": "2026-11-09T22:14:42.000Z",
+      "usageCount": 12
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+Templates registered by older contract versions, whose `tmpl_reg` event carried no
+creator, are indexed with `"creator": null`. They are not attributable to any address and
+never appear under `/creators`.
+
+Errors: `400` `Invalid Stellar address`, invalid `limit` or cursor.
 
 ## Archival
 

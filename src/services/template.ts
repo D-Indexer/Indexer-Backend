@@ -98,3 +98,69 @@ export async function listTemplatePortfolios(
     : await db.query<TemplatePortfolioRow>(LIST_TEMPLATE_PORTFOLIOS_SQL, [templateId, fetch]);
   return toPage(rows, page.limit, mapTemplatePortfolio, (row) => [row.cursor_ts, row.owner]);
 }
+
+// ---------------------------------------------------------------------------
+// Creators
+// ---------------------------------------------------------------------------
+
+type CreatorTemplateRow = TemplateRow & { cursor_ts: string };
+
+/**
+ * A creator's templates, oldest registration first; id breaks ties so the
+ * order is total. Backed by idx_templates_creator_registered. Templates from
+ * contract versions whose tmpl_reg had no creator are stored with
+ * creator = NULL and never match.
+ */
+const CREATOR_TEMPLATE_SELECT = `SELECT t.id, t.metadata_uri, t.creator, t.registered_at,
+       COALESCE(u.portfolio_count, 0) AS usage_count,
+       ${isoMicros('t.registered_at')} AS cursor_ts
+  FROM templates t
+  LEFT JOIN template_usage u ON u.template_id = t.id`;
+
+export const LIST_CREATOR_TEMPLATES_SQL = `${CREATOR_TEMPLATE_SELECT}
+ WHERE t.creator = $1
+ ORDER BY t.registered_at, t.id
+ LIMIT $2`;
+
+export const LIST_CREATOR_TEMPLATES_AFTER_SQL = `${CREATOR_TEMPLATE_SELECT}
+ WHERE t.creator = $1 AND (t.registered_at, t.id) > ($3::timestamptz, $4::bigint)
+ ORDER BY t.registered_at, t.id
+ LIMIT $2`;
+
+export const CREATOR_STATS_SQL = `SELECT COUNT(*) AS template_count,
+       COALESCE(SUM(u.portfolio_count), 0) AS total_usage
+  FROM templates t
+  LEFT JOIN template_usage u ON u.template_id = t.id
+ WHERE t.creator = $1`;
+
+export interface CreatorStats {
+  address: string;
+  templateCount: number;
+  /** Sum of usageCount over the creator's templates. */
+  totalUsage: number;
+}
+
+export async function listTemplatesByCreator(
+  db: Queryable,
+  creator: string,
+  page: PageRequest
+): Promise<Page<Template>> {
+  const fetch = page.limit + 1;
+  const { rows } = page.after
+    ? await db.query<CreatorTemplateRow>(LIST_CREATOR_TEMPLATES_AFTER_SQL, [creator, fetch, ...page.after])
+    : await db.query<CreatorTemplateRow>(LIST_CREATOR_TEMPLATES_SQL, [creator, fetch]);
+  return toPage(rows, page.limit, mapTemplate, (row) => [row.cursor_ts, row.id]);
+}
+
+/** Aggregate stats for a creator. Unknown creators get zeros rather than a 404. */
+export async function getCreatorStats(db: Queryable, creator: string): Promise<CreatorStats> {
+  const { rows } = await db.query<{ template_count: string; total_usage: string }>(CREATOR_STATS_SQL, [
+    creator,
+  ]);
+  const row = rows[0];
+  return {
+    address: creator,
+    templateCount: Number(row?.template_count ?? 0),
+    totalUsage: Number(row?.total_usage ?? 0),
+  };
+}

@@ -2,6 +2,7 @@ import express, { RequestHandler } from 'express';
 import cors from 'cors';
 import { createFolderRoutes } from './routes/folder.routes';
 import { createTemplateRoutes } from './routes/template.routes';
+import { createCreatorRoutes } from './routes/creator.routes';
 import { createUploadRoutes } from './routes/upload.routes';
 import { createPortfolioRoutes } from './routes/portfolio.routes';
 import { createHealthRoutes } from './routes/health.routes';
@@ -95,6 +96,7 @@ export function createApp(deps: AppDependencies) {
   // Read-model routes query the database directly through an explicit handle.
   const db = deps.db as Queryable;
   app.use('/templates', createTemplateRoutes({ db }));
+  app.use('/creators', createCreatorRoutes({ db }));
   app.use('/portfolios', createPortfolioRoutes(deps));
   app.use('/upload', requireFeature(featureFlags, ROUTE_FLAGS.uploads), createUploadRoutes(deps));
   app.use('/health', createHealthRoutes(deps));
