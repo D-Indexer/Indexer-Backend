@@ -69,6 +69,28 @@ describe('environment configuration', () => {
     );
   });
 
+  it('defaults TRUST_PROXY to false', () => {
+    expect(loadEnv(validEnv).TRUST_PROXY).toBe(false);
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: '' }).TRUST_PROXY).toBe(false);
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: 'false' }).TRUST_PROXY).toBe(false);
+  });
+
+  it('parses TRUST_PROXY hop counts and CIDR lists', () => {
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: '1' }).TRUST_PROXY).toBe(1);
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: '2' }).TRUST_PROXY).toBe(2);
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: '10.0.0.0/8, ::1/128' }).TRUST_PROXY).toEqual([
+      '10.0.0.0/8',
+      '::1/128',
+    ]);
+  });
+
+  it.each(['true', '0', 'loopback', '10.0.0.0', '10.0.0.0/8, nope'])(
+    'rejects invalid TRUST_PROXY %p',
+    (value) => {
+      expect(() => loadEnv({ ...validEnv, TRUST_PROXY: value })).toThrow(/TRUST_PROXY/);
+    }
+  );
+
   it.each(['FOLDER_CONTRACT_ID', 'STELLAR_RPC_URL'])('fails fast with a hint when %s is missing', (key) => {
     const env: Record<string, string> = { ...validEnv };
     delete env[key];

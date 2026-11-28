@@ -144,6 +144,38 @@ Pages are ordered newest version first. An invalid `cursor` returns `400`
 { "name": "D-Indexer-Backend", "status": "ok", "docs": "/health" }
 ```
 
+## `GET /health/live`
+
+Liveness probe: `200` whenever the process is up and the event loop answers. It
+performs no I/O, so a database or Kubo outage never makes an orchestrator restart
+a healthy pod. The image's `HEALTHCHECK` uses it.
+
+```json
+{ "status": "ok", "requestId": "03a1e532-cabc-4f9a-bfd7-b7242bb46db2" }
+```
+
+## `GET /health/ready`
+
+Readiness probe: `200` only when the API can serve traffic — not shutting down,
+the database answers within `HEALTHCHECK_DATABASE_TIMEOUT_MS`, and the Kubo node
+answers `/api/v0/version` within `HEALTHCHECK_IPFS_TIMEOUT_MS`. Results are cached
+for `HEALTHCHECK_CACHE_MS` (~1 s) so frequent probes cannot storm dependencies.
+
+```json
+{
+  "status": "ok",
+  "dependencies": {
+    "db": { "status": "ok", "latencyMs": 3 },
+    "ipfs": { "status": "ok", "latencyMs": 11 }
+  },
+  "requestId": "03a1e532-cabc-4f9a-bfd7-b7242bb46db2"
+}
+```
+
+`503` when a dependency is unreachable (`status: "degraded"`, the failing entry
+reports `"status": "unreachable"`), and `503` with `status: "shutting_down"` once
+the process received `SIGTERM`/`SIGINT` (dependencies are reported as `skipped`).
+
 ## `GET /health`
 
 `200` when the database responds. The `indexer` block is informational and doesn't
@@ -157,6 +189,7 @@ change the status code; the indexer process has its own healthcheck
   "indexer": {
     "status": "ok",
     "stale": false,
+    "lagSeconds": 12.4,
     "lastLedger": 5654521,
     "lastSuccessAt": "2026-11-10T07:37:30.225Z",
     "lastError": null
@@ -169,6 +202,9 @@ change the status code; the indexer process has its own healthcheck
   `retention_gap` (halted, [needs an operator](operations.md#retention-gap)),
   `cursor_invalid` (halted, [needs an operator](operations.md#invalid-cursor)) or `not_started`.
 - `indexer.stale`: no successful poll within `INDEXER_STALE_AFTER_MS`.
+- `indexer.lagSeconds`: seconds since the last successful poll, computed by the
+  database (`NOW() - updated_at`), so a skewed API host clock cannot change it.
+  `null` when the indexer has never succeeded.
 - `indexer.lastLedger`: the ledger the indexer has scanned up to.
 - `indexer.cursorRecovered`: `null`, or `{ invalidCursor, resumedAt, at }` when the indexer
   replaced a corrupt saved cursor with a replay from `last_ledger`.
@@ -182,6 +218,7 @@ change the status code; the indexer process has its own healthcheck
   "indexer": {
     "status": "not_started",
     "stale": true,
+    "lagSeconds": null,
     "lastLedger": null,
     "lastSuccessAt": null,
     "lastError": null
@@ -189,6 +226,10 @@ change the status code; the indexer process has its own healthcheck
   "requestId": "…"
 }
 ```
+
+`503` with `status: "shutting_down"` once the process received `SIGTERM`/`SIGINT`:
+readiness fails immediately so load balancers stop routing new requests, while
+in-flight requests (e.g. an upload) finish before `SHUTDOWN_FORCE_CLOSE_MS`.
 
 ## `GET /folders/:address`
 

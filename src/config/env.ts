@@ -254,6 +254,7 @@ export const envSchema = z
       .union([z.literal('').transform(() => undefined), z.string().min(1)])
       .optional(),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+    SHUTDOWN_FORCE_CLOSE_MS: z.coerce.number().int().positive().default(8000),
     HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
     PORTFOLIO_TRANSFERS_ENABLED: z
       .enum(['true', 'false', '1', '0'])
@@ -407,6 +408,18 @@ export function rpcUrls(env: Pick<AppEnv, 'STELLAR_RPC_URL' | 'STELLAR_RPC_URLS'
   const urls = parseRpcUrls(env.STELLAR_RPC_URLS);
   if (urls.length > 0) return urls;
   return env.STELLAR_RPC_URL ? [env.STELLAR_RPC_URL] : [];
+}
+
+/** Express `trust proxy` setting derived from TRUST_PROXY. */
+export type TrustProxy = AppEnv['TRUST_PROXY'];
+
+/** Warn (once) when production runs without TRUST_PROXY, so client IPs may be wrong. */
+export function warnIfTrustProxyUnset(env: Pick<AppEnv, 'NODE_ENV' | 'TRUST_PROXY'>): void {
+  if (env.NODE_ENV === 'production' && env.TRUST_PROXY === false) {
+    logger.warn(
+      'TRUST_PROXY is unset in production; req.ip will be the load balancer address. Set TRUST_PROXY to the hop count or trusted CIDRs.'
+    );
+  }
 }
 
 let cachedEnv: AppEnv | null = null;

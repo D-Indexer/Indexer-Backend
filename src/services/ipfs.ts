@@ -59,3 +59,18 @@ export function createIpfsService(deps: IpfsServiceDeps): IpfsService {
 
   return { pinFile, resolveUrl };
 }
+
+/**
+ * Probe the Kubo node (`/api/v0/version`) for readiness checks. Resolves when
+ * the node answers 2xx, rejects otherwise; never throws an HttpError.
+ */
+export async function checkKuboReachable(timeoutMs: number): Promise<void> {
+  const versionUrl = new URL('/api/v0/version', env.IPFS_API_URL);
+  const response = await fetch(versionUrl, {
+    method: 'POST',
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    throw new Error(`Kubo version check failed with status ${response.status}`);
+  }
+}

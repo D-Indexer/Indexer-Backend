@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import type { ServerResponse } from 'node:http';
 import { createApp } from './app';
 import { createContainer } from './container';
 import { logger } from './utils/logger';
@@ -24,6 +25,19 @@ const errorReporter = initErrorReporter({
   logger,
 });
 
+/** In-flight responses, so shutdown can mark them `Connection: close`. */
+const inFlight = new Set<ServerResponse>();
+
+app.use((_req, res, next) => {
+  if (isShuttingDown()) {
+    res.setHeader('Connection', 'close');
+    res.setHeader('Retry-After', '1');
+  }
+  inFlight.add(res);
+  res.on('close', () => inFlight.delete(res));
+  next();
+});
+
 const server = app.listen(env.PORT, () => {
   logger.info('Server started', { port: env.PORT, nodeEnv: env.NODE_ENV });
 });
@@ -45,7 +59,23 @@ async function shutdown(signal: string): Promise<void> {
   }, env.SHUTDOWN_TIMEOUT_MS);
   timeout.unref();
 
+  // Force-close whatever is still open before the hard timeout.
+  const forceClose = setTimeout(() => {
+    logger.warn('Force-closing remaining connections', { forceCloseMs: env.SHUTDOWN_FORCE_CLOSE_MS });
+    closeAllConnections();
+  }, env.SHUTDOWN_FORCE_CLOSE_MS);
+  forceClose.unref();
+
+  // Ask in-flight responses to close their connection once they finish.
+  for (const res of inFlight) {
+    if (!res.headersSent) res.setHeader('Connection', 'close');
+  }
+
+  // Stop accepting new connections and close idle keep-alive sockets.
+  closeIdleConnections();
+
   server.close(async (err) => {
+    clearTimeout(forceClose);
     if (err) {
       logger.error('HTTP server close failed', { error: err.message });
       clearTimeout(timeout);

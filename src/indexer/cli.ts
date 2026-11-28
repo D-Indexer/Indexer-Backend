@@ -77,10 +77,9 @@ export async function run(args: string[]): Promise<number> {
     }
     case 'healthcheck': {
       const state = await readState(pool);
-      const last = Date.parse(state[STATE.lastSuccessAt] ?? '');
-      const fresh = Number.isFinite(last) && Date.now() - last < getEnv().INDEXER_STALE_AFTER_MS;
-      if (!fresh) console.error(`indexer unhealthy: ${JSON.stringify(state)}`);
-      return fresh ? 0 : 1;
+      const { stale } = await readStaleness(pool, getEnv().INDEXER_STALE_AFTER_MS);
+      if (stale) console.error(`indexer unhealthy: ${JSON.stringify(state)}`);
+      return stale ? 1 : 0;
     }
     case 'orphans': {
       const { rows } = await pool.query(

@@ -82,7 +82,23 @@ export function createApp(deps: AppDependencies) {
   const app = express();
 
   app.disable('x-powered-by');
+  app.set('trust proxy', env.TRUST_PROXY);
+  warnIfTrustProxyUnset(env);
   app.use(requestId);
+  app.use((req, res, next) => {
+    const startedAt = Date.now();
+    res.on('finish', () => {
+      logger.info('Request', {
+        requestId: req.id,
+        method: req.method,
+        path: req.originalUrl,
+        status: res.statusCode,
+        ip: req.ip,
+        durationMs: Date.now() - startedAt,
+      });
+    });
+    next();
+  });
   app.use(securityHeaders);
   app.use(cors({ origin: corsOrigin(env) }));
   app.use(express.json({ limit: env.REQUEST_BODY_LIMIT }));

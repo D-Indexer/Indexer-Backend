@@ -301,6 +301,12 @@ export async function writeStateIfUnchanged(
   for (const [key, value] of Object.entries(entries)) {
     if (value === null || value === undefined) {
       await db.query('DELETE FROM indexer_state WHERE key = $1', [key]);
+    } else if (key === STATE.lastSuccessAt) {
+      await db.query(
+        `INSERT INTO indexer_state (key, value, updated_at) VALUES ($1, to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [key]
+      );
     } else {
       await db.query(
         `INSERT INTO indexer_state (key, value, version, updated_at) VALUES ($1, $2, 1, NOW())
@@ -549,6 +555,26 @@ export function classifyDbError(err: unknown): DbErrorClass {
   if (known) return known;
   if (TRANSIENT_CLASSES.some((prefix) => code.startsWith(prefix))) return 'transient';
   return 'transient';
+}
+
+/**
+ * Indexer staleness measured entirely by the database: `lagSeconds` is
+ * `NOW() - updated_at` for `last_success_at`, so a skewed API host clock cannot
+ * change the result. `lagSeconds` is null when the indexer never succeeded.
+ */
+export async function readStaleness(
+  db: Pick<Pool, 'query'>,
+  staleAfterMs: number
+): Promise<{ lagSeconds: number | null; stale: boolean }> {
+  const { rows } = await db.query<{ lag_seconds: string | null }>(
+    `SELECT EXTRACT(EPOCH FROM (NOW() - updated_at))::text AS lag_seconds
+       FROM indexer_state WHERE key = $1`,
+    [STATE.lastSuccessAt]
+  );
+  const raw = rows[0]?.lag_seconds;
+  const lagSeconds = raw === null || raw === undefined ? null : Math.max(0, Number(raw));
+  const stale = lagSeconds === null || !Number.isFinite(lagSeconds) || lagSeconds * 1000 > staleAfterMs;
+  return { lagSeconds: lagSeconds !== null && Number.isFinite(lagSeconds) ? lagSeconds : null, stale };
 }
 
 /**
@@ -819,7 +845,8 @@ async function processPageInContext(db: Db, contractId: string, page: GetEventsR
       [STATE.cursor]: page.cursor,
       [STATE.startLedger]: null,
       [STATE.lastLedger]: String(lastLedger),
-      [STATE.lastSuccessAt]: new Date().toISOString(),
+      // Stamped with the database clock inside this transaction (see writeState).
+      [STATE.lastSuccessAt]: 'now',
       [STATE.status]: 'ok',
       [STATE.lastError]: null,
     });
