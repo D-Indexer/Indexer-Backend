@@ -188,6 +188,73 @@ re-enable the flag once the incident is over.
 - Check a node: `docker compose exec ipfs ipfs id`. List pins:
   `docker compose exec ipfs ipfs pin ls --type=recursive`.
 
+## Network fault injection (chaos profile)
+
+To reproduce production network conditions locally, an optional compose profile puts
+[Toxiproxy](https://github.com/Shopify/toxiproxy) in front of Postgres, Kubo and the RPC:
+
+```bash
+docker compose --profile chaos up
+```
+
+With the profile enabled, the API and indexer connect through the proxies instead of the
+upstreams directly:
+
+| Proxy      | Listen (in compose network) | Upstream            | Used by                       |
+| ---------- | --------------------------- | ------------------- | ----------------------------- |
+| `postgres` | `toxiproxy:8666`            | `postgres:5432`     | API and indexer (`DATABASE_URL`) |
+| `kubo`     | `toxiproxy:8667`            | `ipfs:5001`         | API (`IPFS_API_URL`)          |
+| `rpc`      | `toxiproxy:8668`            | `STELLAR_RPC_URL`   | indexer (`STELLAR_RPC_URL`)   |
+
+The Toxiproxy admin API is on `127.0.0.1:8474`. Without the profile the stack behaves as
+before and connects to the upstreams directly.
+
+Scripts live in `scripts/chaos/`:
+
+- `apply.sh <proxy> <toxic> [args...]` adds a toxic to a proxy.
+- `restore.sh [proxy]` removes all toxics (all proxies if none is given).
+- `smoke.sh` verifies that every proxy routes traffic to its upstream.
+
+### Recipes
+
+Each recipe lists the command and the behaviour you should observe.
+
+**RPC 5 s latency** — indexer polls slow down and logs timeouts/backoff.
+
+```bash
+scripts/chaos/apply.sh rpc latency --latency 5000 --jitter 0
+```
+
+Expected: each RPC call takes about 5 s. Polls take longer, and once a call exceeds the
+client timeout the indexer logs `Indexer poll failed` and backs off exponentially (up to
+`INDEXER_MAX_BACKOFF_MS`). `/health` stays `200` while Postgres answers; the indexer's
+`last_success_at` stops advancing. Restore with `scripts/chaos/restore.sh rpc`.
+
+**Postgres drops connections** — indexer retries, no partial writes, cursor unchanged.
+
+```bash
+scripts/chaos/apply.sh postgres reset_peer --timeout 0
+```
+
+Expected: in-flight connections are reset. The API returns `503` from `/health` while the
+database is unreachable. The indexer retries with backoff; the interrupted page is rolled
+back, so no partial writes land and `indexer_state.cursor` does not move until a poll
+succeeds. Restore with `scripts/chaos/restore.sh postgres`.
+
+**Kubo slow upload** — `POST /upload` returns `504` after `IPFS_TIMEOUT_MS`.
+
+```bash
+scripts/chaos/apply.sh kubo latency --latency 30000 --jitter 0
+```
+
+Expected: uploads take longer than `IPFS_TIMEOUT_MS` (default 10 s), so `POST /upload`
+returns `504`. With a latency below the timeout the upload succeeds but slowly. Restore
+with `scripts/chaos/restore.sh kubo`.
+
+Other useful toxics: `bandwidth` (`--rate <KB/s>`) to throttle a proxy, `timeout` to stop
+forwarding traffic, and `reset_peer` to drop connections. Run `scripts/chaos/smoke.sh` after
+starting the profile to confirm the proxies route traffic.
+
 ## Shutdown
 
 Both processes handle SIGTERM/SIGINT. The API stops accepting connections and closes the

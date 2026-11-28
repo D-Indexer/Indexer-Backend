@@ -9,6 +9,9 @@ type PortfolioRow = {
   updated_at: Date;
 };
 
+export const GET_PORTFOLIO_SQL =
+  'SELECT owner, template_id, ipfs_cid, minted_at, updated_at FROM portfolios WHERE owner = $1';
+
 function mapPortfolio(row: PortfolioRow): Portfolio {
   return {
     owner: row.owner,
@@ -19,22 +22,11 @@ function mapPortfolio(row: PortfolioRow): Portfolio {
   };
 }
 
-export type PortfolioServiceDeps = {
-  db: Pool;
-};
-
-export type PortfolioService = {
-  getPortfolio(owner: string): Promise<Portfolio | null>;
-};
-
-export function createPortfolioService({ db }: PortfolioServiceDeps): PortfolioService {
-  async function getPortfolio(owner: string): Promise<Portfolio | null> {
-    const { rows } = await db.query<PortfolioRow>(
-      'SELECT owner, template_id, ipfs_cid, minted_at, updated_at FROM portfolios WHERE owner = $1',
-      [owner]
-    );
-    return rows[0] ? mapPortfolio(rows[0]) : null;
-  }
-
-  return { getPortfolio };
+export async function getPortfolio(owner: string): Promise<Portfolio | null> {
+  const { rows } = await pool.query<PortfolioRow>(
+    'SELECT owner, template_id, ipfs_cid, minted_at, updated_at FROM portfolios WHERE owner = $1',
+    [owner]
+  );
+  const row = rows[0];
+  return row ? mapPortfolio(row) : null;
 }

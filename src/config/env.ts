@@ -2,7 +2,7 @@ import { StrKey } from '@stellar/stellar-sdk';
 import { z } from 'zod';
 
 const optionalPositiveInt = z
-  .union([z.literal('').transform(() => undefined), z.coerce.number().int().positive()])
+  .union([z.literal('').transform((): undefined => undefined), z.coerce.number().int().positive()])
   .optional();
 
 export const LOG_LEVELS = ['debug', 'info', 'warn', 'error', 'silent'] as const;
@@ -193,91 +193,30 @@ export const envSchema = z
       .refine(
         (value) => StrKey.isValidContract(value),
         'FOLDER_CONTRACT_ID must be a contract address (C..., 56 characters)'
-      )
-      .describe(envVarMeta.FOLDER_CONTRACT_ID.description),
-    IPFS_API_URL: z
+      ),
+    IPFS_API_URL: z.string().url('IPFS_API_URL must be a valid URL'),
+    IPFS_GATEWAY: z.string().url('IPFS_GATEWAY must be a valid URL'),
+    IPFS_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+    CORS_ORIGIN: z
       .string()
-      .url('IPFS_API_URL must be a valid URL')
-      .describe(envVarMeta.IPFS_API_URL.description),
-    IPFS_GATEWAY: z
-      .string()
-      .url('IPFS_GATEWAY must be a valid URL')
-      .describe(envVarMeta.IPFS_GATEWAY.description),
-    IPFS_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .default(30000)
-      .describe(envVarMeta.IPFS_TIMEOUT_MS.description),
-    CORS_ORIGIN: z.string().optional().describe(envVarMeta.CORS_ORIGIN.description),
-    REQUEST_BODY_LIMIT: z
-      .string()
-      .default('1mb')
-      .describe(envVarMeta.REQUEST_BODY_LIMIT.description),
-    INDEXER_POLL_INTERVAL_MS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .default(5000)
-      .describe(envVarMeta.INDEXER_POLL_INTERVAL_MS.description),
-    INDEXER_PAGE_LIMIT: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(10000)
-      .default(200)
-      .describe(envVarMeta.INDEXER_PAGE_LIMIT.description),
-    INDEXER_START_LEDGER: optionalPositiveInt.describe(envVarMeta.INDEXER_START_LEDGER.description),
-    INDEXER_ON_RETENTION_GAP: z
-      .enum(['halt', 'skip'])
-      .default('halt')
-      .describe(envVarMeta.INDEXER_ON_RETENTION_GAP.description),
-    INDEXER_MAX_BACKOFF_MS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .default(60000)
-      .describe(envVarMeta.INDEXER_MAX_BACKOFF_MS.description),
-    INDEXER_STALE_AFTER_MS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .default(120000)
-      .describe(envVarMeta.INDEXER_STALE_AFTER_MS.description),
-    DB_MAX_CONNECTIONS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .default(10)
-      .describe(envVarMeta.DB_MAX_CONNECTIONS.description),
-    DB_IDLE_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .default(30000)
-      .describe(envVarMeta.DB_IDLE_TIMEOUT_MS.description),
-    DB_CONNECTION_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .default(5000)
-      .describe(envVarMeta.DB_CONNECTION_TIMEOUT_MS.description),
-    SHUTDOWN_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .default(10000)
-      .describe(envVarMeta.SHUTDOWN_TIMEOUT_MS.description),
-    HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .default(2000)
-      .describe(envVarMeta.HEALTHCHECK_DATABASE_TIMEOUT_MS.description),
-    LOG_LEVEL: z.enum(LOG_LEVELS).default('info').describe(envVarMeta.LOG_LEVEL.description),
+      .optional()
+      .transform((value) => value),
+    REQUEST_BODY_LIMIT: z.string().default('1mb'),
+    INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
+    INDEXER_PAGE_LIMIT: z.coerce.number().int().min(1).max(10000).default(200),
+    INDEXER_START_LEDGER: optionalPositiveInt,
+    INDEXER_ON_RETENTION_GAP: z.enum(['halt', 'skip']).default('halt'),
+    INDEXER_MAX_BACKOFF_MS: z.coerce.number().int().positive().default(60000),
+    INDEXER_STALE_AFTER_MS: z.coerce.number().int().positive().default(120000),
+    DB_MAX_CONNECTIONS: z.coerce.number().int().positive().default(10),
+    DB_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+    DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+    SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+    HEALTHCHECK_DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   })
   .superRefine((env, ctx) => {
-    if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN?.trim()) {
+    const corsOrigin = env.CORS_ORIGIN;
+    if (env.NODE_ENV === 'production' && !(corsOrigin !== undefined && corsOrigin.trim() !== '')) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['CORS_ORIGIN'],
