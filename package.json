@@ -1,7 +1,7 @@
 {
   "name": "d-indexer-backend",
   "version": "1.0.0",
-  "description": "Core API and indexing engine for Folder \u2014 handles off-chain data, IPFS uploads, metadata caching, and Stellar ledger hooks",
+  "description": "Core API and indexing engine for Folder — handles off-chain data, IPFS uploads, metadata caching, and Stellar ledger hooks",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -34,6 +34,7 @@
     "multer": "1.4.5-lts.1",
     "pdfjs-dist": "4.10.38",
     "pg": "8.12.0",
+    "sharp": "^0.35.5",
     "zod": "3.23.8"
   },
   "devDependencies": {

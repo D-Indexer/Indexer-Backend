@@ -14,7 +14,13 @@ export async function run(args: string[]): Promise<number> {
   const [command, arg] = args;
   switch (command) {
     case 'status': {
-      console.log(JSON.stringify(await readState(pool), null, 2));
+      const state = await readState(pool);
+      const ipfs = await pool.query(
+        `SELECT status, COUNT(*)::int AS count FROM ipfs_cid_status GROUP BY status`
+      );
+      const counts: Record<string, number> = {};
+      for (const row of ipfs.rows as Array<{ status: string; count: number }>) counts[row.status] = row.count;
+      console.log(JSON.stringify({ ...state, ipfs }, null, 2));
       return 0;
     }
     case 'reset-cursor': {
@@ -38,6 +44,14 @@ export async function run(args: string[]): Promise<number> {
       const fresh = Number.isFinite(last) && Date.now() - last < getEnv().INDEXER_STALE_AFTER_MS;
       if (!fresh) console.error(`indexer unhealthy: ${JSON.stringify(state)}`);
       return fresh ? 0 : 1;
+    }
+    case 'orphans': {
+      const { rows } = await pool.query(
+        `SELECT id, ledger, ledger_closed_at, tx_hash, topic, data, indexed_at
+           FROM contract_events WHERE status = 'orphaned' ORDER BY ledger, id`
+      );
+      console.log(JSON.stringify(rows, null, 2));
+      return 0;
     }
     default:
       console.error(USAGE);

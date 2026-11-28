@@ -5,6 +5,9 @@ import { sniffContentType } from '../validation/fileType';
 import { validateImageDimensions } from '../validation/imageDimensions';
 import { validatePdf } from '../validation/pdf';
 import { badRequest } from '../http/errors';
+import { createHash } from 'crypto';
+import pool from '../db/client';
+import { sanitizeImage } from '../services/imageSanitize';
 
 export const upload = async (req: Request, res: Response): Promise<void> => {
   const file = req.file;

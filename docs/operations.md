@@ -129,6 +129,9 @@ What to alert on:
 - `/health` `indexer.stale` is `true`, or `indexer.status` is `retention_gap`
 - `Indexer poll failed` logged repeatedly (the `failures` count grows)
 - rows in `contract_events` with `status = 'rejected'`
+- rows in `contract_events` with `status = 'orphaned'` (an UPDATE-type event whose parent row
+  has not arrived yet; `npm run indexer -- orphans` prints them as JSON). They are re-applied
+  automatically once the parent row is indexed.
 
 ## Doctor
 
@@ -428,6 +431,9 @@ running large `DELETE`s.
   pinning-provider interface is a tracked issue.
 - Check a node: `docker compose exec ipfs ipfs id`. List pins:
   `docker compose exec ipfs ipfs pin ls --type=recursive`.
+- Run `npm run ipfs -- reconcile` to immediately check and repair all portfolio/template CIDs.
+- Run `npm run ipfs -- gc --older-than 7d --dry-run` before unpinning unreferenced uploads;
+  omit `--dry-run` to apply the pin removals. CIDs referenced on-chain are never GC'd.
 
 ## Network fault injection (chaos profile)
 
