@@ -1,5 +1,6 @@
 import { Address, xdr } from '@stellar/stellar-sdk';
 import type { RawEvent } from './rpc';
+import { GENERATED_DECODERS } from './generated/events';
 
 /**
  * Decoders for the Folder contract events documented in Indexer-Contract
@@ -38,8 +39,9 @@ function parseScVal(base64: string, what: string): xdr.ScVal {
 
 /** Returns topics[0] as a string, or null when it isn't a Symbol. */
 export function decodeTopic(event: Pick<RawEvent, 'topic'>): string | null {
-  if (event.topic.length === 0) return null;
-  const first = parseScVal(event.topic[0], 'topic[0]');
+  const firstTopic = event.topic[0];
+  if (firstTopic === undefined) return null;
+  const first = parseScVal(firstTopic, 'topic[0]');
   return first.switch().name === 'scvSymbol' ? first.sym().toString() : null;
 }
 
@@ -51,7 +53,7 @@ class Fields {
 
   private at(index: number, name: string): xdr.ScVal {
     const value = this.values[index];
-    if (!value) {
+    if (value === undefined) {
       throw new EventDecodeError(`${this.topic}: missing field ${index} (${name})`);
     }
     return value;
@@ -93,56 +95,26 @@ function dataFields(topic: string, valueXdr: string): Fields {
 }
 
 /**
+ * Hand-written compatibility layer for legacy event shapes that predate the
+ * embedded contract spec (e.g. `tmpl_reg` emitted before `creator` was added).
+ * Applied after the generated decoder so the generated output stays canonical.
+ */
+function applyCompat(decoded: DecodedEvent, f: Fields): DecodedEvent {
+  if (decoded.topic === 'tmpl_reg' && !f.has(2)) {
+    return { ...decoded, creator: null };
+  }
+  return decoded;
+}
+
+/**
  * Decode a raw RPC event. Returns null for topics this indexer doesn't handle
  * (stored as `ignored`); throws EventDecodeError for malformed known topics.
  */
 export function decodeEvent(event: Pick<RawEvent, 'topic' | 'value'>): DecodedEvent | null {
   const topic = decodeTopic(event);
-  switch (topic) {
-    case 'init': {
-      const f = dataFields(topic, event.value);
-      return { topic, admin: f.address(0, 'admin') };
-    }
-    case 'adm_add': {
-      const f = dataFields(topic, event.value);
-      return { topic, admin: f.address(0, 'admin'), newAdmin: f.address(1, 'new_admin') };
-    }
-    case 'adm_rm': {
-      const f = dataFields(topic, event.value);
-      return { topic, admin: f.address(0, 'admin'), target: f.address(1, 'target') };
-    }
-    case 'folder_cl': {
-      const f = dataFields(topic, event.value);
-      return { topic, owner: f.address(0, 'owner'), folderName: f.string(1, 'folder_name') };
-    }
-    case 'tmpl_reg': {
-      const f = dataFields(topic, event.value);
-      return {
-        topic,
-        templateId: f.u32(0, 'template_id'),
-        metadataUri: f.string(1, 'metadata_uri'),
-        // `creator` was appended later; older deployments emit two fields.
-        creator: f.has(2) ? f.address(2, 'creator') : null,
-      };
-    }
-    case 'tmpl_set': {
-      const f = dataFields(topic, event.value);
-      return { topic, owner: f.address(0, 'owner'), templateId: f.u32(1, 'template_id') };
-    }
-    case 'port_mint': {
-      const f = dataFields(topic, event.value);
-      return {
-        topic,
-        owner: f.address(0, 'owner'),
-        templateId: f.u32(1, 'template_id'),
-        ipfsCid: f.string(2, 'ipfs_cid'),
-      };
-    }
-    case 'port_upd': {
-      const f = dataFields(topic, event.value);
-      return { topic, owner: f.address(0, 'owner'), ipfsCid: f.string(1, 'ipfs_cid') };
-    }
-    default:
-      return null;
-  }
+  if (topic === null) return null;
+  const generated = GENERATED_DECODERS[topic];
+  if (!generated) return null;
+  const f = dataFields(topic, event.value);
+  return applyCompat(generated(f) as DecodedEvent, f);
 }

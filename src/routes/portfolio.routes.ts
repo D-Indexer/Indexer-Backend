@@ -1,12 +1,18 @@
 import { Router } from 'express';
-import * as ctrl from '../controllers/portfolio.controller';
+import { createPortfolioController } from '../controllers/portfolio.controller';
+import type { PortfolioService } from '../services/portfolio.service';
 
-const router = Router();
+export interface PortfolioRoutesDeps {
+  portfolioService: PortfolioService;
+}
 
-// Static / more specific routes must be registered before the wildcard
-// `/:address` route to avoid shadowing.
-router.get('/by-cid/:cid', ctrl.getByCid);
-router.get('/:address/versions', ctrl.getVersions);
-router.get('/:address', ctrl.getByAddress);
+export function createPortfolioRoutes(deps: PortfolioRoutesDeps): Router {
+  const router = Router();
+  const ctrl = createPortfolioController({ portfolioService: deps.portfolioService });
 
-export default router;
+  router.get('/:address', ctrl.getByAddress);
+
+  return router;
+}
+
+export default createPortfolioRoutes;

@@ -27,6 +27,8 @@ CREATE INDEX IF NOT EXISTS idx_contract_events_topic_ledger
   ON contract_events (topic, ledger);
 
 -- folder_cl (owner <-> folder_name); template_id tracks tmpl_set / port_mint.
+-- live_until_ledger is the TTL of the folder's persistent storage entry as
+-- reported by getLedgerEntries; NULL means not yet probed.
 CREATE TABLE IF NOT EXISTS folders (
   owner        TEXT PRIMARY KEY,
   name         TEXT UNIQUE NOT NULL,
@@ -35,9 +37,13 @@ CREATE TABLE IF NOT EXISTS folders (
   updated_at   TIMESTAMPTZ NOT NULL
 );
 
--- tmpl_reg. from_ledger/to_ledger form a half-open validity range
--- [from_ledger, to_ledger) for point-in-time reads; to_ledger is NULL while
--- the row is current.
+ALTER TABLE folders ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;
+ALTER TABLE folders ADD COLUMN IF NOT EXISTS ttl_checked_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_folders_live_until
+  ON folders (live_until_ledger) WHERE live_until_ledger IS NOT NULL;
+
+-- tmpl_reg
 CREATE TABLE IF NOT EXISTS templates (
   id             BIGINT PRIMARY KEY,
   metadata_uri   TEXT NOT NULL,
@@ -46,6 +52,12 @@ CREATE TABLE IF NOT EXISTS templates (
   from_ledger    INTEGER,
   to_ledger      INTEGER
 );
+
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS ttl_checked_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_templates_live_until
+  ON templates (live_until_ledger) WHERE live_until_ledger IS NOT NULL;
 
 -- port_mint / port_upd / tmpl_set. No foreign key to folders: the indexer can
 -- start partway through history, so a portfolio may arrive before its folder.
@@ -90,6 +102,12 @@ CREATE TABLE IF NOT EXISTS template_versions (
   PRIMARY KEY (id, version)
 );
 
+ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS live_until_ledger INTEGER;
+ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS ttl_checked_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_portfolios_live_until
+  ON portfolios (live_until_ledger) WHERE live_until_ledger IS NOT NULL;
+
 -- init / adm_add / adm_rm
 CREATE TABLE IF NOT EXISTS admins (
   address   TEXT PRIMARY KEY,
@@ -103,28 +121,32 @@ CREATE TABLE IF NOT EXISTS indexer_state (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Point-in-time lookups: state at ledger L is the row whose validity range
--- contains L, found with a single indexed lookup on (owner, from_ledger).
-CREATE INDEX IF NOT EXISTS idx_folders_owner_from_ledger
-  ON folders (owner, from_ledger);
-CREATE INDEX IF NOT EXISTS idx_portfolios_owner_from_ledger
-  ON portfolios (owner, from_ledger);
-CREATE INDEX IF NOT EXISTS idx_templates_id_from_ledger
-  ON templates (id, from_ledger);
+-- Runtime feature flags for incident response. Read by the API and indexer
+-- with a short cache TTL; changes are audited via updated_by / updated_at /
+-- note. Rows are upserted by the `flags set` CLI command.
+CREATE TABLE IF NOT EXISTS feature_flags (
+  key         TEXT PRIMARY KEY,
+  enabled     BOOLEAN NOT NULL,
+  updated_by  TEXT,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  note        TEXT
+);
 
--- Reverse lookup of portfolios by CID (CIDv0 and CIDv1 of the same content
--- normalise to the same cid_normalized value).
-CREATE INDEX IF NOT EXISTS idx_portfolios_cid_normalized
-  ON portfolios (cid_normalized);
-CREATE INDEX IF NOT EXISTS idx_portfolio_versions_cid_normalized
-  ON portfolio_versions (cid_normalized);
+-- NOTIFY-based cache invalidation: every insert/update/delete on feature_flags
+-- broadcasts the affected key on the `feature_flags_changed` channel so
+-- replicas can drop their cached value immediately instead of waiting for the
+-- TTL to expire. Listeners should treat the payload as a hint and re-read.
+CREATE OR REPLACE FUNCTION notify_feature_flags_changed() RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_notify(
+    'feature_flags_changed',
+    COALESCE(NEW.key, OLD.key)
+  );
+  RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql;
 
--- Keyset pagination over version history.
-CREATE INDEX IF NOT EXISTS idx_portfolio_versions_owner_version
-  ON portfolio_versions (owner, version);
-CREATE INDEX IF NOT EXISTS idx_template_versions_id_version
-  ON template_versions (id, version);
-CREATE INDEX IF NOT EXISTS idx_portfolio_versions_owner_from_ledger
-  ON portfolio_versions (owner, from_ledger);
-CREATE INDEX IF NOT EXISTS idx_template_versions_id_from_ledger
-  ON template_versions (id, from_ledger);
+DROP TRIGGER IF EXISTS trg_feature_flags_changed ON feature_flags;
+CREATE TRIGGER trg_feature_flags_changed
+  AFTER INSERT OR UPDATE OR DELETE ON feature_flags
+  FOR EACH ROW EXECUTE FUNCTION notify_feature_flags_changed();
